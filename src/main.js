@@ -952,29 +952,24 @@ function gameLoop(dt) {
     cameraEntity.setPosition(transform.position.x, transform.position.y, transform.position.z);
     cameraEntity.setEulerAngles(transform.rotation.x, transform.rotation.y, transform.rotation.z);
 
-    // Clean mode: hide all overlays
+    // Clean mode: hide key guide and logo only (OSD is independent)
     const cleanToggle = document.getElementById('clean-mode-toggle');
     const cleanMode = cleanToggle ? cleanToggle.checked : false;
 
-    // HUD
+    // HUD - always visible in flight mode (not affected by Clean Mode)
     const hudEl = document.getElementById('hud');
-    if (cleanMode) {
-        hudEl?.classList.add('hidden');
-    } else {
-        hudEl?.classList.remove('hidden');
-        hud.update(drone, controller);
-    }
+    hudEl?.classList.remove('hidden');
+    hud.update(drone, controller);
 
-    // OSD
+    // FPV OSD - independent of Clean Mode, only controlled by its own toggle
     if (osd) {
         const osdToggle = document.getElementById('osd-toggle');
-        osd.setEnabled(!cleanMode && (osdToggle ? osdToggle.checked : true));
+        osd.setEnabled(osdToggle ? osdToggle.checked : true);
         osd.update(drone, controller);
     }
 
-    // Logo, key guide, gear button
+    // Key guide and Logo - controlled by Clean Mode
     const logo = document.getElementById('game-logo');
-    const gearBtn = document.getElementById('gear-btn');
     const keyGuide = document.getElementById('key-guide');
     if (cleanMode) {
         logo?.classList.remove('visible');
