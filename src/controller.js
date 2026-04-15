@@ -28,7 +28,7 @@ const SETTINGS_IDS = [
     'flight-mode-select',
     'cam-hfov',
     'cam-mount-angle',
-    'ctrl-pos-kp', 'ctrl-pos-ki', 'ctrl-vel-kp', 'ctrl-vel-ki', 'ctrl-alt-kp', 'ctrl-alt-ki',
+    'ctrl-pos-kp', 'ctrl-pos-ki', 'ctrl-pos-kd', 'ctrl-vel-kp', 'ctrl-vel-ki', 'ctrl-vel-kd', 'ctrl-alt-kp', 'ctrl-alt-ki', 'ctrl-alt-kd',
     'phys-mass', 'phys-thrust', 'phys-drag-cd', 'phys-drag-area',
     'phys-drone-size', 'phys-collision-radius',
 ];
@@ -66,6 +66,17 @@ export class Controller {
         this.gamepadIndex = -1;
         this.gamepadName = '';
         this.connected = false;
+
+        // WebHID support for RC transmitters
+        this._hidDevice = null;
+        this._hidAxes = new Array(16).fill(0); // Up to 16 channels, normalized to -1..1
+        this._hidRawAxes = new Array(16).fill(0); // raw 16-bit values before calibration
+        this._hidCalibration = Array.from({length: 16}, () => ({ min: null, center: null, max: null }));
+        this._hidConnected = false;
+        this._hidDeviceName = '';
+        
+        // Option to disable Gamepad API (allows WebHID to claim the device)
+        this._gamepadApiDisabled = false;
 
         // Current input state (merged keyboard + gamepad, range [-1, 1])
         this.axes = { roll: 0, pitch: 0, throttle: 0, yaw: 0, cameraTilt: 0 };
@@ -135,9 +146,71 @@ export class Controller {
             this.boost = true;
         }
 
-        // Gamepad input
+        // Gamepad input (prefer WebHID if connected)
+        const hidAxes = this._getHIDAxes();
         const gp = this._getGamepad();
-        if (gp) {
+        
+        if (hidAxes) {
+            // Use WebHID input
+            this.connected = true;
+            this.gamepadName = this._hidDeviceName + ' (HID)';
+
+            for (const action of ACTIONS) {
+                const m = this.mapping[action];
+                if (m.axisIndex >= 0 && m.axisIndex < hidAxes.length) {
+                    let val = hidAxes[m.axisIndex];
+                    if (m.inverted) val = -val;
+                    if (Math.abs(val) < m.deadzone) val = 0;
+                    // Apply expo curve
+                    const e = m.expo || 0;
+                    if (e > 0) {
+                        val = Math.sign(val) * Math.abs(val) * (1 - e + e * val * val);
+                    }
+                    this.axes[action] += val;
+                    if (action === 'cameraTilt') {
+                        this._cameraTiltAxis = val;
+                    }
+                }
+            }
+
+            // HID button handling (use high channels as buttons)
+            for (const bAction of BUTTON_ACTIONS) {
+                const bm = this.buttonMapping[bAction];
+                if (bm.source === 'axis' && bm.axisIndex >= 0 && bm.axisIndex < hidAxes.length) {
+                    this._gpButtons[bAction] = Math.abs(hidAxes[bm.axisIndex]) > bm.axisThreshold;
+                }
+            }
+
+            // Listen mode for HID: detect axis movement
+            if (this._listenAction && this._listenBaseline) {
+                let maxDelta = 0;
+                let bestAxis = -1;
+                let bestSign = 1;
+                for (let i = 0; i < hidAxes.length; i++) {
+                    const delta = hidAxes[i] - this._listenBaseline[i];
+                    if (Math.abs(delta) > Math.abs(maxDelta)) {
+                        maxDelta = delta;
+                        bestAxis = i;
+                        bestSign = Math.sign(delta);
+                    }
+                }
+                if (Math.abs(maxDelta) > 0.3) { // Lower threshold for HID (more sensitive)
+                    if (this.mapping[this._listenAction]) {
+                        this.mapping[this._listenAction].axisIndex = bestAxis;
+                        this.mapping[this._listenAction].inverted = bestSign < 0;
+                    }
+                    const action = this._listenAction;
+                    this._listenAction = null;
+                    this._listenBaseline = null;
+                    if (this._listenCallback) this._listenCallback(action, bestAxis, bestSign < 0);
+                    this._saveConfig();
+                    this._buildSettingsUI();
+                }
+            }
+
+            // Update HID display
+            this._updateHIDDisplay(hidAxes);
+        } else if (gp) {
             this.connected = true;
             this.gamepadName = gp.id;
 
@@ -269,6 +342,13 @@ export class Controller {
     }
 
     startListening(action, callback) {
+        // Support both Gamepad API and WebHID
+        if (this._hidConnected) {
+            this._listenAction = action;
+            this._listenCallback = callback;
+            this._listenBaseline = [...this._hidAxes];
+            return true;
+        }
         const gp = this._getGamepad();
         if (!gp) return false;
         this._listenAction = action;
@@ -307,6 +387,7 @@ export class Controller {
         return {
             mapping: JSON.parse(JSON.stringify(this.mapping)),
             buttonMapping: JSON.parse(JSON.stringify(this.buttonMapping)),
+            hidCalibration: JSON.parse(JSON.stringify(this._hidCalibration)),
             settings,
         };
     }
@@ -314,6 +395,7 @@ export class Controller {
     loadConfig(config) {
         if (config.mapping) this.mapping = config.mapping;
         if (config.buttonMapping) this.buttonMapping = config.buttonMapping;
+        if (config.hidCalibration) this._hidCalibration = config.hidCalibration;
         if (config.settings) this._restoreSettings(config.settings);
         this._saveConfig();
         this._buildSettingsUI();
@@ -338,6 +420,9 @@ export class Controller {
     // ---- Private methods ----
 
     _getGamepad() {
+        // If Gamepad API is disabled, return null to allow WebHID to claim device
+        if (this._gamepadApiDisabled) return null;
+        
         const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
         for (const gp of gamepads) {
             if (gp && gp.connected) {
@@ -388,6 +473,273 @@ export class Controller {
             }
             this._buildSettingsUI();
         });
+    }
+
+    // ---- WebHID Support for RC Transmitters ----
+
+    async connectHID() {
+        if (!navigator.hid) {
+            alert('WebHID is not supported in this browser. Please use Chrome or Edge.');
+            return false;
+        }
+
+        try {
+            // Request HID device - filter for common RC transmitter vendor IDs
+            const devices = await navigator.hid.requestDevice({
+                filters: [
+                    // RadioMaster transmitters (may vary by model)
+                    { vendorId: 0x1209 }, // Generic HID
+                    { vendorId: 0x0483 }, // STMicroelectronics (common in RC transmitters)
+                    { vendorId: 0x239A }, // Adafruit
+                    { vendorId: 0x2341 }, // Arduino
+                ],
+            });
+
+            if (devices.length === 0) {
+                // Try without filter if no device found
+                const allDevices = await navigator.hid.requestDevice({ filters: [] });
+                if (allDevices.length === 0) {
+                    console.log('No HID device selected');
+                    return false;
+                }
+                return this._openHIDDevice(allDevices[0]);
+            }
+
+            return this._openHIDDevice(devices[0]);
+        } catch (error) {
+            console.error('HID connection error:', error);
+            return false;
+        }
+    }
+
+    async _openHIDDevice(device) {
+        try {
+            if (!device.opened) {
+                await device.open();
+            }
+
+            this._hidDevice = device;
+            this._hidConnected = true;
+            this._hidDeviceName = device.productName || 'HID Device';
+
+            console.log('HID Device connected:', this._hidDeviceName);
+            console.log('  Vendor ID:', device.vendorId.toString(16));
+            console.log('  Product ID:', device.productId.toString(16));
+            console.log('  Collections:', device.collections);
+
+            // Set up input report handler
+            device.addEventListener('inputreport', (event) => {
+                this._handleHIDInputReport(event);
+            });
+
+            this._buildSettingsUI();
+            return true;
+        } catch (error) {
+            console.error('Failed to open HID device:', error);
+            return false;
+        }
+    }
+
+    _handleHIDInputReport(event) {
+        const { data, reportId } = event;
+        const bytes = new Uint8Array(data.buffer);
+
+        // Debug: log reports periodically to understand format
+        if (!this._hidReportCount) this._hidReportCount = 0;
+        this._hidReportCount++;
+        if (this._hidReportCount % 100 === 1) { // Every 100 reports (~1-2 seconds)
+            console.log('=== HID Report ===');
+            console.log('Report ID:', reportId, 'Length:', bytes.length, 'bytes');
+            console.log('Raw hex:', Array.from(bytes.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+            
+            // Try to interpret as 16-bit little-endian values
+            const vals16 = [];
+            for (let i = 0; i < Math.min(16, bytes.length / 2); i++) {
+                vals16.push(bytes[i * 2] | (bytes[i * 2 + 1] << 8));
+            }
+            console.log('As 16-bit LE:', vals16.join(', '));
+            
+            // Try to interpret as 16-bit big-endian values
+            const vals16BE = [];
+            for (let i = 0; i < Math.min(16, bytes.length / 2); i++) {
+                vals16BE.push((bytes[i * 2] << 8) | bytes[i * 2 + 1]);
+            }
+            console.log('As 16-bit BE:', vals16BE.join(', '));
+            
+            console.log('Parsed axes:', this._hidAxes.slice(0, 8).map(v => v.toFixed(4)).join(', '));
+        }
+
+        // Parse the HID report - try different formats
+        this._parseHIDReport(bytes);
+    }
+
+    _parseHIDReport(bytes) {
+        const channelCount = Math.min(16, Math.floor(bytes.length / 2));
+        for (let i = 0; i < channelCount; i++) {
+            const raw = bytes[i * 2] | (bytes[i * 2 + 1] << 8);
+            this._hidRawAxes[i] = raw;
+            this._hidAxes[i] = this._applyCalibration(i, raw);
+        }
+    }
+
+    _applyCalibration(i, raw) {
+        const cal = this._hidCalibration[i];
+        if (cal.min === null || cal.max === null || cal.center === null) {
+            // No calibration: assume 0-2047 range, center 1024
+            return Math.max(-1, Math.min(1, (raw - 1024) / 1024));
+        }
+        const center = cal.center;
+        const span = raw >= center
+            ? Math.max(1, cal.max - center)
+            : Math.max(1, center - cal.min);
+        return Math.max(-1, Math.min(1, (raw - center) / span));
+    }
+
+    _hasCalibration() {
+        return this._hidCalibration.some(c => c.min !== null);
+    }
+
+    startCalibration() {
+        if (!this._hidConnected) {
+            alert('Connect a HID device first.');
+            return;
+        }
+
+        const calMin = new Array(16).fill(null);
+        const calMax = new Array(16).fill(null);
+
+        // ── overlay ──
+        const overlay = document.createElement('div');
+        Object.assign(overlay.style, {
+            position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
+            background: 'rgba(0,0,0,0.8)', zIndex: 20000,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontFamily: "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif",
+        });
+
+        const dialog = document.createElement('div');
+        Object.assign(dialog.style, {
+            background: 'rgba(14,18,28,0.98)', border: '1px solid #f80',
+            borderRadius: '12px', padding: '24px', width: '460px',
+            color: '#ddd', userSelect: 'none',
+        });
+
+        const titleEl = document.createElement('h3');
+        Object.assign(titleEl.style, { color: '#f80', margin: '0 0 6px', fontSize: '1.1em' });
+        titleEl.textContent = '● Recording Calibration…';
+
+        const instrEl = document.createElement('p');
+        Object.assign(instrEl.style, { fontSize: '13px', color: '#aaa', margin: '0 0 14px', lineHeight: '1.5' });
+        instrEl.innerHTML = 'Move <b>all sticks and dials</b> to their full extremes in every direction, then center them and click <b>Stop & Save</b>.';
+
+        const barsEl = document.createElement('div');
+        Object.assign(barsEl.style, { fontFamily: 'monospace', fontSize: '11px', marginBottom: '14px' });
+
+        const btnRow = document.createElement('div');
+        Object.assign(btnRow.style, { display: 'flex', gap: '8px', justifyContent: 'flex-end' });
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = 'Cancel';
+        Object.assign(cancelBtn.style, {
+            padding: '7px 18px', background: 'transparent', border: '1px solid #555',
+            borderRadius: '6px', color: '#888', cursor: 'pointer', fontSize: '13px',
+        });
+
+        const saveBtn = document.createElement('button');
+        saveBtn.textContent = 'Stop & Save';
+        Object.assign(saveBtn.style, {
+            padding: '7px 22px', background: '#f80', border: 'none',
+            borderRadius: '6px', color: '#000', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold',
+        });
+
+        btnRow.appendChild(cancelBtn);
+        btnRow.appendChild(saveBtn);
+        dialog.appendChild(titleEl);
+        dialog.appendChild(instrEl);
+        dialog.appendChild(barsEl);
+        dialog.appendChild(btnRow);
+        overlay.appendChild(dialog);
+        document.body.appendChild(overlay);
+
+        let rafId = null;
+
+        const tick = () => {
+            for (let i = 0; i < 16; i++) {
+                const raw = this._hidRawAxes[i];
+                if (calMin[i] === null || raw < calMin[i]) calMin[i] = raw;
+                if (calMax[i] === null || raw > calMax[i]) calMax[i] = raw;
+            }
+
+            let html = '';
+            for (let i = 0; i < 16; i++) {
+                const raw = this._hidRawAxes[i];
+                const mn = calMin[i] ?? raw;
+                const mx = calMax[i] ?? raw;
+                const range = Math.max(1, mx - mn);
+                const pct = Math.max(0, Math.min(100, ((raw - mn) / range) * 100));
+                const active = (mx - mn) > 10;
+                const barColor = active ? '#f80' : '#334';
+                html += `<div style="display:flex;align-items:center;gap:4px;margin-bottom:2px;">` +
+                    `<span style="width:32px;text-align:right;color:${active ? '#aaa' : '#445'};">CH${i+1}</span>` +
+                    `<div style="flex:1;height:8px;background:#1a2030;border-radius:2px;overflow:hidden;">` +
+                    `<div style="width:${pct}%;height:100%;background:${barColor};border-radius:2px;"></div></div>` +
+                    `<span style="width:90px;text-align:right;color:${active ? '#888' : '#334'};font-size:10px;">${mn}…${mx}</span>` +
+                    `</div>`;
+            }
+            barsEl.innerHTML = html;
+            rafId = requestAnimationFrame(tick);
+        };
+        rafId = requestAnimationFrame(tick);
+
+        saveBtn.addEventListener('click', () => {
+            cancelAnimationFrame(rafId);
+            // Validate: at least one axis with meaningful range
+            const valid = calMin.filter((mn, i) => mn !== null && calMax[i] - mn > 10).length;
+            if (valid === 0) {
+                instrEl.innerHTML = '<span style="color:#f44">⚠ No movement detected — move sticks first, then click Stop & Save.</span>';
+                rafId = requestAnimationFrame(tick);
+                return;
+            }
+            // Center = midpoint of recorded range (works for both self-centering sticks and throttle)
+            for (let i = 0; i < 16; i++) {
+                const mn = calMin[i]  ?? 0;
+                const mx = calMax[i]  ?? 2047;
+                this._hidCalibration[i] = {
+                    min:    mn,
+                    max:    mx,
+                    center: Math.round((mn + mx) / 2),
+                };
+            }
+            this._saveConfig();
+            this._buildSettingsUI();
+            document.body.removeChild(overlay);
+        });
+
+        cancelBtn.addEventListener('click', () => {
+            cancelAnimationFrame(rafId);
+            document.body.removeChild(overlay);
+        });
+    }
+
+    clearCalibration() {
+        this._hidCalibration = Array.from({length: 16}, () => ({ min: null, center: null, max: null }));
+        this._saveConfig();
+        this._buildSettingsUI();
+    }
+
+    disconnectHID() {
+        if (this._hidDevice) {
+            this._hidDevice.close();
+            this._hidDevice = null;
+            this._hidConnected = false;
+            this._hidDeviceName = '';
+            this._hidAxes.fill(0);
+            this._buildSettingsUI();
+        }
+    }
+
+    _getHIDAxes() {
+        return this._hidConnected ? this._hidAxes : null;
     }
 
     isSettingsOpen() {
@@ -668,11 +1020,76 @@ export class Controller {
             }
         }
 
-        // Gamepad status
+        // Gamepad status and WebHID button
         const statusEl = document.getElementById('gamepad-status');
         if (statusEl) {
-            statusEl.textContent = this.connected ? `Connected: ${this.gamepadName}` : 'No gamepad detected';
-            statusEl.style.color = this.connected ? '#4272F5' : '#888';
+            let statusHtml = '';
+            
+            // Disable Gamepad API checkbox
+            const disabledChecked = this._gamepadApiDisabled ? 'checked' : '';
+            statusHtml += `<div style="margin-bottom:8px;">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                    <input type="checkbox" id="disable-gamepad-api" ${disabledChecked}>
+                    <span style="color:#fa0;">Disable Gamepad API (for WebHID)</span>
+                </label>
+            </div>`;
+            
+            if (this._hidConnected) {
+                statusHtml += `<span style="color:#4f4;">HID Connected: ${this._hidDeviceName}</span>` +
+                    `<button id="disconnect-hid-btn" style="margin-left:12px;padding:4px 12px;background:#533;border:1px solid #f44;color:#f44;border-radius:4px;cursor:pointer;font-size:12px;">Disconnect</button>`;
+            } else if (this.connected && !this._gamepadApiDisabled) {
+                statusHtml += `<span style="color:#4af;">Gamepad: ${this.gamepadName}</span>`;
+            } else if (this._gamepadApiDisabled) {
+                statusHtml += `<span style="color:#fa0;">Gamepad API disabled - use WebHID</span>`;
+            } else {
+                statusHtml += `<span style="color:#888;">No gamepad detected</span>`;
+            }
+            
+            // Always show Connect HID button if not HID connected
+            if (!this._hidConnected) {
+                statusHtml += `<button id="connect-hid-btn" style="margin-left:12px;padding:4px 12px;background:#335;border:1px solid #4f4;color:#4f4;border-radius:4px;cursor:pointer;font-size:12px;">Connect HID</button>`;
+            }
+
+            // Calibration status + buttons (only when HID connected)
+            if (this._hidConnected) {
+                const calStatus = this._hasCalibration()
+                    ? `<span style="color:#4f4;font-size:12px;">✓ Calibrated</span>`
+                    : `<span style="color:#fa0;font-size:12px;">⚠ Not calibrated (using defaults)</span>`;
+                statusHtml += `<div style="margin-top:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">` +
+                    calStatus +
+                    `<button id="calibrate-hid-btn" style="padding:4px 12px;background:#223;border:1px solid #4272F5;color:#4272F5;border-radius:4px;cursor:pointer;font-size:12px;">Calibrate…</button>` +
+                    (this._hasCalibration() ? `<button id="clear-cal-btn" style="padding:4px 10px;background:transparent;border:1px solid #555;color:#888;border-radius:4px;cursor:pointer;font-size:11px;">Clear Cal</button>` : '') +
+                    `</div>`;
+            }
+            
+            statusEl.innerHTML = statusHtml;
+            
+            // Bind disable checkbox
+            const disableCheckbox = document.getElementById('disable-gamepad-api');
+            if (disableCheckbox) {
+                disableCheckbox.addEventListener('change', (e) => {
+                    this._gamepadApiDisabled = e.target.checked;
+                    this._buildSettingsUI();
+                });
+            }
+            
+            // Bind HID buttons
+            const connectBtn = document.getElementById('connect-hid-btn');
+            if (connectBtn) {
+                connectBtn.addEventListener('click', () => this.connectHID());
+            }
+            const disconnectBtn = document.getElementById('disconnect-hid-btn');
+            if (disconnectBtn) {
+                disconnectBtn.addEventListener('click', () => this.disconnectHID());
+            }
+            const calibrateBtn = document.getElementById('calibrate-hid-btn');
+            if (calibrateBtn) {
+                calibrateBtn.addEventListener('click', () => this.startCalibration());
+            }
+            const clearCalBtn = document.getElementById('clear-cal-btn');
+            if (clearCalBtn) {
+                clearCalBtn.addEventListener('click', () => this.clearCalibration());
+            }
         }
 
         // Settings panel buttons
@@ -687,7 +1104,7 @@ export class Controller {
         const RATE_EXPO_AXES = ['roll', 'pitch', 'throttle', 'yaw'];
         const RATE_AXES = ['roll', 'pitch', 'yaw']; // throttle has no rate
         const AXIS_COLORS = {
-            roll: '#4272F5', pitch: '#f44', throttle: '#4f4', yaw: '#fa4'
+            roll: '#4af', pitch: '#f44', throttle: '#4f4', yaw: '#fa4'
         };
 
         for (const action of RATE_EXPO_AXES) {
@@ -799,7 +1216,7 @@ export class Controller {
 
     _drawExpoCurve(action) {
         const AXIS_COLORS = {
-            roll: '#4272F5', pitch: '#f44', throttle: '#4f4', yaw: '#fa4'
+            roll: '#4af', pitch: '#f44', throttle: '#4f4', yaw: '#fa4'
         };
         const canvas = document.getElementById(`expo-curve-${action}`);
         if (!canvas) return;
@@ -813,7 +1230,7 @@ export class Controller {
         ctx.clearRect(0, 0, W, H);
 
         // Title
-        ctx.fillStyle = AXIS_COLORS[action] || '#4272F5';
+        ctx.fillStyle = AXIS_COLORS[action] || '#4af';
         ctx.font = 'bold 11px sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText(action.charAt(0).toUpperCase() + action.slice(1), W / 2, 14);
@@ -854,7 +1271,7 @@ export class Controller {
         const m = this.mapping[action];
         const expo = m.expo || 0;
 
-        ctx.strokeStyle = AXIS_COLORS[action] || '#4272F5';
+        ctx.strokeStyle = AXIS_COLORS[action] || '#4af';
         ctx.lineWidth = 2;
         ctx.beginPath();
         for (let px = 0; px <= plotW; px++) {
@@ -882,7 +1299,7 @@ export class Controller {
                 `<span style="width:24px;text-align:right;color:#aaa;">A${i}</span>` +
                 `<div style="flex:1;height:10px;background:#223;border-radius:3px;overflow:hidden;position:relative;">` +
                 `<div style="position:absolute;left:50%;top:0;width:1px;height:100%;background:#444;"></div>` +
-                `<div style="width:${pct}%;height:100%;background:#4272F5;border-radius:3px;transition:width 0.05s;"></div>` +
+                `<div style="width:${pct}%;height:100%;background:#4af;border-radius:3px;transition:width 0.05s;"></div>` +
                 `</div>` +
                 `<span style="width:40px;text-align:right;font-size:10px;">${val.toFixed(2)}</span>` +
                 `</div>`;
@@ -892,13 +1309,39 @@ export class Controller {
         for (let i = 0; i < numBtns; i++) {
             const val = gp.buttons[i].value;
             const pct = val * 100;
-            const color = gp.buttons[i].pressed ? '#4272F5' : '#335';
+            const color = gp.buttons[i].pressed ? '#4af' : '#335';
             html += `<div style="display:flex;align-items:center;gap:4px;margin-bottom:2px;">` +
                 `<span style="width:24px;text-align:right;color:#aaa;">B${i}</span>` +
                 `<div style="flex:1;height:10px;background:#223;border-radius:3px;overflow:hidden;">` +
                 `<div style="width:${pct}%;height:100%;background:${color};border-radius:3px;transition:width 0.05s;"></div>` +
                 `</div>` +
                 `<span style="width:40px;text-align:right;font-size:10px;">${val.toFixed(2)}</span>` +
+                `</div>`;
+        }
+        el.innerHTML = html;
+    }
+
+    _updateHIDDisplay(hidAxes) {
+        const el = document.getElementById('gamepad-axes-display');
+        if (!el) return;
+
+        let html = '<div style="color:#4f4;margin-bottom:8px;font-size:12px;">WebHID Mode - Full Precision</div>';
+        // Show all HID channels with high precision
+        const numChannels = Math.min(hidAxes.length, 8);
+        for (let i = 0; i < numChannels; i++) {
+            const val = hidAxes[i];
+            // Calculate bar position: center is 50%, val -1 to 1 maps to 0% to 100%
+            const pct = ((val + 1) / 2) * 100;
+            // Color based on magnitude
+            const mag = Math.abs(val);
+            const barColor = mag > 0.01 ? '#4f4' : '#335';
+            html += `<div style="display:flex;align-items:center;gap:4px;margin-bottom:3px;">` +
+                `<span style="width:30px;text-align:right;color:#aaa;">CH${i + 1}</span>` +
+                `<div style="flex:1;height:12px;background:#223;border-radius:3px;overflow:hidden;position:relative;">` +
+                `<div style="position:absolute;left:50%;top:0;width:1px;height:100%;background:#555;"></div>` +
+                `<div style="position:absolute;left:${Math.min(pct, 50)}%;width:${Math.abs(pct - 50)}%;height:100%;background:${barColor};"></div>` +
+                `</div>` +
+                `<span style="width:70px;text-align:right;font-size:11px;font-family:monospace;color:${mag > 0.01 ? '#4f4' : '#666'};">${val >= 0 ? '+' : ''}${val.toFixed(4)}</span>` +
                 `</div>`;
         }
         el.innerHTML = html;
@@ -977,6 +1420,9 @@ export class Controller {
         this._bindPhysicsSlider('ctrl-vel-ki', 'ctrl-vel-ki-val');
         this._bindPhysicsSlider('ctrl-alt-kp', 'ctrl-alt-kp-val');
         this._bindPhysicsSlider('ctrl-alt-ki', 'ctrl-alt-ki-val');
+        this._bindPhysicsSlider('ctrl-pos-kd', 'ctrl-pos-kd-val');
+        this._bindPhysicsSlider('ctrl-vel-kd', 'ctrl-vel-kd-val');
+        this._bindPhysicsSlider('ctrl-alt-kd', 'ctrl-alt-kd-val');
     }
 
     _bindSliderNum(sliderId, numId) {
@@ -1036,6 +1482,9 @@ export class Controller {
                             delete this.buttonMapping[bAction].inverted; // legacy cleanup
                         }
                     }
+                }
+                if (config.hidCalibration) {
+                    this._hidCalibration = config.hidCalibration;
                 }
                 if (config.settings) {
                     this._restoreSettings(config.settings);

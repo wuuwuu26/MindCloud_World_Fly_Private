@@ -84,13 +84,16 @@ export class Drone {
         this.droneMaxVSpeed  = 3.0;
         this.droneMaxSpeed   = 5.0;
 
-        // Cascaded PI gains
+        // Cascaded PID gains
         this.dronePosKp  = 2.0;
         this.dronePosKi  = 0.3;
+        this.dronePosKd  = 0.1;
         this.droneVelKp  = 3.0;
         this.droneVelKi  = 1.0;
+        this.droneVelKd  = 0.05;
         this.droneAltKp  = 4.0;
         this.droneAltKi  = 2.0;
+        this.droneAltKd  = 0.1;
 
         // Position-hold setpoints
         this._targetX = 0; this._targetY = 2; this._targetZ = 0;
@@ -104,6 +107,12 @@ export class Drone {
         this._posIntX = 0; this._posIntY = 0; this._posIntZ = 0;
         // Integral accumulators (velocity loop)
         this._velIntX = 0; this._velIntY = 0; this._velIntZ = 0;
+        // Previous errors for derivative term
+        this._prevPosErrX = 0; this._prevPosErrY = 0; this._prevPosErrZ = 0;
+        this._prevVelErrX = 0; this._prevVelErrY = 0; this._prevVelErrZ = 0;
+        // Filtered derivative values (low-pass to suppress jitter)
+        this._filtPosDerrX = 0; this._filtPosDerrY = 0; this._filtPosDerrZ = 0;
+        this._filtVelDerrX = 0; this._filtVelDerrY = 0; this._filtVelDerrZ = 0;
         // Anti-windup limits
         this._posIntMax = 5.0;
         this._velIntMax = 15.0;
@@ -150,6 +159,10 @@ export class Drone {
         this._targetYaw = 0;
         this._posIntX = 0; this._posIntY = 0; this._posIntZ = 0;
         this._velIntX = 0; this._velIntY = 0; this._velIntZ = 0;
+        this._prevPosErrX = 0; this._prevPosErrY = 0; this._prevPosErrZ = 0;
+        this._prevVelErrX = 0; this._prevVelErrY = 0; this._prevVelErrZ = 0;
+        this._filtPosDerrX = 0; this._filtPosDerrY = 0; this._filtPosDerrZ = 0;
+        this._filtVelDerrX = 0; this._filtVelDerrY = 0; this._filtVelDerrZ = 0;
         this._smoothTargetPitch = 0;
         this._smoothTargetRoll  = 0;
     }
@@ -179,12 +192,18 @@ export class Drone {
         if (modeEl) this.flightMode = modeEl.value;
         const mountAngle = v('cam-mount-angle');
         if (mountAngle !== null) this.cameraMountAngle = mountAngle;
+        const posKd = v('ctrl-pos-kd');
+        const velKd = v('ctrl-vel-kd');
+        const altKd = v('ctrl-alt-kd');
         if (posKp !== null) this.dronePosKp = posKp;
         if (posKi !== null) this.dronePosKi = posKi;
+        if (posKd !== null) this.dronePosKd = posKd;
         if (velKp !== null) this.droneVelKp = velKp;
         if (velKi !== null) this.droneVelKi = velKi;
+        if (velKd !== null) this.droneVelKd = velKd;
         if (altKp !== null) this.droneAltKp = altKp;
         if (altKi !== null) this.droneAltKi = altKi;
+        if (altKd !== null) this.droneAltKd = altKd;
     }
 
     update(dt, input, octree) {
@@ -411,7 +430,7 @@ export class Drone {
         const boost = input.boost ? 1.5 : 1.0;
         const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-        // ---- 1. Update target setpoints from stick input ----
+        // ---- 1. Determine stick state and compute desired velocity ----
         // Get body-frame forward (-Z) and right (+X) in world XZ plane
         _mat4.setTRS(pc.Vec3.ZERO, this.orientation, pc.Vec3.ONE);
         _mat4.getZ(_v3);
@@ -419,52 +438,77 @@ export class Drone {
         _mat4.getX(_v3);
         const rightX = _v3.x, rightZ = _v3.z;
 
-        // Rate multipliers for roll/pitch/yaw (not throttle)
         const rates = input.rates || { roll: 1, pitch: 1, yaw: 1 };
+        const maxSpd = this.droneMaxSpeed * boost;
 
-        // Pitch stick → forward velocity command, Roll stick → right velocity command
-        const cmdFwd   = -input.pitch * this.droneMaxSpeed * rates.pitch * boost; // pitch=-1 (up) → forward
-        const cmdRight = input.roll * this.droneMaxSpeed * rates.roll * boost;   // roll=+1 (right) → right
+        const horizActive = Math.abs(input.pitch) > 0.05 || Math.abs(input.roll) > 0.05;
+        const vertActive  = Math.abs(input.throttle) > 0.05;
 
-        // Convert body-frame velocity command to world-frame and integrate into target position
-        const cmdWorldX = cmdFwd * fwdX + cmdRight * rightX;
-        const cmdWorldZ = cmdFwd * fwdZ + cmdRight * rightZ;
-        this._targetX += cmdWorldX * dt;
-        this._targetZ += cmdWorldZ * dt;
-
-        // Throttle → target altitude (no rate scaling)
-        this._targetY += input.throttle * this.droneMaxVSpeed * boost * dt;
-
-        // Yaw stick → target yaw, scaled by yaw rate
+        // Yaw stick → target yaw (always integrates)
         this._targetYaw += input.yaw * this.maxYawRate * rates.yaw * boost * dt;
 
-        // When sticks active, clear position integrals to prevent windup
-        if (Math.abs(input.pitch) > 0.05 || Math.abs(input.roll) > 0.05) {
+        let vDesX, vDesY, vDesZ;
+
+        // ---- Horizontal: stick = target velocity, centered = position hold ----
+        if (horizActive) {
+            // Stick directly commands target velocity (body-frame → world-frame)
+            const cmdFwd   = -input.pitch * maxSpd * rates.pitch;
+            const cmdRight =  input.roll  * maxSpd * rates.roll;
+            vDesX = cmdFwd * fwdX + cmdRight * rightX;
+            vDesZ = cmdFwd * fwdZ + cmdRight * rightZ;
+
+            // Latch current position as hold target for when stick is released
+            this._targetX = this.x;
+            this._targetZ = this.z;
+            // Clear position-loop state (not needed while stick is active)
             this._posIntX = 0; this._posIntZ = 0;
-            this._velIntX = 0; this._velIntZ = 0;
+            this._filtPosDerrX = 0; this._filtPosDerrZ = 0;
+            this._prevPosErrX = 0; this._prevPosErrZ = 0;
+        } else {
+            // Sticks centered → position hold via PID
+            const posErrX = this._targetX - this.x;
+            const posErrZ = this._targetZ - this.z;
+
+            const piMax = this._posIntMax;
+            this._posIntX = clamp(this._posIntX + posErrX * dt, -piMax, piMax);
+            this._posIntZ = clamp(this._posIntZ + posErrZ * dt, -piMax, piMax);
+
+            const dAlpha = 1 - Math.exp(-20 * dt);
+            const rawPosDerrX = dt > 0 ? (posErrX - this._prevPosErrX) / dt : 0;
+            const rawPosDerrZ = dt > 0 ? (posErrZ - this._prevPosErrZ) / dt : 0;
+            this._filtPosDerrX += (rawPosDerrX - this._filtPosDerrX) * dAlpha;
+            this._filtPosDerrZ += (rawPosDerrZ - this._filtPosDerrZ) * dAlpha;
+            this._prevPosErrX = posErrX;
+            this._prevPosErrZ = posErrZ;
+
+            vDesX = this.dronePosKp * posErrX + this.dronePosKi * this._posIntX + this.dronePosKd * this._filtPosDerrX;
+            vDesZ = this.dronePosKp * posErrZ + this.dronePosKi * this._posIntZ + this.dronePosKd * this._filtPosDerrZ;
         }
-        if (Math.abs(input.throttle) > 0.05) {
-            this._posIntY = 0; this._velIntY = 0;
+
+        // ---- Vertical: stick = target vertical speed, centered = altitude hold ----
+        if (vertActive) {
+            vDesY = input.throttle * this.droneMaxVSpeed * boost;
+
+            // Latch current altitude as hold target
+            this._targetY = this.y;
+            this._posIntY = 0;
+            this._filtPosDerrY = 0;
+            this._prevPosErrY = 0;
+        } else {
+            const posErrY = this._targetY - this.y;
+
+            const piMax = this._posIntMax;
+            this._posIntY = clamp(this._posIntY + posErrY * dt, -piMax, piMax);
+
+            const dAlpha = 1 - Math.exp(-20 * dt);
+            const rawPosDerrY = dt > 0 ? (posErrY - this._prevPosErrY) / dt : 0;
+            this._filtPosDerrY += (rawPosDerrY - this._filtPosDerrY) * dAlpha;
+            this._prevPosErrY = posErrY;
+
+            vDesY = this.droneAltKp * posErrY + this.droneAltKi * this._posIntY + this.droneAltKd * this._filtPosDerrY;
         }
 
-        // ---- 2. Outer loop: Position PI → desired velocity (world frame) ----
-        const posErrX = this._targetX - this.x;
-        const posErrY = this._targetY - this.y;
-        const posErrZ = this._targetZ - this.z;
-
-        // Accumulate position integral (with anti-windup)
-        const piMax = this._posIntMax;
-        this._posIntX = clamp(this._posIntX + posErrX * dt, -piMax, piMax);
-        this._posIntY = clamp(this._posIntY + posErrY * dt, -piMax, piMax);
-        this._posIntZ = clamp(this._posIntZ + posErrZ * dt, -piMax, piMax);
-
-        // Desired velocity = Kp * posErr + Ki * posIntegral
-        const maxSpd = this.droneMaxSpeed * boost;
-        let vDesX = this.dronePosKp * posErrX + this.dronePosKi * this._posIntX;
-        let vDesY = this.droneAltKp * posErrY + this.droneAltKi * this._posIntY;
-        let vDesZ = this.dronePosKp * posErrZ + this.dronePosKi * this._posIntZ;
-
-        // Clamp desired horizontal velocity
+        // Clamp desired velocity
         const vDesH = Math.sqrt(vDesX * vDesX + vDesZ * vDesZ);
         if (vDesH > maxSpd) {
             const s = maxSpd / vDesH;
@@ -472,7 +516,7 @@ export class Drone {
         }
         vDesY = clamp(vDesY, -this.droneMaxVSpeed * boost, this.droneMaxVSpeed * boost);
 
-        // ---- 3. Inner loop: Velocity PI → desired tilt angles ----
+        // ---- 2. Inner loop: Velocity PID → desired tilt angles ----
         const maxAngle = this.droneMaxAngle;
         let velErrX = vDesX - this.vx;
         const velErrY = vDesY - this.vy;
@@ -490,12 +534,23 @@ export class Drone {
         this._velIntY = clamp(this._velIntY + velErrY * dt, -viMax, viMax);
         this._velIntZ = clamp(this._velIntZ + velErrZ * dt, -viMax, viMax);
 
+        // Derivative of velocity error (low-pass filtered to suppress jitter)
+        const vdAlpha = 1 - Math.exp(-15 * dt);
+        const rawVelDerrX = dt > 0 ? (velErrX - this._prevVelErrX) / dt : 0;
+        const rawVelDerrY = dt > 0 ? (velErrY - this._prevVelErrY) / dt : 0;
+        const rawVelDerrZ = dt > 0 ? (velErrZ - this._prevVelErrZ) / dt : 0;
+        this._filtVelDerrX += (rawVelDerrX - this._filtVelDerrX) * vdAlpha;
+        this._filtVelDerrY += (rawVelDerrY - this._filtVelDerrY) * vdAlpha;
+        this._filtVelDerrZ += (rawVelDerrZ - this._filtVelDerrZ) * vdAlpha;
+        this._prevVelErrX = velErrX;
+        this._prevVelErrY = velErrY;
+        this._prevVelErrZ = velErrZ;
+
         // Desired world-frame horizontal acceleration
-        const aDesX = this.droneVelKp * velErrX + this.droneVelKi * this._velIntX;
-        const aDesZ = this.droneVelKp * velErrZ + this.droneVelKi * this._velIntZ;
+        const aDesX = this.droneVelKp * velErrX + this.droneVelKi * this._velIntX + this.droneVelKd * this._filtVelDerrX;
+        const aDesZ = this.droneVelKp * velErrZ + this.droneVelKi * this._velIntZ + this.droneVelKd * this._filtVelDerrZ;
 
         // Project desired acceleration onto body forward/right to get tilt angles
-        // Tilt angle ≈ atan(a_horizontal / g), small angle: angle ≈ a/g in radians
         const aFwd   = aDesX * fwdX + aDesZ * fwdZ;
         const aRight = aDesX * rightX + aDesZ * rightZ;
 
@@ -508,7 +563,7 @@ export class Drone {
         this._smoothTargetPitch += (targetPitch - this._smoothTargetPitch) * smoothFactor;
         this._smoothTargetRoll  += (targetRoll  - this._smoothTargetRoll)  * smoothFactor;
 
-        // ---- 4. Attitude P-controller: tilt error → body rotation ----
+        // ---- 3. Attitude P-controller: tilt error → body rotation ----
         const dec = this._decomposeOrientation();
         const pitchErr = this._smoothTargetPitch - dec.bodyPitchDeg;
         const rollErr  = this._smoothTargetRoll  - dec.bodyRollDeg;
@@ -523,19 +578,16 @@ export class Drone {
         this.pitchRate = pitchErr * 5;
         this.rollRate  = rollErr  * 5;
 
-        // ---- 5. Yaw hold ----
+        // ---- 4. Yaw hold ----
         const yawErr = this._targetYaw - dec.yawDeg;
-        // Normalize yaw error to [-180, 180]
         const yawErrNorm = ((yawErr + 180) % 360 + 360) % 360 - 180;
         const tYR = clamp(yawErrNorm * 2.0, -this.maxYawRate, this.maxYawRate);
         const ys = 1 - Math.exp(-15 * dt);
         this.yawRate += (tYR - this.yawRate) * ys;
         this._applyBodyRotation(0, 1, 0, this.yawRate * dt);
 
-        // ---- 6. Altitude PI → thrust (in grams-force) ----
-        const aDesY = this.droneVelKp * velErrY + this.droneVelKi * this._velIntY;
-        // Desired upward acceleration → required thrust in gf
-        // thrustAccel = (thrustOutput / mass) * G, so thrustOutput = mass * (G + aDesY) / G
+        // ---- 5. Altitude PID → thrust (in grams-force) ----
+        const aDesY = this.droneVelKp * velErrY + this.droneVelKi * this._velIntY + this.droneVelKd * this._filtVelDerrY;
         let cmdGf = this.mass * (G + aDesY) / G;
 
         // Tilt compensation
