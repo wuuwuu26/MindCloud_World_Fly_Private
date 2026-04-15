@@ -31,6 +31,7 @@ const SETTINGS_IDS = [
     'ctrl-pos-kp', 'ctrl-pos-ki', 'ctrl-pos-kd', 'ctrl-vel-kp', 'ctrl-vel-ki', 'ctrl-vel-kd', 'ctrl-alt-kp', 'ctrl-alt-ki', 'ctrl-alt-kd',
     'phys-mass', 'phys-thrust', 'phys-drag-cd', 'phys-drag-area',
     'phys-drone-size', 'phys-collision-radius',
+    'clean-mode-toggle', 'osd-toggle',
 ];
 
 const DEFAULT_MAPPING = {
@@ -382,7 +383,8 @@ export class Controller {
         const settings = {};
         for (const id of SETTINGS_IDS) {
             const el = document.getElementById(id);
-            if (el) settings[id] = el.value;
+            if (!el) continue;
+            settings[id] = el.type === 'checkbox' ? el.checked : el.value;
         }
         return {
             mapping: JSON.parse(JSON.stringify(this.mapping)),
@@ -405,15 +407,19 @@ export class Controller {
         for (const [id, val] of Object.entries(settings)) {
             const el = document.getElementById(id);
             if (!el) continue;
-            el.value = val;
-            // Sync paired number input if present
-            const numEl = document.getElementById(id + '-num');
-            if (numEl) numEl.value = val;
-            // Sync paired span display if present
-            const spanEl = document.getElementById(id + '-val');
-            if (spanEl) spanEl.textContent = parseFloat(val).toFixed(el.step && el.step.includes('.') ? 2 : 0);
-            // Trigger input event so any listeners pick up the change
-            el.dispatchEvent(new Event('input'));
+            if (el.type === 'checkbox') {
+                el.checked = !!val;
+                el.dispatchEvent(new Event('change'));
+            } else {
+                el.value = val;
+                // Sync paired number input if present
+                const numEl = document.getElementById(id + '-num');
+                if (numEl) numEl.value = val;
+                // Sync paired span display if present
+                const spanEl = document.getElementById(id + '-val');
+                if (spanEl) spanEl.textContent = parseFloat(val).toFixed(el.step && el.step.includes('.') ? 2 : 0);
+                el.dispatchEvent(new Event('input'));
+            }
         }
     }
 
@@ -1423,6 +1429,15 @@ export class Controller {
         this._bindPhysicsSlider('ctrl-pos-kd', 'ctrl-pos-kd-val');
         this._bindPhysicsSlider('ctrl-vel-kd', 'ctrl-vel-kd-val');
         this._bindPhysicsSlider('ctrl-alt-kd', 'ctrl-alt-kd-val');
+
+        // Display toggle checkboxes
+        for (const cbId of ['clean-mode-toggle', 'osd-toggle']) {
+            const cb = document.getElementById(cbId);
+            if (cb && !cb._bound) {
+                cb._bound = true;
+                cb.addEventListener('change', () => this._saveConfig());
+            }
+        }
     }
 
     _bindSliderNum(sliderId, numId) {
