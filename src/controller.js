@@ -34,6 +34,13 @@ const SETTINGS_IDS = [
     'clean-mode-toggle', 'osd-toggle',
 ];
 
+// Settings that are stored separately per flight mode (drone vs fpv)
+const PER_MODE_SETTINGS_IDS = [
+    'ctrl-pos-kp', 'ctrl-pos-ki', 'ctrl-pos-kd',
+    'ctrl-vel-kp', 'ctrl-vel-ki', 'ctrl-vel-kd',
+    'ctrl-alt-kp', 'ctrl-alt-ki', 'ctrl-alt-kd',
+];
+
 const DEFAULT_MAPPING = {
     roll:       { axisIndex: 0, inverted: false, deadzone: 0, rate: 1.0, expo: 0.0 },
     pitch:      { axisIndex: 1, inverted: false, deadzone: 0, rate: 1.0, expo: 0.0 },
@@ -67,6 +74,18 @@ export class Controller {
         this.gamepadIndex = -1;
         this.gamepadName = '';
         this.connected = false;
+
+        // Per-mode rate/expo snapshots (mapping.rate and mapping.expo per axis)
+        this._modeRateExpo = {
+            drone: this._snapshotRateExpo(),
+            fpv:   this._snapshotRateExpo(),
+        };
+        // Per-mode PID settings (slider values keyed by element id)
+        this._modePidSettings = {
+            drone: null, // populated on first mode switch or from saved config
+            fpv:   null,
+        };
+        this._currentMode = 'drone';
 
         // WebHID support for RC transmitters
         this._hidDevice = null;
@@ -115,6 +134,17 @@ export class Controller {
         this._setupKeyboard();
         this._setupGamepad();
         this._buildSettingsUI();
+
+        // Ensure both modes have valid PID + rate/expo snapshots.
+        // After _loadConfig + _buildSettingsUI, DOM has the current mode's values.
+        // Snapshot them for the current mode if not yet saved.
+        if (!this._modePidSettings[this._currentMode]) {
+            this._modePidSettings[this._currentMode] = this._snapshotPidSettings();
+        }
+        if (!this._modePidSettings[this._currentMode === 'drone' ? 'fpv' : 'drone']) {
+            // Other mode has no saved PID — initialize from HTML defaults (same as current)
+            this._modePidSettings[this._currentMode === 'drone' ? 'fpv' : 'drone'] = this._snapshotPidSettings();
+        }
     }
 
     /**
@@ -386,11 +416,19 @@ export class Controller {
             if (!el) continue;
             settings[id] = el.type === 'checkbox' ? el.checked : el.value;
         }
+
+        // Snapshot current mode before saving so both modes are up-to-date
+        this._modeRateExpo[this._currentMode] = this._snapshotRateExpo();
+        this._modePidSettings[this._currentMode] = this._snapshotPidSettings();
+
         return {
             mapping: JSON.parse(JSON.stringify(this.mapping)),
             buttonMapping: JSON.parse(JSON.stringify(this.buttonMapping)),
             hidCalibration: JSON.parse(JSON.stringify(this._hidCalibration)),
             settings,
+            modeRateExpo: JSON.parse(JSON.stringify(this._modeRateExpo)),
+            modePidSettings: JSON.parse(JSON.stringify(this._modePidSettings)),
+            currentMode: this._currentMode,
         };
     }
 
@@ -398,6 +436,9 @@ export class Controller {
         if (config.mapping) this.mapping = config.mapping;
         if (config.buttonMapping) this.buttonMapping = config.buttonMapping;
         if (config.hidCalibration) this._hidCalibration = config.hidCalibration;
+        if (config.modeRateExpo) this._modeRateExpo = config.modeRateExpo;
+        if (config.modePidSettings) this._modePidSettings = config.modePidSettings;
+        if (config.currentMode) this._currentMode = config.currentMode;
         if (config.settings) this._restoreSettings(config.settings);
         this._saveConfig();
         this._buildSettingsUI();
@@ -421,6 +462,69 @@ export class Controller {
                 el.dispatchEvent(new Event('input'));
             }
         }
+    }
+
+    // ---- Per-mode helpers ----
+
+    _snapshotRateExpo() {
+        const snap = {};
+        for (const action of ACTIONS) {
+            const m = this.mapping[action];
+            snap[action] = { rate: m.rate !== undefined ? m.rate : 1.0, expo: m.expo !== undefined ? m.expo : 0.0 };
+        }
+        return snap;
+    }
+
+    _restoreRateExpo(snap) {
+        if (!snap) return;
+        for (const action of ACTIONS) {
+            if (snap[action]) {
+                this.mapping[action].rate = snap[action].rate;
+                this.mapping[action].expo = snap[action].expo;
+            }
+        }
+    }
+
+    _snapshotPidSettings() {
+        const snap = {};
+        for (const id of PER_MODE_SETTINGS_IDS) {
+            const el = document.getElementById(id);
+            if (el) snap[id] = el.value;
+        }
+        return snap;
+    }
+
+    _restorePidSettings(snap) {
+        if (!snap) return;
+        for (const [id, val] of Object.entries(snap)) {
+            const el = document.getElementById(id);
+            if (!el) continue;
+            el.value = val;
+            const numEl = document.getElementById(id + '-num');
+            if (numEl) numEl.value = val;
+            el.dispatchEvent(new Event('input'));
+        }
+    }
+
+    /**
+     * Called when the flight-mode-select dropdown changes.
+     * Saves current mode's rate/expo + PID, restores the new mode's values.
+     */
+    _onModeSwitch(newMode) {
+        const oldMode = this._currentMode;
+        if (newMode === oldMode) return;
+
+        // Save current mode's values
+        this._modeRateExpo[oldMode] = this._snapshotRateExpo();
+        this._modePidSettings[oldMode] = this._snapshotPidSettings();
+
+        // Restore new mode's values
+        this._restoreRateExpo(this._modeRateExpo[newMode]);
+        this._restorePidSettings(this._modePidSettings[newMode]);
+
+        this._currentMode = newMode;
+        this._saveConfig();
+        this._buildSettingsUI();
     }
 
     // ---- Private methods ----
@@ -1402,11 +1506,11 @@ export class Controller {
             });
         }
 
-        // Flight mode select — save on change
+        // Flight mode select — swap per-mode settings on change
         const modeSelect = document.getElementById('flight-mode-select');
         if (modeSelect && !modeSelect._bound) {
             modeSelect._bound = true;
-            modeSelect.addEventListener('change', () => this._saveConfig());
+            modeSelect.addEventListener('change', () => this._onModeSwitch(modeSelect.value));
         }
 
         // Physics slider+number pairs (bidirectional sync)
@@ -1420,15 +1524,15 @@ export class Controller {
         this._bindSliderNum('cam-mount-angle', 'cam-mount-angle-num');
 
         // Controller gain sliders
-        this._bindPhysicsSlider('ctrl-pos-kp', 'ctrl-pos-kp-val');
-        this._bindPhysicsSlider('ctrl-pos-ki', 'ctrl-pos-ki-val');
-        this._bindPhysicsSlider('ctrl-vel-kp', 'ctrl-vel-kp-val');
-        this._bindPhysicsSlider('ctrl-vel-ki', 'ctrl-vel-ki-val');
-        this._bindPhysicsSlider('ctrl-alt-kp', 'ctrl-alt-kp-val');
-        this._bindPhysicsSlider('ctrl-alt-ki', 'ctrl-alt-ki-val');
-        this._bindPhysicsSlider('ctrl-pos-kd', 'ctrl-pos-kd-val');
-        this._bindPhysicsSlider('ctrl-vel-kd', 'ctrl-vel-kd-val');
-        this._bindPhysicsSlider('ctrl-alt-kd', 'ctrl-alt-kd-val');
+        this._bindSliderNum('ctrl-pos-kp', 'ctrl-pos-kp-num');
+        this._bindSliderNum('ctrl-pos-ki', 'ctrl-pos-ki-num');
+        this._bindSliderNum('ctrl-vel-kp', 'ctrl-vel-kp-num');
+        this._bindSliderNum('ctrl-vel-ki', 'ctrl-vel-ki-num');
+        this._bindSliderNum('ctrl-alt-kp', 'ctrl-alt-kp-num');
+        this._bindSliderNum('ctrl-alt-ki', 'ctrl-alt-ki-num');
+        this._bindSliderNum('ctrl-pos-kd', 'ctrl-pos-kd-num');
+        this._bindSliderNum('ctrl-vel-kd', 'ctrl-vel-kd-num');
+        this._bindSliderNum('ctrl-alt-kd', 'ctrl-alt-kd-num');
 
         // Display toggle checkboxes
         for (const cbId of ['clean-mode-toggle', 'osd-toggle']) {
@@ -1500,6 +1604,15 @@ export class Controller {
                 }
                 if (config.hidCalibration) {
                     this._hidCalibration = config.hidCalibration;
+                }
+                if (config.modeRateExpo) {
+                    this._modeRateExpo = config.modeRateExpo;
+                }
+                if (config.modePidSettings) {
+                    this._modePidSettings = config.modePidSettings;
+                }
+                if (config.currentMode) {
+                    this._currentMode = config.currentMode;
                 }
                 if (config.settings) {
                     this._restoreSettings(config.settings);

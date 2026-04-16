@@ -78,6 +78,7 @@ export class Drone {
         this.maxPitchRate = 220;
         this.maxRollRate  = 220;
         this.maxYawRate   = 120;
+        this.droneMaxYawRate = 60;  // Drone mode yaw rate limit (deg/s)
 
         this.droneMaxAngle   = 30;
         this.droneAngleRate  = 150;
@@ -444,8 +445,7 @@ export class Drone {
         const horizActive = Math.abs(input.pitch) > 0.05 || Math.abs(input.roll) > 0.05;
         const vertActive  = Math.abs(input.throttle) > 0.05;
 
-        // Yaw stick → target yaw (always integrates)
-        this._targetYaw += input.yaw * this.maxYawRate * rates.yaw * boost * dt;
+        const yawActive = Math.abs(input.yaw) > 0.05;
 
         let vDesX, vDesY, vDesZ;
 
@@ -578,12 +578,23 @@ export class Drone {
         this.pitchRate = pitchErr * 5;
         this.rollRate  = rollErr  * 5;
 
-        // ---- 4. Yaw hold ----
-        const yawErr = this._targetYaw - dec.yawDeg;
-        const yawErrNorm = ((yawErr + 180) % 360 + 360) % 360 - 180;
-        const tYR = clamp(yawErrNorm * 2.0, -this.maxYawRate, this.maxYawRate);
-        const ys = 1 - Math.exp(-15 * dt);
-        this.yawRate += (tYR - this.yawRate) * ys;
+        // ---- 4. Yaw: stick → rate, centered → heading hold ----
+        const droneYawMax = this.droneMaxYawRate * rates.yaw * boost;
+        if (yawActive) {
+            // Stick directly commands yaw rate
+            const tYR = input.yaw * droneYawMax;
+            const ys = 1 - Math.exp(-15 * dt);
+            this.yawRate += (tYR - this.yawRate) * ys;
+            // Latch current heading as hold target for when stick is released
+            this._targetYaw = dec.yawDeg;
+        } else {
+            // Stick centered → hold heading via P-controller
+            const yawErrRaw = this._targetYaw - dec.yawDeg;
+            const yawErrNorm = Math.atan2(Math.sin(yawErrRaw * DEG2RAD), Math.cos(yawErrRaw * DEG2RAD)) * RAD2DEG;
+            const tYR = clamp(yawErrNorm * 2.0, -droneYawMax, droneYawMax);
+            const ys = 1 - Math.exp(-15 * dt);
+            this.yawRate += (tYR - this.yawRate) * ys;
+        }
         this._applyBodyRotation(0, 1, 0, this.yawRate * dt);
 
         // ---- 5. Altitude PID → thrust (in grams-force) ----
