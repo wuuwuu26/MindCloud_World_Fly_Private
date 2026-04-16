@@ -76,15 +76,11 @@ export class Controller {
         this.connected = false;
 
         // Per-mode rate/expo snapshots (mapping.rate and mapping.expo per axis)
-        this._modeRateExpo = {
-            drone: this._snapshotRateExpo(),
-            fpv:   this._snapshotRateExpo(),
-        };
+        // Initialized as null; _loadConfig will fill from saved data or
+        // the post-init block will snapshot from restored this.mapping.
+        this._modeRateExpo = { drone: null, fpv: null };
         // Per-mode PID settings (slider values keyed by element id)
-        this._modePidSettings = {
-            drone: null, // populated on first mode switch or from saved config
-            fpv:   null,
-        };
+        this._modePidSettings = { drone: null, fpv: null };
         this._currentMode = 'drone';
 
         // WebHID support for RC transmitters
@@ -135,15 +131,15 @@ export class Controller {
         this._setupGamepad();
         this._buildSettingsUI();
 
-        // Ensure both modes have valid PID + rate/expo snapshots.
-        // After _loadConfig + _buildSettingsUI, DOM has the current mode's values.
-        // Snapshot them for the current mode if not yet saved.
-        if (!this._modePidSettings[this._currentMode]) {
-            this._modePidSettings[this._currentMode] = this._snapshotPidSettings();
-        }
-        if (!this._modePidSettings[this._currentMode === 'drone' ? 'fpv' : 'drone']) {
-            // Other mode has no saved PID — initialize from HTML defaults (same as current)
-            this._modePidSettings[this._currentMode === 'drone' ? 'fpv' : 'drone'] = this._snapshotPidSettings();
+        // Ensure both modes have valid rate/expo + PID snapshots.
+        // After _loadConfig, this.mapping has the restored rate/expo values
+        // and DOM sliders have the restored PID values.
+        // For legacy configs (no per-mode data), initialize both modes
+        // from these restored values so nothing is lost.
+        const curSnap = this._snapshotRateExpo();
+        for (const mode of ['drone', 'fpv']) {
+            if (!this._modeRateExpo[mode]) this._modeRateExpo[mode] = JSON.parse(JSON.stringify(curSnap));
+            if (!this._modePidSettings[mode]) this._modePidSettings[mode] = this._snapshotPidSettings();
         }
     }
 
@@ -518,11 +514,14 @@ export class Controller {
         this._modeRateExpo[oldMode] = this._snapshotRateExpo();
         this._modePidSettings[oldMode] = this._snapshotPidSettings();
 
+        // Update current mode BEFORE restoring, so any _saveConfig calls
+        // triggered by input events during restore snapshot to the correct mode
+        this._currentMode = newMode;
+
         // Restore new mode's values
         this._restoreRateExpo(this._modeRateExpo[newMode]);
         this._restorePidSettings(this._modePidSettings[newMode]);
 
-        this._currentMode = newMode;
         this._saveConfig();
         this._buildSettingsUI();
     }
