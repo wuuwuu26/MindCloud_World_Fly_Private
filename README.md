@@ -27,10 +27,21 @@ Manifold Tech's hardware products — including the **Q9000**, **Pocket 2 / 2 Pr
 ## Quick Start
 
 ```bash
+# First-time setup (run once as root for HID device permissions):
+sudo bash setup_udev.sh
+
+# Launch everything (HTTP server + WebHID bridge + browser):
+./launch.sh          # Firefox + NVIDIA GPU (recommended)
+./launch.sh chrome   # Chrome + Intel GPU (native WebHID)
+```
+
+Or start the HTTP server manually:
+
+```bash
 python3 serve.py
 ```
 
-Open **http://localhost:8080** in your browser (Chrome/Edge recommended for Gamepad API).
+Open **http://localhost:8080** in your browser (Chrome/Edge recommended for native Gamepad API; Firefox supported via WebHID bridge).
 
 ## Supported Formats
 
@@ -115,7 +126,13 @@ The status indicator at the bottom of the screen shows **ARMED** (green) or **DI
 
 ### Flight Controls (RC Transmitter)
 
-Connect your RC transmitter via USB. It appears as a gamepad via the browser Gamepad API.
+Connect your RC transmitter via USB. It is detected via the browser Gamepad API or the WebHID bridge (for browsers like Firefox that lack native WebHID support).
+
+To connect via WebHID bridge:
+1. Open settings (**Tab**)
+2. Check **Disable Gamepad API (for WebHID)**
+3. Click **Connect HID Device** and select your transmitter
+4. Run calibration if prompted
 
 Default channel mapping (AETR):
 
@@ -132,10 +149,10 @@ Default channel mapping (AETR):
 
 | Mode | Behavior |
 |------|----------|
-| **Drone (Easy)** | Stabilized flight with position and altitude hold. Sticks command velocity — release to hover. Cascaded PI controller keeps the drone level and on target. Best for exploration. |
+| **Drone (Easy)** | Stabilized flight with position and altitude hold. Sticks command velocity — release to hover. Yaw stick commands yaw rate with heading hold on release. Cascaded PID controller keeps the drone level and on target. Best for exploration. |
 | **FPV (Manual)** | Direct rate control — sticks map to body-frame angular rates (pitch, roll, yaw). No self-leveling. Throttle directly controls thrust. Requires constant pilot input. Realistic FPV experience. |
 
-Switch modes any time in the settings panel (**Tab**).
+Switch modes any time in the settings panel (**Tab**). Each mode stores its own independent set of **PID gains** and **Rate/Expo** parameters, so tuning one mode does not affect the other.
 
 **Drone mode** uses a fixed camera tilt angle (set in settings, 0–60°). **FPV mode** uses a fixed mount angle during flight; adjust Q/E before arming, or set it in settings.
 
@@ -153,17 +170,18 @@ The FPV OSD overlay can be toggled on/off in settings (Display → FPV OSD Overl
 
 Press **Tab** to open. Sections:
 
-- **Display** — toggle FPV OSD overlay
+- **Display** — Clean Mode (hides logo and key guide only; HUD and OSD remain visible), FPV OSD toggle
 - **RC Channel Assignment** — assign and invert axes, set dead zones (default 0), with listen-mode auto-detect
 - **Button Assignment** — assign arm/reset to buttons or axis thresholds
-- **Gamepad Status** — shows connected controller name
+- **Rates & Expo** — per-axis rate multiplier and expo curve (stored independently per flight mode)
+- **Gamepad Status** — shows connected controller name; option to disable Gamepad API for WebHID
 - **Channel Monitor** — real-time axis values from the gamepad
 - **Coordinate System** — shows the Up Axis chosen during filtering (read-only)
-- **Flight Mode** — switch between Drone (Easy) and FPV (Manual)
-- **FPV Cam Angle** — camera mount tilt for FPV mode (0–60°)
-- **Controller Gains** — tune Pos Kp/Ki, Vel Kp/Ki, Alt Kp/Ki for drone mode
+- **Flight Mode** — switch between Drone (Easy) and FPV (Manual); parameters swap automatically
+- **Camera** — horizontal FOV, FPV mount angle (0–60°)
+- **Controller Gains** — tune Pos Kp/Ki/Kd, Vel Kp/Ki/Kd, Alt Kp/Ki/Kd with number inputs (stored independently per flight mode)
 - **Physics** — mass, max thrust, drag Cd, frontal area, drone size, collision radius
-- **Export / Import** — save or load full configuration as JSON
+- **Export / Import** — save or load full configuration as JSON (includes both flight mode parameter sets)
 
 All settings persist automatically in `localStorage`.
 
@@ -204,17 +222,23 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 
 ```
 ├── index.html              # UI layout and styles
-├── serve.py                # Simple HTTP dev server
+├── serve.py                # Simple HTTP dev server (CORS + ES module headers)
+├── launch.sh               # One-click launcher (HTTP server + WebHID bridge + browser)
+├── hid_server.py           # WebHID bridge server (ws://localhost:8766)
+├── setup_udev.sh           # udev rules for non-root HID device access
+├── .gitignore              # Excludes scene/ from version control
 ├── src/
 │   ├── main.js             # App init, scene loading, game loop
-│   ├── controller.js       # Keyboard + gamepad input, settings UI
-│   ├── drone.js            # Quaternion physics, FPV/drone control laws
+│   ├── controller.js       # Keyboard + gamepad + WebHID input, per-mode settings UI
+│   ├── drone.js            # Quaternion physics, FPV/drone control laws, PID controller
 │   ├── collision.js        # Octree spatial index + collision response
 │   ├── hud.js              # Head-up display overlay
 │   ├── osd.js              # On-screen display (artificial horizon, telemetry)
-│   ├── ply-parser.js       # PLY format parser
+│   ├── webhid_polyfill.js  # WebHID API polyfill for Firefox (proxies via hid_server.py)
+│   ├── ply-parser.js       # PLY format parser + NaN/Inf sanitizer
 │   ├── splat-parser.js     # SPLAT format parser + PLY converter
 │   └── sog-parser.js       # SOG format parser
+├── scene/                  # Scene files (gitignored, not tracked)
 ├── asset/
 │   ├── mt_mcwf_logo.jpg    # Project logo
 │   ├── demo_flight.gif     # Flight demo animation
@@ -228,7 +252,7 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 
 | Library | Version | License | Usage |
 |---------|---------|---------|-------|
-| [PlayCanvas](https://github.com/playcanvas/engine) | 2.17.0 | MIT | 3D engine, GSplat rendering |
+| [PlayCanvas](https://github.com/playcanvas/engine) | 2.17.2 | MIT | 3D engine, GSplat rendering |
 | [JSZip](https://github.com/Stuk/jszip) | 3.10.1 | MIT | SOG file decompression |
 
 Both loaded via CDN — no build step or `npm install` required.
@@ -236,8 +260,9 @@ Both loaded via CDN — no build step or `npm install` required.
 ## Requirements
 
 - Modern browser with WebGL2 (Chrome, Edge, Firefox)
-- Python 3 (for local HTTP server)
+- Python 3 with `python3-websockets` and `python3-hid` (for WebHID bridge)
 - A `.ply`, `.splat`, or `.sog` 3DGS file
+- (Optional) RC transmitter via USB for hardware-in-the-loop control
 
 ## License
 
