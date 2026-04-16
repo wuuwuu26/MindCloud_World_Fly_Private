@@ -683,6 +683,14 @@ async function loadGSplat(arrayBuffer, filename, entityRotation) {
             const rot = entityRotation || [0, 0, 0];
             entity.setEulerAngles(rot[0], rot[1], rot[2]);
             app.root.addChild(entity);
+
+            // Set a large custom AABB to prevent frustum culling from clipping
+            // splats at viewport edges during fast camera rotation
+            entity.gsplat.customAabb = new pc.BoundingBox(
+                new pc.Vec3(0, 0, 0),
+                new pc.Vec3(1000, 1000, 1000)
+            );
+
             URL.revokeObjectURL(blobUrl);
             resolve();
         });
