@@ -1,1 +1,5 @@
 scene/
+# Audio preprocessing — only the final fpv_loop.wav is committed. The raw
+# source clip, the prep script, and any tooling artefacts stay local.
+asset/fpv.wav
+tools/

@@ -27,6 +27,7 @@ import { Controller } from './controller.js';
 import { Drone } from './drone.js';
 import { HUD } from './hud.js';
 import { OSD } from './osd.js';
+import { EngineAudio } from './audio.js';
 
 // ---- Globals ----
 let app = null;
@@ -35,6 +36,7 @@ let drone = null;
 let controller = null;
 let hud = null;
 let osd = null;
+let engineAudio = null;
 let octree = null;
 let sceneLoaded = false;
 let pcInitialized = false;
@@ -70,6 +72,31 @@ function showError(msg) {
     console.error(msg);
     const el = document.getElementById('loading-progress');
     if (el) { el.textContent = msg; el.style.color = '#f44'; }
+}
+
+// Allow user to disable engine audio entirely via URL param ?noaudio=1 for
+// debugging or if any Web Audio glitch ever causes trouble.
+const _engineAudioDisabled = (() => {
+    try { return new URLSearchParams(window.location.search).has('noaudio'); }
+    catch { return false; }
+})();
+
+// Browsers block AudioContext.start() until a user gesture. Attach a one-shot
+// keydown listener that resumes the engine-sound context on the first key press
+// (typically Space to arm, or W/S for throttle), then removes itself.
+// We intentionally avoid pointer/touch listeners so that nothing can interfere
+// with clicks on UI buttons such as "Connect HID" (which need transient user
+// activation to call navigator.hid.requestDevice).
+function _installEngineAudioGestureHook() {
+    const resume = () => {
+        try {
+            if (engineAudio) engineAudio.resume();
+        } catch (e) {
+            console.warn('[EngineAudio] resume failed:', e);
+        }
+        window.removeEventListener('keydown', resume, true);
+    };
+    window.addEventListener('keydown', resume, true);
 }
 
 // ---- Initialize PlayCanvas (called once, before first PLY load) ----
@@ -471,6 +498,16 @@ async function loadSceneFile(file) {
         if (!controller) controller = new Controller();
         if (!drone) drone = new Drone();
         if (!hud) hud = new HUD();
+        if (!engineAudio && !_engineAudioDisabled) {
+            try {
+                engineAudio = new EngineAudio();
+                _installEngineAudioGestureHook();
+                console.info('[EngineAudio] enabled (press any key to unlock; add ?noaudio=1 to disable)');
+            } catch (e) {
+                console.warn('[EngineAudio] init failed, continuing silently:', e);
+                engineAudio = null;
+            }
+        }
 
         const arrayBuffer = await file.arrayBuffer();
         console.log(`File read: ${file.name} (${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)} MB)`);
@@ -954,6 +991,19 @@ function gameLoop(dt) {
 
     // Update drone physics
     drone.update(dt, input, octree);
+
+    // Update engine sound (frequency/gain scale with normalized thrust)
+    if (engineAudio) {
+        try {
+            const throttle01 = drone.maxThrust > 0
+                ? Math.max(0, Math.min(1, drone.thrustOutput / drone.maxThrust))
+                : 0;
+            engineAudio.update(throttle01, !!input.armed);
+        } catch (e) {
+            console.warn('[EngineAudio] update failed, disabling:', e);
+            engineAudio = null;
+        }
+    }
 
     // Apply drone transform to camera
     const transform = drone.getCameraTransform();
