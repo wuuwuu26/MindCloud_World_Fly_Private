@@ -26,20 +26,45 @@
     function _connectWS() {
         return new Promise((resolve, reject) => {
             const ws = new WebSocket(WS_URL);
+            let settled = false;
+            const settle = (fn, arg) => { if (!settled) { settled = true; fn(arg); } };
+
+            // 3s connect timeout so we don't hang forever if the server never
+            // completes the WS handshake.
+            const timer = setTimeout(() => {
+                try { ws.close(); } catch {}
+                settle(reject, new Error(
+                    'WebHID bridge connection timed out (ws://localhost:8766).\n' +
+                    'Is hid_server.py running?'
+                ));
+            }, 3000);
+
             ws.onopen = () => {
+                clearTimeout(timer);
                 _ws = ws;
                 _wsReady = true;
-                resolve();
+                console.info('[WebHID Polyfill] connected to', WS_URL);
+                settle(resolve);
             };
-            ws.onerror = () => {
-                reject(new Error(
+            ws.onerror = (e) => {
+                clearTimeout(timer);
+                console.error('[WebHID Polyfill] WebSocket error:', e);
+                settle(reject, new Error(
                     'Cannot connect to WebHID bridge (ws://localhost:8766).\n' +
                     'Please start hid_server.py before connecting your device.'
                 ));
             };
-            ws.onclose = () => {
+            ws.onclose = (ev) => {
+                console.warn('[WebHID Polyfill] WebSocket closed', ev.code, ev.reason);
                 _wsReady = false;
                 _ws = null;
+                // Reject any still-pending requests so the caller doesn't hang.
+                const err = new Error('WebHID bridge disconnected');
+                Object.keys(_pending).forEach(k => {
+                    const p = _pending[k];
+                    delete _pending[k];
+                    try { p.reject(err); } catch {}
+                });
             };
             ws.onmessage = (ev) => {
                 let msg;
@@ -67,15 +92,41 @@
                 if (p) {
                     delete _pending[msg.type];
                     p.resolve(msg);
+                } else {
+                    console.debug('[WebHID Polyfill] unmatched message:', msg);
                 }
             };
         });
     }
 
-    function _send(msg, responseType) {
+    // Send a request and await the matching response. Times out so the UI
+    // never hangs silently if the server is wedged.
+    function _send(msg, responseType, timeoutMs = 5000) {
         return new Promise((resolve, reject) => {
-            _pending[responseType] = { resolve, reject };
-            _ws.send(JSON.stringify(msg));
+            if (!_ws || _ws.readyState !== WebSocket.OPEN) {
+                reject(new Error('WebHID bridge not connected'));
+                return;
+            }
+            const timer = setTimeout(() => {
+                if (_pending[responseType]) {
+                    delete _pending[responseType];
+                    reject(new Error(
+                        `WebHID bridge timed out waiting for "${responseType}" ` +
+                        `(server took >${timeoutMs}ms — try restarting hid_server.py).`
+                    ));
+                }
+            }, timeoutMs);
+            _pending[responseType] = {
+                resolve: (v) => { clearTimeout(timer); resolve(v); },
+                reject:  (e) => { clearTimeout(timer); reject(e);  },
+            };
+            try {
+                _ws.send(JSON.stringify(msg));
+            } catch (e) {
+                clearTimeout(timer);
+                delete _pending[responseType];
+                reject(e);
+            }
         });
     }
 
@@ -231,11 +282,13 @@
         },
 
         async requestDevice(options = {}) {
+            console.info('[WebHID Polyfill] requestDevice called, filters=', options.filters);
             // Ensure WebSocket connection to bridge server
             if (!_wsReady) {
                 try {
                     await _connectWS();
                 } catch (err) {
+                    console.error('[WebHID Polyfill] connect failed:', err);
                     alert('[WebHID Bridge]\n' + err.message);
                     return [];
                 }
@@ -245,7 +298,9 @@
             let resp;
             try {
                 resp = await _send({ type: 'list' }, 'devices');
+                console.info('[WebHID Polyfill] server returned', resp.devices?.length ?? 0, 'device(s)');
             } catch (err) {
+                console.error('[WebHID Polyfill] list failed:', err);
                 alert('[WebHID Bridge] Failed to list devices: ' + err.message);
                 return [];
             }
