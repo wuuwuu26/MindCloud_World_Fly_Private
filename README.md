@@ -53,9 +53,25 @@ Open **http://localhost:8080** in your browser (Chrome/Edge recommended for nati
 
 Drag and drop a file onto the page, or click **Choose File** to browse.
 
-## Demo Scene
+## Demo Scenes
 
-A ready-to-fly demo scene is available on Google Drive: [**field_z-up.sog**](https://drive.google.com/file/d/11yztizITalnHwnichd4iXHVaQbMYplTD/view?usp=sharing). This scene was captured using Manifold Tech hardware and showcases a real-world outdoor environment reconstructed as a 3D Gaussian Splatting model. Note that this scene uses the **Z-up** coordinate system — select **Z-up** in the coordinate system dropdown during the filter step. Download the file, then drag and drop it onto the page to start flying immediately.
+Two ready-to-fly demo scenes are available on Google Drive. Both were captured using Manifold Tech hardware and reconstructed as 3D Gaussian Splatting models of real-world environments. Download a `.sog` file, then drag and drop it onto the page to start flying immediately.
+
+### Field (Z-up)
+
+<p align="center">
+  <img src="asset/demo_field.gif" alt="MindCloud World Fly — Field scene flight demo" width="100%">
+</p>
+
+[**field_z-up.sog**](https://drive.google.com/file/d/11yztizITalnHwnichd4iXHVaQbMYplTD/view?usp=sharing) — an outdoor field environment. This scene uses the **Z-up** coordinate system, so select **Z-up** in the coordinate system dropdown during the filter step.
+
+### Nanjing
+
+<p align="center">
+  <img src="asset/demo_nanjing.gif" alt="MindCloud World Fly — Nanjing scene flight demo" width="100%">
+</p>
+
+[**nanjing.sog**](https://drive.google.com/file/d/1ft5q-ALGwFB3hp44vt648kdYUoNi_S9f/view?usp=sharing) — an urban scene captured in Nanjing, China.
 
 ## User Guide
 
@@ -226,7 +242,7 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 ├── launch.sh               # One-click launcher (HTTP server + WebHID bridge + browser)
 ├── hid_server.py           # WebHID bridge server (ws://localhost:8766)
 ├── setup_udev.sh           # udev rules for non-root HID device access
-├── .gitignore              # Excludes scene/ from version control
+├── .gitignore              # Excludes scene/, raw audio source, and tools/
 ├── src/
 │   ├── main.js             # App init, scene loading, game loop
 │   ├── controller.js       # Keyboard + gamepad + WebHID input, per-mode settings UI
@@ -234,6 +250,7 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 │   ├── collision.js        # Octree spatial index + collision response
 │   ├── hud.js              # Head-up display overlay
 │   ├── osd.js              # On-screen display (artificial horizon, telemetry)
+│   ├── audio.js            # FPV engine sound (sample playback + throttle-modulated rate)
 │   ├── webhid_polyfill.js  # WebHID API polyfill for Firefox (proxies via hid_server.py)
 │   ├── ply-parser.js       # PLY format parser + NaN/Inf sanitizer
 │   ├── splat-parser.js     # SPLAT format parser + PLY converter
@@ -241,9 +258,12 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 ├── scene/                  # Scene files (gitignored, not tracked)
 ├── asset/
 │   ├── mt_mcwf_logo.jpg    # Project logo
-│   ├── demo_flight.gif     # Flight demo animation
+│   ├── demo_flight.gif     # Hero flight demo animation
+│   ├── demo_field.gif      # Field scene demo animation
+│   ├── demo_nanjing.gif    # Nanjing scene demo animation
 │   ├── demo_teaser.jpg     # Teaser image 1
-│   └── demo_teaser2.jpg    # Teaser image 2
+│   ├── demo_teaser2.jpg    # Teaser image 2
+│   └── fpv_loop.wav        # Looped FPV engine audio (pre-processed)
 ├── LICENSE                 # Apache 2.0
 └── NOTICE                  # Third-party attributions
 ```
