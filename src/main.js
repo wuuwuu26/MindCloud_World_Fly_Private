@@ -96,16 +96,18 @@ const _bgmAudioDisabled = (() => {
     catch { return false; }
 })();
 
-// BGM playlists. Paths are relative to index.html. 'init' plays during
-// loading / filtering / placement; 'flight' cycles through while the drone
-// is being actively flown. Add entries (e.g. playing3.flac) to extend.
-const BGM_PLAYLISTS = {
-    init:   ['asset/music/initializ.flac'],
-    flight: [
-        'asset/music/playing1.flac',
-        'asset/music/playing2.flac',
-    ],
+// BGM playlists are discovered at runtime from the subdirectories of
+// asset/music/ (see _discoverPlaylist / _loadBgmPlaylists below).
+//   asset/music/init/   → 'init'   playlist (loading / filtering / placement)
+//   asset/music/flight/ → 'flight' playlist (in-flight shuffle)
+// Drop a .flac / .mp3 / .ogg / .wav into either folder and it will be
+// picked up automatically. See scripts/gen-bgm-manifests.py for keeping
+// manifest.json in sync on static hosts that don't serve directory listings.
+const BGM_FOLDERS = {
+    init:   'asset/music/init/',
+    flight: 'asset/music/flight/',
 };
+const BGM_AUDIO_EXT_RE = /\.(flac|mp3|ogg|wav|m4a)$/i;
 
 // Browsers block AudioContext.start() until a user gesture (autoplay policy).
 // Attach one-shot listeners that resume both audio contexts on the first user
@@ -131,12 +133,89 @@ function _installAudioGestureHook() {
 }
 
 // Switch the active BGM playlist for a given game mode. Safe to call when the
-// BGM subsystem is disabled or uninitialised.
+// BGM subsystem is disabled or uninitialised. If the playlist has not yet been
+// registered (discovery still in flight on first load), BgmAudio logs a warn
+// and no-ops; _loadBgmPlaylists re-invokes this after registration completes.
 function _bgmForMode(modeName) {
     if (!bgmAudio) return;
     const playlist = modeName === 'flight' ? 'flight' : 'init';
     try { bgmAudio.playPlaylist(playlist); }
     catch (e) { console.warn('[BgmAudio] playPlaylist failed:', e); }
+}
+
+// Discover all audio tracks in a folder. Tries two strategies in order:
+//   1) HTTP directory listing (e.g. Python http.server, node http-server).
+//      Most dev servers return an HTML page with <a href="..."> entries for
+//      every file; we parse those and keep the ones with an audio extension.
+//   2) manifest.json fallback ({"tracks": ["a.flac", ...]}) — works on any
+//      static host, including file://, GitHub Pages, Netlify. Regenerate via
+//      scripts/gen-bgm-manifests.py after adding / removing tracks.
+// Returns an array of fully-qualified URLs (relative to index.html) ready
+// for BgmAudio.registerPlaylist().
+async function _discoverPlaylist(folderUrl) {
+    if (!folderUrl.endsWith('/')) folderUrl += '/';
+
+    // ---- Strategy 1: directory listing ----
+    try {
+        const r = await fetch(folderUrl, { headers: { Accept: 'text/html' } });
+        const ct = r.headers.get('content-type') || '';
+        if (r.ok && ct.toLowerCase().includes('html')) {
+            const html = await r.text();
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const hrefs = [...doc.querySelectorAll('a[href]')]
+                .map(a => a.getAttribute('href'))
+                .filter(h => h && BGM_AUDIO_EXT_RE.test(h));
+            // Extract bare filenames (strip leading slashes or absolute URLs
+            // so the result is always relative to folderUrl).
+            const base = new URL(folderUrl, window.location.href);
+            const names = hrefs
+                .map(h => {
+                    try {
+                        const u = new URL(h, base);
+                        // Only keep entries whose resolved URL sits under base.
+                        if (!u.pathname.startsWith(base.pathname)) return null;
+                        return decodeURIComponent(u.pathname.slice(base.pathname.length));
+                    } catch { return null; }
+                })
+                .filter(n => n && BGM_AUDIO_EXT_RE.test(n));
+            const unique = [...new Set(names)];
+            if (unique.length) return unique.map(n => folderUrl + n);
+        }
+    } catch (_) { /* fall through to manifest */ }
+
+    // ---- Strategy 2: manifest.json ----
+    try {
+        const r = await fetch(folderUrl + 'manifest.json', { cache: 'no-cache' });
+        if (r.ok) {
+            const m = await r.json();
+            if (m && Array.isArray(m.tracks)) {
+                const tracks = m.tracks.filter(t => typeof t === 'string' && BGM_AUDIO_EXT_RE.test(t));
+                if (tracks.length) return tracks.map(t => folderUrl + t);
+            }
+        }
+    } catch (_) { /* nothing else to try */ }
+
+    return [];
+}
+
+// Kick off discovery for every configured playlist folder and register the
+// results on bgmAudio. Fire-and-forget at startup; once complete, replays the
+// current mode's playlist so the first playPlaylist() call (issued before
+// discovery resolved) actually starts audio.
+async function _loadBgmPlaylists() {
+    if (!bgmAudio || _bgmAudioDisabled) return;
+    const names = Object.keys(BGM_FOLDERS);
+    const lists = await Promise.all(names.map(n => _discoverPlaylist(BGM_FOLDERS[n])));
+    names.forEach((name, i) => {
+        const urls = lists[i];
+        if (urls.length === 0) {
+            console.warn(`[BgmAudio] no tracks found for playlist "${name}" in ${BGM_FOLDERS[name]}`);
+            return;
+        }
+        bgmAudio.registerPlaylist(name, urls);
+        console.info(`[BgmAudio] playlist "${name}": ${urls.length} track(s)`);
+    });
+    _bgmForMode(mode);
 }
 
 // ---- Initialize PlayCanvas (called once, before first PLY load) ----
@@ -1233,9 +1312,6 @@ function _initAudio() {
     if (!bgmAudio && !_bgmAudioDisabled) {
         try {
             bgmAudio = new BgmAudio();
-            for (const [name, urls] of Object.entries(BGM_PLAYLISTS)) {
-                bgmAudio.registerPlaylist(name, urls);
-            }
             console.info('[BgmAudio] enabled (press any key to unlock; add ?nobgm=1 to disable)');
         } catch (e) {
             console.warn('[BgmAudio] init failed, continuing silently:', e);
@@ -1246,9 +1322,10 @@ function _initAudio() {
     if (controller && typeof controller.attachAudio === 'function') {
         controller.attachAudio(engineAudio, bgmAudio);
     }
-    // Arm the default playlist for the current mode. Playback is queued until
-    // the first user gesture resumes the AudioContext.
-    _bgmForMode(mode);
+    // Kick off asynchronous track discovery; once complete _loadBgmPlaylists
+    // calls _bgmForMode(mode) which arms playback for the current mode.
+    // Playback is queued until the first user gesture resumes the AudioContext.
+    _loadBgmPlaylists().catch(e => console.warn('[BgmAudio] playlist discovery failed:', e));
 }
 _initAudio();
 

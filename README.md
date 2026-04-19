@@ -193,7 +193,7 @@ Press **Tab** to open. Sections:
 - **RC Channel Assignment** — assign and invert axes, set dead zones (default 0), with listen-mode auto-detect
 - **Button Assignment** — assign **Arm** and **Mode Switch** to a gamepad button or an RC channel. Each axis binding has an **Inv** toggle (flip which end counts as active) and a **Toggle / Level** trigger dropdown. Reset is keyboard-only.
 - **Rates & Expo** — per-axis rate multiplier and expo curve (stored independently per flight mode)
-- **Audio** — independent **Mute** checkbox + volume slider for **Engine Sound** and **Background Music**. Ticking Mute snaps the slider to 0 (remembering the previous position); un-ticking restores it. Dragging the slider to 0 auto-ticks Mute; dragging above 0 auto-unticks it. BGM cycles `asset/music/initializ.flac` during loading / filtering / placement and shuffles `playing1.flac` / `playing2.flac` (+ any `playing3.flac`, `playing4.flac`, … you add to `BGM_PLAYLISTS` in `src/main.js`) during flight.
+- **Audio** — independent **Mute** checkbox + volume slider for **Engine Sound** and **Background Music**. Ticking Mute snaps the slider to 0 (remembering the previous position); un-ticking restores it. Dragging the slider to 0 auto-ticks Mute; dragging above 0 auto-unticks it. BGM cycles tracks from `asset/music/init/` during loading / filtering / placement and shuffles tracks from `asset/music/flight/` during flight — just drop additional `.flac` / `.mp3` / `.ogg` / `.wav` files into either folder and they're auto-discovered (see **Background Music** below for deployment notes).
 - **Gamepad Status** — shows connected controller name; option to disable Gamepad API for WebHID
 - **Channel Monitor** — real-time axis values from the gamepad
 - **Coordinate System** — shows the Up Axis chosen during filtering (read-only)
@@ -214,6 +214,29 @@ All settings persist automatically in `localStorage`.
 5. Adjust **Dead Zone** sliders as needed (default is 0)
 
 You can also **Export** / **Import** full configs as JSON files to share between browsers or back up your setup.
+
+### Background Music
+
+BGM tracks live in two subfolders, each corresponding to a named playlist:
+
+- `asset/music/init/` — looped during loading, filtering, and placement
+- `asset/music/flight/` — shuffled during flight
+
+**Adding a track**: drop any `.flac` / `.mp3` / `.ogg` / `.wav` file into either folder. At page load, `src/main.js` discovers tracks via two strategies in order:
+
+1. **HTTP directory listing** — works with `serve.py`, `python -m http.server`, `npx http-server`, and most dev servers that return an HTML index when no `index.html` is present. No extra steps required.
+2. **`manifest.json` fallback** — needed for static hosts like GitHub Pages / Netlify that don't list directories. Run `python scripts/gen-bgm-manifests.py` after adding/removing tracks; it scans each playlist folder and writes a fresh `manifest.json`.
+
+So the full workflow for a new `playing3.flac`:
+
+```bash
+cp ~/Music/playing3.flac asset/music/flight/
+python scripts/gen-bgm-manifests.py    # only needed if deploying
+git add asset/music/flight/playing3.flac asset/music/flight/manifest.json
+git commit -m "bgm: add playing3.flac"
+```
+
+Disable BGM temporarily with the URL param `?nobgm=1`; disable the engine sound with `?noaudio=1`.
 
 ## Physics
 
@@ -246,6 +269,8 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 ├── launch.sh               # One-click launcher (HTTP server + WebHID bridge + browser)
 ├── hid_server.py           # WebHID bridge server (ws://localhost:8766)
 ├── setup_udev.sh           # udev rules for non-root HID device access
+├── scripts/
+│   └── gen-bgm-manifests.py  # Regenerate asset/music/*/manifest.json after adding tracks
 ├── .gitignore              # Excludes scene/, raw audio source, and tools/
 ├── src/
 │   ├── main.js             # App init, scene loading, game loop
@@ -272,9 +297,13 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 │   │   └── demo_teaser2.jpg
 │   └── music/               # Audio assets (engine sound + BGM tracks)
 │       ├── fpv_loop.wav       # Looped FPV engine audio (pre-processed)
-│       ├── initializ.flac     # BGM for loading / filtering / placement
-│       ├── playing1.flac      # BGM cycled during flight (add playing3/4/5 etc.)
-│       └── playing2.flac
+│       ├── init/              # BGM playlist for loading / filtering / placement
+│       │   ├── initializ.flac
+│       │   └── manifest.json  # Auto-regenerable fallback for static hosts
+│       └── flight/            # BGM playlist shuffled during flight
+│           ├── playing1.flac
+│           ├── playing2.flac
+│           └── manifest.json  # Drop more tracks here — nothing else to edit
 ├── LICENSE                 # Apache 2.0
 └── NOTICE                  # Third-party attributions
 ```
