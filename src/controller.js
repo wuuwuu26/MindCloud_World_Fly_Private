@@ -408,28 +408,43 @@ export class Controller {
         const armAxisLevel  = armBm.source  === 'axis' && armBm.axisIndex  >= 0 && armBm.triggerMode  === 'level';
         const modeAxisLevel = modeBm.source === 'axis' && modeBm.axisIndex >= 0 && modeBm.triggerMode === 'level';
 
-        // Keyboard is always edge-toggle (unaffected by triggerMode setting).
-        if (!justConnected && kbArmRising)  this.armed = !this.armed;
-        if (!justConnected && kbModeRising) this._toggleFlightMode();
+        // Keyboard arm / mode-switch are keyboard-exclusive edge-toggles —
+        // their behaviour is independent of the settings panel's button
+        // mapping (source, axis/button index, triggerMode) and of whether a
+        // gamepad / RC transmitter is plugged in. Space and M always flip
+        // their respective state on rising edge; nothing else fights them.
+        if (kbArmRising)  this.armed = !this.armed;
+        if (kbModeRising) this._toggleFlightMode();
 
-        // Gamepad / HID arm
-        if (armAxisLevel) {
-            // Switch position is the ground truth; keyboard toggles in the
-            // same frame get immediately overridden here, which is the
-            // intended semantics of level mode.
-            this.armed = this._gpButtons.arm;
+        // Gamepad / HID arm. Level mode follows switch TRANSITIONS (rising /
+        // falling edge of `_gpButtons.arm`), not the absolute switch position
+        // every frame. This way a static switch cannot silently undo the
+        // keyboard Space toggle above between physical switch moves; the two
+        // inputs coexist as orthogonal controls, each winning on the frame
+        // it's actually used.
+        //
+        // `this.connected` guards against a stale axis+level binding saved in
+        // localStorage firing while no device is polling. `justConnected`
+        // suppresses the first-frame phantom edge on hot-reconnect so a
+        // switch sitting in its active position at connect time doesn't
+        // spuriously override the current armed state.
+        if (armAxisLevel && this.connected) {
+            const gpArmChanged = this._gpButtons.arm !== this._prevGpButtons.arm;
+            if (!justConnected && gpArmChanged) this.armed = this._gpButtons.arm;
         } else if (!justConnected && gpArmRising) {
             this.armed = !this.armed;
         }
 
-        // Gamepad / HID mode switch
-        if (modeAxisLevel) {
-            // Two-position: active (post-invert) → fpv, inactive → drone.
-            const targetMode = this._gpButtons.modeSwitch ? 'fpv' : 'drone';
-            if (this._currentMode !== targetMode) {
-                const ms = document.getElementById('flight-mode-select');
-                if (ms) ms.value = targetMode;
-                this._onModeSwitch(targetMode);
+        // Gamepad / HID mode switch — same transition semantics as arm above.
+        if (modeAxisLevel && this.connected) {
+            const gpModeChanged = this._gpButtons.modeSwitch !== this._prevGpButtons.modeSwitch;
+            if (!justConnected && gpModeChanged) {
+                const targetMode = this._gpButtons.modeSwitch ? 'fpv' : 'drone';
+                if (this._currentMode !== targetMode) {
+                    const ms = document.getElementById('flight-mode-select');
+                    if (ms) ms.value = targetMode;
+                    this._onModeSwitch(targetMode);
+                }
             }
         } else if (!justConnected && gpModeRising) {
             this._toggleFlightMode();
