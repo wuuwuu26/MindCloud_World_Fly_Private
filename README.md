@@ -1,19 +1,19 @@
 # MindCloud World Fly
 
 <p align="center">
-  <img src="asset/mt_mcwf_logo.jpg" alt="MindCloud World Fly Logo" height="80">
+  <img src="asset/display/mt_mcwf_logo.jpg" alt="MindCloud World Fly Logo" height="80">
 </p>
 
 <p align="center">
-  <img src="asset/demo_flight.gif" alt="MindCloud World Fly — Flight demo" width="100%">
+  <img src="asset/display/demo_flight.gif" alt="MindCloud World Fly — Flight demo" width="100%">
 </p>
 
 <p align="center">
-  <img src="asset/demo_teaser2.jpg" alt="MindCloud World Fly — Drone mode flight in a 3DGS scene" width="100%">
+  <img src="asset/display/demo_teaser2.jpg" alt="MindCloud World Fly — Drone mode flight in a 3DGS scene" width="100%">
 </p>
 
 <p align="center">
-  <img src="asset/demo_teaser.jpg" alt="MindCloud World Fly — FPV drone flight in a 3DGS scene" width="100%">
+  <img src="asset/display/demo_teaser.jpg" alt="MindCloud World Fly — FPV drone flight in a 3DGS scene" width="100%">
 </p>
 
 A browser-based drone flight simulator for 3D Gaussian Splatting scenes. Fly through any 3DGS scene with realistic physics, FPV or stabilized drone controls, and RC transmitter support.
@@ -60,7 +60,7 @@ Two ready-to-fly demo scenes are available on Google Drive. Both were captured u
 ### Field (Z-up)
 
 <p align="center">
-  <img src="asset/demo_field.gif" alt="MindCloud World Fly — Field scene flight demo" width="100%">
+  <img src="asset/display/demo_field.gif" alt="MindCloud World Fly — Field scene flight demo" width="100%">
 </p>
 
 [**field_z-up.sog**](https://drive.google.com/file/d/11yztizITalnHwnichd4iXHVaQbMYplTD/view?usp=sharing) — an outdoor field environment. This scene uses the **Z-up** coordinate system, so select **Z-up** in the coordinate system dropdown during the filter step.
@@ -68,7 +68,7 @@ Two ready-to-fly demo scenes are available on Google Drive. Both were captured u
 ### Nanjing
 
 <p align="center">
-  <img src="asset/demo_nanjing.gif" alt="MindCloud World Fly — Nanjing scene flight demo" width="100%">
+  <img src="asset/display/demo_nanjing.gif" alt="MindCloud World Fly — Nanjing scene flight demo" width="100%">
 </p>
 
 [**nanjing.sog**](https://drive.google.com/file/d/1ft5q-ALGwFB3hp44vt648kdYUoNi_S9f/view?usp=sharing) — an urban scene captured in Nanjing, China.
@@ -193,6 +193,7 @@ Press **Tab** to open. Sections:
 - **RC Channel Assignment** — assign and invert axes, set dead zones (default 0), with listen-mode auto-detect
 - **Button Assignment** — assign **Arm** and **Mode Switch** to a gamepad button or an RC channel. Each axis binding has an **Inv** toggle (flip which end counts as active) and a **Toggle / Level** trigger dropdown. Reset is keyboard-only.
 - **Rates & Expo** — per-axis rate multiplier and expo curve (stored independently per flight mode)
+- **Audio** — independent **Mute** checkbox + volume slider for **Engine Sound** and **Background Music**. Ticking Mute snaps the slider to 0 (remembering the previous position); un-ticking restores it. Dragging the slider to 0 auto-ticks Mute; dragging above 0 auto-unticks it. BGM cycles `asset/music/initializ.flac` during loading / filtering / placement and shuffles `playing1.flac` / `playing2.flac` (+ any `playing3.flac`, `playing4.flac`, … you add to `BGM_PLAYLISTS` in `src/main.js`) during flight.
 - **Gamepad Status** — shows connected controller name; option to disable Gamepad API for WebHID
 - **Channel Monitor** — real-time axis values from the gamepad
 - **Coordinate System** — shows the Up Axis chosen during filtering (read-only)
@@ -254,19 +255,26 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 │   ├── hud.js              # Head-up display overlay
 │   ├── osd.js              # On-screen display (artificial horizon, telemetry)
 │   ├── audio.js            # FPV engine sound (sample playback + throttle-modulated rate)
+│   ├── bgm.js              # Playlist-based background music (FLAC tracks from asset/music/)
 │   ├── webhid_polyfill.js  # WebHID API polyfill for Firefox (proxies via hid_server.py)
 │   ├── ply-parser.js       # PLY format parser + NaN/Inf sanitizer
 │   ├── splat-parser.js     # SPLAT format parser + PLY converter
 │   └── sog-parser.js       # SOG format parser
 ├── scene/                  # Scene files (gitignored, not tracked)
 ├── asset/
-│   ├── mt_mcwf_logo.jpg    # Project logo
-│   ├── demo_flight.gif     # Hero flight demo animation
-│   ├── demo_field.gif      # Field scene demo animation
-│   ├── demo_nanjing.gif    # Nanjing scene demo animation
-│   ├── demo_teaser.jpg     # Teaser image 1
-│   ├── demo_teaser2.jpg    # Teaser image 2
-│   └── fpv_loop.wav        # Looped FPV engine audio (pre-processed)
+│   ├── display/             # Images + gifs used by index.html / README
+│   │   ├── logo.png
+│   │   ├── mt_mcwf_logo.jpg
+│   │   ├── demo_flight.gif
+│   │   ├── demo_field.gif
+│   │   ├── demo_nanjing.gif
+│   │   ├── demo_teaser.jpg
+│   │   └── demo_teaser2.jpg
+│   └── music/               # Audio assets (engine sound + BGM tracks)
+│       ├── fpv_loop.wav       # Looped FPV engine audio (pre-processed)
+│       ├── initializ.flac     # BGM for loading / filtering / placement
+│       ├── playing1.flac      # BGM cycled during flight (add playing3/4/5 etc.)
+│       └── playing2.flac
 ├── LICENSE                 # Apache 2.0
 └── NOTICE                  # Third-party attributions
 ```

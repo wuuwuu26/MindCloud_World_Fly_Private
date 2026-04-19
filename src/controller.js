@@ -136,6 +136,17 @@ export class Controller {
         // position does not produce a phantom rising-edge on the first frame.
         this._wasConnected = false;
 
+        // Audio settings. `volume` is the slider value (0..1), `muted` is the
+        // checkbox, `lastV` remembers the last non-zero volume so un-muting
+        // restores the user's previous level. Engine sound defaults to full
+        // (to preserve the pre-existing behaviour); BGM defaults to 50%.
+        this.audioSettings = {
+            engine: { volume: 1.0, muted: false, lastV: 1.0 },
+            bgm:    { volume: 0.5, muted: false, lastV: 0.5 },
+        };
+        this._engineAudio = null;
+        this._bgmAudio = null;
+
         // Load saved config
         this._loadConfig();
 
@@ -487,6 +498,146 @@ export class Controller {
         this._listenButtonBaseline = null;
     }
 
+    /**
+     * Wire the audio subsystems. Called from main.js once EngineAudio and
+     * BgmAudio have been constructed. Pushes the currently-stored
+     * audioSettings into both objects so saved preferences take effect
+     * immediately, then rebuilds the settings UI so the Audio rows reflect
+     * the attached state.
+     */
+    attachAudio(engineAudio, bgmAudio) {
+        this._engineAudio = engineAudio || null;
+        this._bgmAudio = bgmAudio || null;
+        this._applyAudioSettings();
+        // Re-render so the Audio section wires its change listeners with the
+        // (now non-null) audio refs captured in closures.
+        this._buildSettingsUI();
+    }
+
+    _applyAudioSettings() {
+        const { engine, bgm } = this.audioSettings;
+        if (this._engineAudio) {
+            this._engineAudio.setVolume(engine.volume);
+            this._engineAudio.setMuted(engine.muted);
+        }
+        if (this._bgmAudio) {
+            this._bgmAudio.setVolume(bgm.volume);
+            this._bgmAudio.setMuted(bgm.muted);
+        }
+    }
+
+    _buildAudioSection() {
+        const container = document.getElementById('audio-settings');
+        if (!container) return;
+        container.innerHTML = '';
+
+        container.appendChild(this._buildAudioRow('Engine Sound', this.audioSettings.engine, () => {
+            if (this._engineAudio) {
+                this._engineAudio.setVolume(this.audioSettings.engine.volume);
+                this._engineAudio.setMuted(this.audioSettings.engine.muted);
+            }
+        }));
+        container.appendChild(this._buildAudioRow('Background Music', this.audioSettings.bgm, () => {
+            if (this._bgmAudio) {
+                this._bgmAudio.setVolume(this.audioSettings.bgm.volume);
+                this._bgmAudio.setMuted(this.audioSettings.bgm.muted);
+            }
+        }));
+    }
+
+    /**
+     * One audio-settings row: Mute checkbox + volume slider + % readout.
+     *
+     * The checkbox and slider are two views of the same state and stay in
+     * sync: ticking Mute snaps the slider to 0 (remembering the previous
+     * non-zero position); dragging the slider to 0 auto-ticks Mute; dragging
+     * above 0 auto-unticks Mute. Un-ticking Mute restores the slider to the
+     * last non-zero position (`state.lastV`).
+     */
+    _buildAudioRow(labelText, state, applyFn) {
+        const row = document.createElement('div');
+        row.className = 'setting-row';
+
+        const lbl = document.createElement('label');
+        lbl.textContent = labelText;
+        row.appendChild(lbl);
+
+        const controls = document.createElement('div');
+        controls.className = 'controls';
+
+        const muteLabel = document.createElement('label');
+        muteLabel.style.cssText = 'display:inline-flex;align-items:center;gap:3px;font-size:11px;color:#aaa;cursor:pointer;';
+        const muteCb = document.createElement('input');
+        muteCb.type = 'checkbox';
+        muteCb.checked = !!state.muted;
+        muteCb.title = 'Mute this audio source';
+        muteLabel.appendChild(muteCb);
+        muteLabel.appendChild(document.createTextNode('Mute'));
+
+        const slider = document.createElement('input');
+        slider.type = 'range';
+        slider.min = '0';
+        slider.max = '1';
+        slider.step = '0.01';
+        slider.value = String(state.muted ? 0 : state.volume);
+        slider.style.width = '120px';
+
+        const pct = document.createElement('span');
+        pct.className = 'deadzone-val';
+        pct.style.minWidth = '34px';
+        const updatePct = () => {
+            pct.textContent = Math.round(parseFloat(slider.value) * 100) + '%';
+        };
+        updatePct();
+
+        muteCb.addEventListener('change', () => {
+            if (muteCb.checked) {
+                // Going muted: stash current non-zero volume as the restore
+                // point, then zero the slider + state volume.
+                if (state.volume > 0.001) state.lastV = state.volume;
+                state.muted = true;
+                state.volume = 0;
+                slider.value = '0';
+            } else {
+                // Un-muting: restore the last non-zero volume. Fall back to
+                // 50 % if no prior value is recorded (e.g. first run).
+                state.muted = false;
+                state.volume = state.lastV > 0.001 ? state.lastV : 0.5;
+                slider.value = String(state.volume);
+            }
+            updatePct();
+            applyFn();
+            this._saveConfig();
+        });
+
+        slider.addEventListener('input', () => {
+            const v = parseFloat(slider.value);
+            state.volume = v;
+            if (v > 0.001) {
+                state.lastV = v;
+                if (state.muted) {
+                    state.muted = false;
+                    muteCb.checked = false;
+                }
+            } else if (!state.muted) {
+                // Dragged to zero from a non-muted state → auto-tick Mute.
+                // lastV is deliberately NOT updated to 0 so un-muting can
+                // still restore the previous non-zero level.
+                state.muted = true;
+                muteCb.checked = true;
+            }
+            updatePct();
+            applyFn();
+            this._saveConfig();
+        });
+
+        controls.appendChild(muteLabel);
+        controls.appendChild(slider);
+        controls.appendChild(pct);
+        row.appendChild(controls);
+        return row;
+    }
+
     getConfig() {
         const settings = {};
         for (const id of SETTINGS_IDS) {
@@ -507,6 +658,7 @@ export class Controller {
             modeRateExpo: JSON.parse(JSON.stringify(this._modeRateExpo)),
             modePidSettings: JSON.parse(JSON.stringify(this._modePidSettings)),
             currentMode: this._currentMode,
+            audioSettings: JSON.parse(JSON.stringify(this.audioSettings)),
         };
     }
 
@@ -518,8 +670,25 @@ export class Controller {
         if (config.modePidSettings) this._modePidSettings = config.modePidSettings;
         if (config.currentMode) this._currentMode = config.currentMode;
         if (config.settings) this._restoreSettings(config.settings);
+        if (config.audioSettings) this._mergeAudioSettings(config.audioSettings);
+        this._applyAudioSettings();
         this._saveConfig();
         this._buildSettingsUI();
+    }
+
+    _mergeAudioSettings(saved) {
+        // Shallow-merge per subsystem so default fields (e.g. `lastV`) stay
+        // populated even if the saved blob is older and missing them.
+        if (saved && saved.engine) Object.assign(this.audioSettings.engine, saved.engine);
+        if (saved && saved.bgm)    Object.assign(this.audioSettings.bgm, saved.bgm);
+        // Guarantee invariants: clamp volumes and keep lastV sensible.
+        for (const key of ['engine', 'bgm']) {
+            const s = this.audioSettings[key];
+            s.volume = Math.max(0, Math.min(1, Number(s.volume) || 0));
+            s.lastV  = Math.max(0, Math.min(1, Number(s.lastV)  || s.volume));
+            s.muted  = !!s.muted;
+            if (s.lastV < 0.001) s.lastV = 0.5;
+        }
     }
 
     _restoreSettings(settings) {
@@ -964,6 +1133,11 @@ export class Controller {
     }
 
     _buildSettingsUI() {
+        // Audio section is independent of the gamepad / HID state, so render
+        // it first; it survives an early-return later in the function when
+        // the channel-assignments container is missing (e.g. during init).
+        this._buildAudioSection();
+
         const container = document.getElementById('channel-assignments');
         if (!container) return;
         container.innerHTML = '';
@@ -1759,6 +1933,9 @@ export class Controller {
                 }
                 if (config.settings) {
                     this._restoreSettings(config.settings);
+                }
+                if (config.audioSettings) {
+                    this._mergeAudioSettings(config.audioSettings);
                 }
             }
         } catch (e) { /* ignore */ }

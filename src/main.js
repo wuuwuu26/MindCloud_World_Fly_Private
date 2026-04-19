@@ -28,6 +28,7 @@ import { Drone } from './drone.js';
 import { HUD } from './hud.js';
 import { OSD } from './osd.js';
 import { EngineAudio } from './audio.js';
+import { BgmAudio } from './bgm.js';
 
 // ---- Globals ----
 let app = null;
@@ -37,6 +38,7 @@ let controller = null;
 let hud = null;
 let osd = null;
 let engineAudio = null;
+let bgmAudio = null;
 let octree = null;
 let sceneLoaded = false;
 let pcInitialized = false;
@@ -68,6 +70,14 @@ let cachedFilename = null;
 let cachedFormat = 'ply'; // 'ply', 'sog', or 'splat'
 let rawArrayBuffer = null; // unfiltered original buffer
 
+// File System Access API state. When available (Chromium on https/localhost)
+// we use showOpenFilePicker with `startIn: _lastFileHandle` so that the open
+// dialog re-opens at the directory of the previously-picked scene file and
+// highlights it — this survives ESC → re-pick cycles, which the legacy
+// <input type=file> element does not reliably preserve. Firefox / Safari fall
+// back to the legacy input in setupFileLoading().
+let _lastFileHandle = null;
+
 function showError(msg) {
     console.error(msg);
     const el = document.getElementById('loading-progress');
@@ -75,28 +85,58 @@ function showError(msg) {
 }
 
 // Allow user to disable engine audio entirely via URL param ?noaudio=1 for
-// debugging or if any Web Audio glitch ever causes trouble.
+// debugging or if any Web Audio glitch ever causes trouble. ?nobgm=1
+// independently silences the background music.
 const _engineAudioDisabled = (() => {
     try { return new URLSearchParams(window.location.search).has('noaudio'); }
     catch { return false; }
 })();
+const _bgmAudioDisabled = (() => {
+    try { return new URLSearchParams(window.location.search).has('nobgm'); }
+    catch { return false; }
+})();
 
-// Browsers block AudioContext.start() until a user gesture. Attach a one-shot
-// keydown listener that resumes the engine-sound context on the first key press
-// (typically Space to arm, or W/S for throttle), then removes itself.
-// We intentionally avoid pointer/touch listeners so that nothing can interfere
-// with clicks on UI buttons such as "Connect HID" (which need transient user
-// activation to call navigator.hid.requestDevice).
-function _installEngineAudioGestureHook() {
+// BGM playlists. Paths are relative to index.html. 'init' plays during
+// loading / filtering / placement; 'flight' cycles through while the drone
+// is being actively flown. Add entries (e.g. playing3.flac) to extend.
+const BGM_PLAYLISTS = {
+    init:   ['asset/music/initializ.flac'],
+    flight: [
+        'asset/music/playing1.flac',
+        'asset/music/playing2.flac',
+    ],
+};
+
+// Browsers block AudioContext.start() until a user gesture (autoplay policy).
+// Attach one-shot listeners that resume both audio contexts on the first user
+// interaction of any kind — click, tap, or key press — so BGM starts as soon
+// as the user clicks "Choose File" (or drops a file, or presses any key).
+// The listeners only call resume() and remove themselves; they don't call
+// preventDefault / stopPropagation, so they don't consume transient user
+// activation and won't interfere with subsequent UI actions like the file
+// picker dialog or navigator.hid.requestDevice().
+function _installAudioGestureHook() {
     const resume = () => {
-        try {
-            if (engineAudio) engineAudio.resume();
-        } catch (e) {
-            console.warn('[EngineAudio] resume failed:', e);
-        }
-        window.removeEventListener('keydown', resume, true);
+        try { if (engineAudio) engineAudio.resume(); }
+        catch (e) { console.warn('[EngineAudio] resume failed:', e); }
+        try { if (bgmAudio) bgmAudio.resume(); }
+        catch (e) { console.warn('[BgmAudio] resume failed:', e); }
+        window.removeEventListener('keydown',    resume, true);
+        window.removeEventListener('pointerdown', resume, true);
+        window.removeEventListener('touchstart',  resume, true);
     };
-    window.addEventListener('keydown', resume, true);
+    window.addEventListener('keydown',    resume, true);
+    window.addEventListener('pointerdown', resume, true);
+    window.addEventListener('touchstart',  resume, true);
+}
+
+// Switch the active BGM playlist for a given game mode. Safe to call when the
+// BGM subsystem is disabled or uninitialised.
+function _bgmForMode(modeName) {
+    if (!bgmAudio) return;
+    const playlist = modeName === 'flight' ? 'flight' : 'init';
+    try { bgmAudio.playPlaylist(playlist); }
+    catch (e) { console.warn('[BgmAudio] playPlaylist failed:', e); }
 }
 
 // ---- Initialize PlayCanvas (called once, before first PLY load) ----
@@ -117,7 +157,7 @@ function initPlayCanvas() {
     // Create camera
     cameraEntity = new pc.Entity('camera');
     cameraEntity.addComponent('camera', {
-        clearColor: new pc.Color(0.05, 0.05, 0.1),
+        clearColor: new pc.Color(0, 0, 0),
         farClip: 1000,
         nearClip: 0.05,
         fov: 90,
@@ -206,11 +246,7 @@ function setupOrbitControls() {
         // (If settings panel was open, controller already consumed the event via stopImmediatePropagation)
         if (e.code === 'Escape' && sceneLoaded) {
             if (!confirm('Exit current scene?')) return;
-            mode = 'loading';
-            sceneLoaded = false;
-            document.getElementById('placement-overlay')?.classList.remove('visible');
-            document.getElementById('game-logo')?.classList.remove('visible');
-            document.getElementById('drop-zone').classList.remove('hidden');
+            _exitToLoading();
             return;
         }
 
@@ -347,8 +383,64 @@ function updateSpawnMarker(pos) {
     spawnMarkerEntity.enabled = true;
 }
 
+// Full reset back to the "just-loaded page, no scene" state. Called when the
+// user confirms Esc from placement/flight. Mirrors the pristine DOM layout
+// (drop-zone visible, no HUD / key-guide / logo / placement overlay, black
+// canvas), silences engine audio, and tears down scene-specific PlayCanvas
+// entities so the next file drop gets a clean slate.
+function _exitToLoading() {
+    mode = 'loading';
+    sceneLoaded = false;
+    _bgmForMode(mode);
+
+    // Silence the engine sound — gameLoop returns early once sceneLoaded is
+    // false, so if we don't ramp it down here it stays frozen at whatever
+    // throttle/armed state the last flight frame left behind.
+    try { if (engineAudio) engineAudio.update(0, false); }
+    catch (e) { console.warn('[EngineAudio] silence on exit failed:', e); }
+
+    // Destroy the gsplat entity so nothing is rendered; loadGSplat() also
+    // destroys any existing 'gsplat-scene' entity before adding a new one, so
+    // this is safe across re-loads.
+    try {
+        const gs = app?.root?.findByName('gsplat-scene');
+        if (gs) gs.destroy();
+    } catch (_) {}
+    if (spawnMarkerEntity) spawnMarkerEntity.enabled = false;
+
+    // Disarm so there is no "ARMED" flash if the HUD ever re-shows before a
+    // fresh confirmSpawnAndFly().
+    if (controller) controller.armed = false;
+
+    // Hide every mode-specific overlay and reset inline-styled readouts.
+    document.getElementById('placement-overlay')?.classList.remove('visible');
+    document.getElementById('game-logo')?.classList.remove('visible');
+    document.getElementById('hud')?.classList.add('hidden');
+    document.getElementById('key-guide')?.classList.remove('visible');
+    document.getElementById('collision-flash')?.classList.remove('active');
+    document.getElementById('loading-overlay')?.classList.remove('visible');
+    document.getElementById('filter-overlay')?.classList.remove('visible');
+    const filterGuide = document.getElementById('filter-guide');
+    if (filterGuide) filterGuide.style.display = 'none';
+    const coordsEl = document.getElementById('spawn-coords');
+    if (coordsEl) coordsEl.style.display = 'none';
+
+    // Clear the OSD canvas so its last flight frame does not linger once the
+    // HUD container becomes visible again.
+    if (osd && typeof osd.clear === 'function') {
+        try { osd.clear(); } catch (_) {}
+    } else if (osd?.canvas) {
+        const ctx = osd.canvas.getContext('2d');
+        if (ctx) ctx.clearRect(0, 0, osd.canvas.width, osd.canvas.height);
+    }
+
+    document.getElementById('drop-zone')?.classList.remove('hidden');
+    console.log('Exited to loading state');
+}
+
 function enterPlacementMode() {
     mode = 'placement';
+    _bgmForMode(mode);
 
     // Show placement UI, hide flight HUD and logo
     document.getElementById('placement-overlay').classList.add('visible');
@@ -389,6 +481,7 @@ function confirmSpawnAndFly() {
     if (!spawnPoint) return;
 
     mode = 'flight';
+    _bgmForMode(mode);
 
     // Hide placement UI, show flight HUD and logo
     document.getElementById('placement-overlay').classList.remove('visible');
@@ -429,11 +522,46 @@ function setupFileLoading() {
         return;
     }
 
-    // File picker button
-    filePickerBtn.addEventListener('click', (e) => {
+    // File picker button. Prefer window.showOpenFilePicker when available
+    // (Chromium-based browsers on secure contexts): it lets us pass the last
+    // picked FileSystemFileHandle as `startIn`, so the dialog re-opens at the
+    // previous directory with the previous file highlighted — even across
+    // ESC → re-pick cycles. Firefox / Safari fall back to the legacy
+    // <input type=file>.click() path, which has less reliable memory but at
+    // least gives the OS's own last-directory behaviour.
+    const hasFsAccess = typeof window.showOpenFilePicker === 'function';
+    filePickerBtn.addEventListener('click', async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        fileInput.click();
+
+        if (!hasFsAccess) {
+            fileInput.click();
+            return;
+        }
+
+        try {
+            const opts = {
+                multiple: false,
+                excludeAcceptAllOption: false,
+                types: [{
+                    description: 'Gaussian Splat scene',
+                    accept: { 'application/octet-stream': ['.ply', '.sog', '.splat'] },
+                }],
+            };
+            if (_lastFileHandle) opts.startIn = _lastFileHandle;
+            const [handle] = await window.showOpenFilePicker(opts);
+            _lastFileHandle = handle;
+            const file = await handle.getFile();
+            loadSceneFile(file);
+        } catch (err) {
+            // AbortError = user cancelled the dialog. Anything else is a real
+            // failure — fall back to the legacy input so the user still has a
+            // way to pick a file.
+            if (err && err.name !== 'AbortError') {
+                console.warn('showOpenFilePicker failed, falling back to <input>:', err);
+                fileInput.click();
+            }
+        }
     });
     fileInput.addEventListener('change', (e) => {
         if (e.target.files.length > 0) {
@@ -498,16 +626,10 @@ async function loadSceneFile(file) {
         if (!controller) controller = new Controller();
         if (!drone) drone = new Drone();
         if (!hud) hud = new HUD();
-        if (!engineAudio && !_engineAudioDisabled) {
-            try {
-                engineAudio = new EngineAudio();
-                _installEngineAudioGestureHook();
-                console.info('[EngineAudio] enabled (press any key to unlock; add ?noaudio=1 to disable)');
-            } catch (e) {
-                console.warn('[EngineAudio] init failed, continuing silently:', e);
-                engineAudio = null;
-            }
-        }
+        // Audio is initialised once at page startup (see the bottom of this
+        // file); this block is a safety-net for any corner case where the
+        // top-level init failed (e.g. race with the module evaluation order).
+        if (!engineAudio && !bgmAudio) _initAudio();
 
         const arrayBuffer = await file.arrayBuffer();
         console.log(`File read: ${file.name} (${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)} MB)`);
@@ -581,6 +703,7 @@ async function loadSceneFile(file) {
         spawnPoint = null;
         sceneLoaded = true;
         mode = 'filtering';
+        _bgmForMode(mode);
 
         // Hide logo during filtering
         document.getElementById('game-logo')?.classList.remove('visible');
@@ -1093,4 +1216,40 @@ try {
 } catch(e) {
     console.warn('OSD init deferred:', e);
 }
+
+// Audio subsystems (engine sound + BGM). Initialised at startup so the
+// initializ.flac BGM can start playing as soon as the user makes their first
+// keypress — no need to wait for a scene file to be dropped.
+function _initAudio() {
+    if (!engineAudio && !_engineAudioDisabled) {
+        try {
+            engineAudio = new EngineAudio();
+            console.info('[EngineAudio] enabled (press any key to unlock; add ?noaudio=1 to disable)');
+        } catch (e) {
+            console.warn('[EngineAudio] init failed, continuing silently:', e);
+            engineAudio = null;
+        }
+    }
+    if (!bgmAudio && !_bgmAudioDisabled) {
+        try {
+            bgmAudio = new BgmAudio();
+            for (const [name, urls] of Object.entries(BGM_PLAYLISTS)) {
+                bgmAudio.registerPlaylist(name, urls);
+            }
+            console.info('[BgmAudio] enabled (press any key to unlock; add ?nobgm=1 to disable)');
+        } catch (e) {
+            console.warn('[BgmAudio] init failed, continuing silently:', e);
+            bgmAudio = null;
+        }
+    }
+    _installAudioGestureHook();
+    if (controller && typeof controller.attachAudio === 'function') {
+        controller.attachAudio(engineAudio, bgmAudio);
+    }
+    // Arm the default playlist for the current mode. Playback is queued until
+    // the first user gesture resumes the AudioContext.
+    _bgmForMode(mode);
+}
+_initAudio();
+
 console.log('MindCloud World Fly ready — drop a .ply, .sog, or .splat file to begin');

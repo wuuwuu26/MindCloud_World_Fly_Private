@@ -17,24 +17,30 @@
 /**
  * EngineAudio — sample-playback FPV drone motor sound.
  *
- * Loads a loop-friendly WAV (asset/fpv_loop.wav — checked into the repo as a
- * runtime asset) and modulates its playbackRate + master gain as a function
- * of normalized throttle. Because the file is already trimmed and cross-faded,
- * runtime processing is just "load, loop, play".
+ * Loads a loop-friendly WAV (asset/music/fpv_loop.wav — checked into the repo
+ * as a runtime asset) and modulates its playbackRate + master gain as a
+ * function of normalized throttle. Because the file is already trimmed and
+ * cross-faded, runtime processing is just "load, loop, play".
  *
- * The loop WAV is regenerated manually from asset/fpv.wav by running
+ * The loop WAV is regenerated manually from asset/music/fpv.wav by running
  * `python3 tools/prep_audio.py --flatten` — see that script for options.
  * No build step is involved at launch time.
  *
- * Public API (stable, must not break — main.js depends on it):
+ * Signal chain:
+ *   source → _master (throttle envelope) → _userGain (user volume + mute) → out
+ *
+ * Public API (stable, must not break — main.js / controller.js depend on it):
  *   new EngineAudio(url?)    construct; no audio work until a user gesture
  *   resume()                 call once inside a user-gesture handler
  *   update(t, armed)         per-frame; t in [0,1], armed boolean
- *   setMuted(bool)           hard mute toggle
+ *   setMuted(bool)           hard mute toggle (orthogonal to volume)
+ *   setVolume(v)             user volume in [0, 1]; survives mute toggles
+ *   getVolume()              current user volume
+ *   isMuted()                current mute flag
  */
 
 // Default clip location, relative to index.html.
-const DEFAULT_URL = 'asset/fpv_loop.wav';
+const DEFAULT_URL = 'asset/music/fpv_loop.wav';
 
 // Playback-rate range. 1.0 = native pitch/speed of the sample.
 // 0.7 ≈ minor-3rd below native, 1.5 ≈ perfect-5th above. Tune to taste.
@@ -58,7 +64,14 @@ export class EngineAudio {
         this.ready = false;     // buffer decoded, source playing
         this.muted = false;
 
+        // User volume in [0, 1]. Independent of the throttle envelope; applied
+        // by _userGain downstream of _master. Starts at 1.0 so the existing
+        // GAIN_IDLE / GAIN_FULL envelope is unchanged for users who never
+        // touch the settings panel.
+        this._userVolume = 1.0;
+
         this._master = null;
+        this._userGain = null;
         this._buffer = null;
         this._source = null;
         this._lastThrottle = -1;
@@ -81,10 +94,16 @@ export class EngineAudio {
         }
         this.started = true;
 
-        // Master gain starts silent; update() will ramp it once armed.
+        // Signal chain: source → _master (throttle envelope) → _userGain → out.
+        // _master starts silent; update() will ramp it once armed.
         this._master = this.ctx.createGain();
         this._master.gain.value = GAIN_DISARMED;
-        this._master.connect(this.ctx.destination);
+
+        this._userGain = this.ctx.createGain();
+        this._userGain.gain.value = this.muted ? 0 : this._userVolume;
+
+        this._master.connect(this._userGain);
+        this._userGain.connect(this.ctx.destination);
 
         // Kick off the asynchronous fetch+decode.
         this._load().catch(err => {
@@ -105,6 +124,26 @@ export class EngineAudio {
 
     setMuted(muted) {
         this.muted = !!muted;
+        this._applyUserGain();
+    }
+
+    /** User volume in [0, 1]. Clamped; persists across mute toggles. */
+    setVolume(v) {
+        const clamped = Math.max(0, Math.min(1, Number(v) || 0));
+        this._userVolume = clamped;
+        this._applyUserGain();
+    }
+
+    getVolume() { return this._userVolume; }
+
+    isMuted() { return this.muted; }
+
+    _applyUserGain() {
+        if (!this._userGain || !this.ctx) return;
+        const target = this.muted ? 0 : this._userVolume;
+        // Short ramp so slider drags don't click. Same time constant as the
+        // throttle envelope for a cohesive feel.
+        this._userGain.gain.setTargetAtTime(target, this.ctx.currentTime, SMOOTH_TAU);
     }
 
     /**
