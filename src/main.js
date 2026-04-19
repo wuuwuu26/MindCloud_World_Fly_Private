@@ -1065,6 +1065,7 @@ function updateKeyGuide() {
             '<kbd>Space</kbd> Arm / Disarm\n' +
             '<kbd>Shift</kbd> Boost\n' +
             '<kbd>R</kbd>     Reset\n' +
+            '<kbd>M</kbd>     Flight Mode (FPV/Drone)\n' +
             '<kbd>P</kbd>     Placement mode\n' +
             '<kbd>Tab</kbd>   Settings';
         el.classList.add('visible');

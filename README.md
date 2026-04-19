@@ -135,6 +135,7 @@ The status indicator at the bottom of the screen shows **ARMED** (green) or **DI
 | Q / E | Camera tilt up / down (drone mode) |
 | Space | Arm / disarm toggle |
 | R | Reset drone to spawn point |
+| M | Toggle flight mode (FPV ↔ Drone) |
 | Shift | Boost (1.5× thrust) |
 | P | Return to placement mode (reposition drone) |
 | Tab | Open settings panel |
@@ -158,17 +159,19 @@ Default channel mapping (AETR):
 | 1 | Pitch |
 | 2 | Throttle |
 | 3 | Yaw |
-| Button 0 | Arm toggle |
-| Button 1 | Reset |
+| Button 0 | Arm toggle (gamepad button; assignable) |
+| (assignable) | Flight-mode switch (any button or channel) |
+
+Reset is keyboard-only (press **R**); it has no RC / gamepad binding.
 
 ### Flight Modes
 
 | Mode | Behavior |
 |------|----------|
-| **Drone (Easy)** | Stabilized flight with position and altitude hold. Sticks command velocity — release to hover. Yaw stick commands yaw rate with heading hold on release. Cascaded PID controller keeps the drone level and on target. Best for exploration. |
+| **Drone (Easy)** | Stabilized flight with position and altitude hold. Sticks command velocity — release to hover. Yaw stick commands yaw rate; release simply stops the turn, so the drone keeps whatever heading it had. Cascaded PID controller keeps the drone level and on target. Best for exploration. |
 | **FPV (Manual)** | Direct rate control — sticks map to body-frame angular rates (pitch, roll, yaw). No self-leveling. Throttle directly controls thrust. Requires constant pilot input. Realistic FPV experience. |
 
-Switch modes any time in the settings panel (**Tab**). Each mode stores its own independent set of **PID gains** and **Rate/Expo** parameters, so tuning one mode does not affect the other.
+Switch modes at any time by pressing **M**, by mapping an RC channel to the **Mode Switch** action in the settings panel, or by using the dropdown in the settings panel (**Tab**). An RC binding can be configured as either **Toggle** (a flick flips the mode, like a momentary button) or **Level** (switch-up = FPV, switch-down = Drone — the channel position *is* the mode). Switching from FPV to Drone levels roll and pitch while preserving the current heading. Each mode stores its own independent set of **PID gains** and **Rate/Expo** parameters, so tuning one mode does not affect the other.
 
 **Drone mode** uses a fixed camera tilt angle (set in settings, 0–60°). **FPV mode** uses a fixed mount angle during flight; adjust Q/E before arming, or set it in settings.
 
@@ -188,7 +191,7 @@ Press **Tab** to open. Sections:
 
 - **Display** — Clean Mode (hides logo and key guide only; HUD and OSD remain visible), FPV OSD toggle
 - **RC Channel Assignment** — assign and invert axes, set dead zones (default 0), with listen-mode auto-detect
-- **Button Assignment** — assign arm/reset to buttons or axis thresholds
+- **Button Assignment** — assign **Arm** and **Mode Switch** to a gamepad button or an RC channel. Each axis binding has an **Inv** toggle (flip which end counts as active) and a **Toggle / Level** trigger dropdown. Reset is keyboard-only.
 - **Rates & Expo** — per-axis rate multiplier and expo curve (stored independently per flight mode)
 - **Gamepad Status** — shows connected controller name; option to disable Gamepad API for WebHID
 - **Channel Monitor** — real-time axis values from the gamepad

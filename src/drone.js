@@ -70,6 +70,10 @@ export class Drone {
 
         // ---- Tunable parameters ----
         this.flightMode  = 'drone';
+        // Previous-frame flight mode: used by update() to detect mode
+        // transitions and re-anchor position / integrator state so the new
+        // mode starts cleanly from the drone's current pose.
+        this._prevFlightMode = this.flightMode;
         this.mass        = 500;    // grams
         this.maxThrust   = 1000;   // grams-force
         this.dragCd      = 1.0;    // drag coefficient (dimensionless)
@@ -96,9 +100,9 @@ export class Drone {
         this.droneAltKi  = 2.0;
         this.droneAltKd  = 0.1;
 
-        // Position-hold setpoints
+        // Position-hold setpoints (horizontal XY + altitude Y). Drone mode
+        // yaw is pure rate control and does not use a target heading.
         this._targetX = 0; this._targetY = 2; this._targetZ = 0;
-        this._targetYaw = 0;
 
         // Smoothed attitude targets (prevent limit-cycle at angle clamp)
         this._smoothTargetPitch = 0;
@@ -157,7 +161,6 @@ export class Drone {
         this.collisionIntensity = 0;
         this.thrustOutput = 0;
         this._targetX = this._spawnX; this._targetY = this._spawnY; this._targetZ = this._spawnZ;
-        this._targetYaw = 0;
         this._posIntX = 0; this._posIntY = 0; this._posIntZ = 0;
         this._velIntX = 0; this._velIntY = 0; this._velIntZ = 0;
         this._prevPosErrX = 0; this._prevPosErrY = 0; this._prevPosErrZ = 0;
@@ -209,6 +212,16 @@ export class Drone {
 
     update(dt, input, octree) {
         dt = Math.min(dt, 0.05);
+
+        // 0. Handle flight-mode transitions (M key, RC channel, or dropdown).
+        // readSettings() has already copied the latest dropdown value into
+        // this.flightMode for this frame, so comparing against the cached
+        // previous value detects a change on the first frame it becomes
+        // effective.
+        if (this.flightMode !== this._prevFlightMode) {
+            this._onFlightModeChanged(this._prevFlightMode, this.flightMode);
+            this._prevFlightMode = this.flightMode;
+        }
 
         // 1. Control law → updates orientation quaternion and thrustOutput
         if (!input.armed) {
@@ -374,6 +387,33 @@ export class Drone {
     }
 
     // ---- Control laws ----
+
+    /**
+     * Called once on the frame a flight-mode transition is detected.
+     * Re-anchors position-hold + altitude-hold setpoints to the drone's
+     * current state and clears PID integrator / derivative memory so the
+     * new mode does not fly toward stale targets or apply leftover control
+     * effort accumulated during the previous mode.
+     *
+     * Note on orientation: we deliberately do NOT reset pitch/roll here.
+     * Drone mode's tilt controller will naturally level the craft over a
+     * few hundred ms from whatever attitude FPV left behind, which matches
+     * the user-visible "roll and pitch switch to level" expectation. Yaw
+     * is pure rate control and needs no reset.
+     */
+    _onFlightModeChanged(oldMode, newMode) {
+        this._targetX = this.x;
+        this._targetY = this.y;
+        this._targetZ = this.z;
+        this._posIntX = 0; this._posIntY = 0; this._posIntZ = 0;
+        this._velIntX = 0; this._velIntY = 0; this._velIntZ = 0;
+        this._prevPosErrX = 0; this._prevPosErrY = 0; this._prevPosErrZ = 0;
+        this._prevVelErrX = 0; this._prevVelErrY = 0; this._prevVelErrZ = 0;
+        this._filtPosDerrX = 0; this._filtPosDerrY = 0; this._filtPosDerrZ = 0;
+        this._filtVelDerrX = 0; this._filtVelDerrY = 0; this._filtVelDerrZ = 0;
+        this._smoothTargetPitch = 0;
+        this._smoothTargetRoll  = 0;
+    }
 
     _updateDisarmed(dt) {
         this.thrustOutput = 0;
@@ -578,22 +618,18 @@ export class Drone {
         this.pitchRate = pitchErr * 5;
         this.rollRate  = rollErr  * 5;
 
-        // ---- 4. Yaw: stick → rate, centered → heading hold ----
+        // ---- 4. Yaw: pure rate control, no target heading ----
+        // Stick commands yaw rate directly; a centered stick damps the rate
+        // toward zero (same pattern as FPV). This preserves whatever heading
+        // the drone has at that moment — in particular, a FPV→drone switch
+        // keeps the current heading instead of snapping to a stale setpoint.
         const droneYawMax = this.droneMaxYawRate * rates.yaw * boost;
-        if (yawActive) {
-            // Stick directly commands yaw rate
-            const tYR = input.yaw * droneYawMax;
-            const ys = 1 - Math.exp(-15 * dt);
-            this.yawRate += (tYR - this.yawRate) * ys;
-            // Latch current heading as hold target for when stick is released
-            this._targetYaw = dec.yawDeg;
-        } else {
-            // Stick centered → hold heading via P-controller
-            const yawErrRaw = this._targetYaw - dec.yawDeg;
-            const yawErrNorm = Math.atan2(Math.sin(yawErrRaw * DEG2RAD), Math.cos(yawErrRaw * DEG2RAD)) * RAD2DEG;
-            const tYR = clamp(yawErrNorm * 2.0, -droneYawMax, droneYawMax);
-            const ys = 1 - Math.exp(-15 * dt);
-            this.yawRate += (tYR - this.yawRate) * ys;
+        const tYR = input.yaw * droneYawMax;
+        const ys = 1 - Math.exp(-15 * dt);
+        this.yawRate += (tYR - this.yawRate) * ys;
+        if (!yawActive) {
+            // Stick centered → angular drag damps residual yaw rate to zero.
+            this.yawRate *= Math.exp(-this.angularDrag * dt);
         }
         this._applyBodyRotation(0, 1, 0, this.yawRate * dt);
 

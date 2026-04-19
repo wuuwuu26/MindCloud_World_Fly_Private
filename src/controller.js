@@ -21,7 +21,7 @@
  */
 
 const ACTIONS = ['roll', 'pitch', 'throttle', 'yaw', 'cameraTilt'];
-const BUTTON_ACTIONS = ['arm', 'reset'];
+const BUTTON_ACTIONS = ['arm', 'modeSwitch'];
 
 // All persisted slider/select IDs
 const SETTINGS_IDS = [
@@ -50,8 +50,13 @@ const DEFAULT_MAPPING = {
 };
 
 const DEFAULT_BUTTON_MAPPING = {
-    arm:   { source: 'button', buttonIndex: 0, axisIndex: -1, axisThreshold: 0.5 },
-    reset: { source: 'button', buttonIndex: 1, axisIndex: -1, axisThreshold: 0.5 },
+    // triggerMode applies only to axis-source bindings (RC switches / gamepad
+    // axes) and selects between 'toggle' (rising edge flips state) and 'level'
+    // (switch position directly reflects state). Button-source bindings and
+    // the keyboard always use edge-based toggle regardless of this field.
+    arm:        { source: 'button', buttonIndex: 0,  axisIndex: -1, axisThreshold: 0.5, inverted: false, triggerMode: 'toggle' },
+    // Unassigned by default — user can bind any channel/button via the settings panel.
+    modeSwitch: { source: 'button', buttonIndex: -1, axisIndex: -1, axisThreshold: 0.5, inverted: false, triggerMode: 'toggle' },
 };
 
 const KEYBOARD_MAP = {
@@ -99,13 +104,15 @@ export class Controller {
         this._cameraTiltKeyboard = 0;
         this._cameraTiltAxis = 0;
         this._prevCameraTiltAxis = 0;
-        this.buttons = { arm: false, reset: false };
+        this.buttons = { arm: false, modeSwitch: false };
         this.boost = false;
 
-        // Separate current/previous state for keyboard and gamepad edge detection
-        this._gpButtons = { arm: false, reset: false };
-        this._prevKbButtons = { arm: false, reset: false };
-        this._prevGpButtons = { arm: false, reset: false };
+        // Separate current/previous state for keyboard and gamepad edge detection.
+        // Reset is keyboard-only (R key); it has no gamepad/HID binding, so it is
+        // not tracked in these per-frame button-state objects.
+        this._gpButtons     = { arm: false, modeSwitch: false };
+        this._prevKbButtons = { arm: false, reset: false, modeSwitch: false };
+        this._prevGpButtons = { arm: false, modeSwitch: false };
 
         // Keyboard state
         this._keysDown = new Set();
@@ -122,6 +129,12 @@ export class Controller {
 
         // Armed state
         this.armed = false;
+
+        // Startup / hot-reconnect guard. When the input device transitions
+        // from disconnected to connected we seed _prevGpButtons with the
+        // current polled state so a switch that is already in its “pressed”
+        // position does not produce a phantom rising-edge on the first frame.
+        this._wasConnected = false;
 
         // Load saved config
         this._loadConfig();
@@ -152,9 +165,7 @@ export class Controller {
             this.axes[action] = 0;
         }
         this.buttons.arm = false;
-        this.buttons.reset = false;
         this._gpButtons.arm = false;
-        this._gpButtons.reset = false;
         this.boost = false;
         this._cameraTiltKeyboard = 0;
         this._prevCameraTiltAxis = this._cameraTiltAxis;
@@ -200,12 +211,20 @@ export class Controller {
                 }
             }
 
-            // HID button handling (use high channels as buttons)
+            // HID button handling — transmitters expose switches as axes.
+            // Reset to `false` each frame and only raise if the axis binding
+            // exists and its (optionally inverted) value crosses the
+            // directional threshold. One-sided so the user picks which end
+            // of the switch counts as “pressed” via the Inv toggle.
             for (const bAction of BUTTON_ACTIONS) {
                 const bm = this.buttonMapping[bAction];
+                let pressed = false;
                 if (bm.source === 'axis' && bm.axisIndex >= 0 && bm.axisIndex < hidAxes.length) {
-                    this._gpButtons[bAction] = Math.abs(hidAxes[bm.axisIndex]) > bm.axisThreshold;
+                    let v = hidAxes[bm.axisIndex];
+                    if (bm.inverted) v = -v;
+                    pressed = v > bm.axisThreshold;
                 }
+                this._gpButtons[bAction] = pressed;
             }
 
             // Listen mode for HID: detect axis movement
@@ -281,6 +300,14 @@ export class Controller {
                     const action = this._listenAction;
                     this._listenAction = null;
                     this._listenBaseline = null;
+                    // Also cancel a concurrent button-listen for the same
+                    // action (Gamepad dual-listen path) so a later press
+                    // won't overwrite the binding we just committed.
+                    if (this._listenButtonAction === action) {
+                        this._listenButtonAction = null;
+                        this._listenButtonBaseline = null;
+                        this._listenButtonCallback = null;
+                    }
                     if (this._listenCallback) this._listenCallback(action, bestAxis, bestSign < 0);
                     this._saveConfig();
                     this._buildSettingsUI();
@@ -291,10 +318,17 @@ export class Controller {
             if (this._listenButtonAction && this._listenButtonBaseline) {
                 for (let i = 0; i < gp.buttons.length; i++) {
                     if (gp.buttons[i].pressed && !this._listenButtonBaseline[i]) {
-                        this.buttonMapping[this._listenButtonAction].buttonIndex = i;
                         const action = this._listenButtonAction;
                         this._listenButtonAction = null;
                         this._listenButtonBaseline = null;
+                        // Cross-cancel any concurrent axis-listen for the
+                        // same action so stick movement after the button
+                        // press doesn't replace the fresh button binding.
+                        if (this._listenAction === action) {
+                            this._listenAction = null;
+                            this._listenBaseline = null;
+                            this._listenCallback = null;
+                        }
                         if (this._listenButtonCallback) this._listenButtonCallback(action, i);
                         this._saveConfig();
                         this._buildSettingsUI();
@@ -303,14 +337,20 @@ export class Controller {
                 }
             }
 
-            // Gamepad buttons — read raw physical state (no inversion)
+            // Gamepad buttons. Axis source uses a directional threshold
+            // (with optional inversion) so only one end of a trigger/switch
+            // counts as pressed; button source respects `inverted` to flip
+            // the active-low / active-high sense.
             for (const bAction of BUTTON_ACTIONS) {
                 const bm = this.buttonMapping[bAction];
                 let pressed = false;
                 if (bm.source === 'axis' && bm.axisIndex >= 0 && bm.axisIndex < gp.axes.length) {
-                    pressed = Math.abs(gp.axes[bm.axisIndex]) > bm.axisThreshold;
-                } else if (bm.buttonIndex >= 0 && bm.buttonIndex < gp.buttons.length) {
+                    let v = gp.axes[bm.axisIndex];
+                    if (bm.inverted) v = -v;
+                    pressed = v > bm.axisThreshold;
+                } else if (bm.source === 'button' && bm.buttonIndex >= 0 && bm.buttonIndex < gp.buttons.length) {
                     pressed = gp.buttons[bm.buttonIndex].pressed;
+                    if (bm.inverted) pressed = !pressed;
                 }
                 this._gpButtons[bAction] = pressed;
             }
@@ -321,32 +361,74 @@ export class Controller {
             this.connected = false;
         }
 
-        // Keyboard buttons
+        // Keyboard buttons. The mode-switch key (M) is suppressed while the
+        // settings panel is open so that typing inside any settings control
+        // can never accidentally toggle the flight mode — the user must use
+        // the dropdown (mouse / arrow keys) in that case.
         const kbArm = this._keysDown.has('Space');
         const kbReset = this._keysDown.has('KeyR');
+        const kbModeSwitch = this._keysDown.has('KeyM') && !this.isSettingsOpen();
 
         // Clamp axes
         for (const action of ACTIONS) {
             this.axes[action] = Math.max(-1, Math.min(1, this.axes[action]));
         }
 
-        // Separate edge detection: gamepad and keyboard independently
-        const gpArmRising   = this._gpButtons.arm   && !this._prevGpButtons.arm;
-        const gpResetRising = this._gpButtons.reset  && !this._prevGpButtons.reset;
-        const kbArmRising   = kbArm   && !this._prevKbButtons.arm;
-        const kbResetRising = kbReset  && !this._prevKbButtons.reset;
+        // Edge detection: gamepad and keyboard evaluated independently.
+        const gpArmRising    = this._gpButtons.arm        && !this._prevGpButtons.arm;
+        const gpModeRising   = this._gpButtons.modeSwitch && !this._prevGpButtons.modeSwitch;
+        const kbArmRising    = kbArm        && !this._prevKbButtons.arm;
+        const kbResetRising  = kbReset      && !this._prevKbButtons.reset;
+        const kbModeRising   = kbModeSwitch && !this._prevKbButtons.modeSwitch;
 
-        const armRising  = gpArmRising  || kbArmRising;
-        const resetRising = gpResetRising || kbResetRising;
+        // Suppress rising-edges on the frame the input device becomes
+        // connected so a switch already held in its “pressed” position at
+        // startup / hot-reconnect does not spuriously fire arm or modeSwitch.
+        // Level-mode bindings are exempt because their whole purpose is to
+        // reflect the switch position at all times, including on load.
+        const justConnected = this.connected && !this._wasConnected;
+        this._wasConnected = this.connected;
 
-        if (armRising) {
+        // A binding is "level-mode active" only when it is an axis source
+        // that is actually bound (axisIndex >= 0) and its triggerMode is
+        // 'level'. Otherwise we fall back to edge-based toggle.
+        const armBm  = this.buttonMapping.arm;
+        const modeBm = this.buttonMapping.modeSwitch;
+        const armAxisLevel  = armBm.source  === 'axis' && armBm.axisIndex  >= 0 && armBm.triggerMode  === 'level';
+        const modeAxisLevel = modeBm.source === 'axis' && modeBm.axisIndex >= 0 && modeBm.triggerMode === 'level';
+
+        // Keyboard is always edge-toggle (unaffected by triggerMode setting).
+        if (!justConnected && kbArmRising)  this.armed = !this.armed;
+        if (!justConnected && kbModeRising) this._toggleFlightMode();
+
+        // Gamepad / HID arm
+        if (armAxisLevel) {
+            // Switch position is the ground truth; keyboard toggles in the
+            // same frame get immediately overridden here, which is the
+            // intended semantics of level mode.
+            this.armed = this._gpButtons.arm;
+        } else if (!justConnected && gpArmRising) {
             this.armed = !this.armed;
         }
 
-        this._prevGpButtons.arm   = this._gpButtons.arm;
-        this._prevGpButtons.reset = this._gpButtons.reset;
-        this._prevKbButtons.arm   = kbArm;
-        this._prevKbButtons.reset = kbReset;
+        // Gamepad / HID mode switch
+        if (modeAxisLevel) {
+            // Two-position: active (post-invert) → fpv, inactive → drone.
+            const targetMode = this._gpButtons.modeSwitch ? 'fpv' : 'drone';
+            if (this._currentMode !== targetMode) {
+                const ms = document.getElementById('flight-mode-select');
+                if (ms) ms.value = targetMode;
+                this._onModeSwitch(targetMode);
+            }
+        } else if (!justConnected && gpModeRising) {
+            this._toggleFlightMode();
+        }
+
+        this._prevGpButtons.arm        = this._gpButtons.arm;
+        this._prevGpButtons.modeSwitch = this._gpButtons.modeSwitch;
+        this._prevKbButtons.arm        = kbArm;
+        this._prevKbButtons.reset      = kbReset;
+        this._prevKbButtons.modeSwitch = kbModeSwitch;
 
         return {
             roll: this.axes.roll,
@@ -359,7 +441,7 @@ export class Controller {
             cameraTiltAxisChanged: Math.abs(this._cameraTiltAxis - this._prevCameraTiltAxis) > 0.01,
             boost: this.boost,
             armed: this.armed,
-            resetTriggered: resetRising,
+            resetTriggered: kbResetRising,
             rates: {
                 roll:  this.mapping.roll.rate  !== undefined ? this.mapping.roll.rate  : 1.0,
                 pitch: this.mapping.pitch.rate !== undefined ? this.mapping.pitch.rate : 1.0,
@@ -524,6 +606,21 @@ export class Controller {
 
         this._saveConfig();
         this._buildSettingsUI();
+    }
+
+    /**
+     * Toggle flight mode between 'drone' and 'fpv'. Invoked from the in-flight
+     * M key or from a mapped modeSwitch RC channel; the settings-panel
+     * dropdown path still goes through _onModeSwitch via its change event.
+     * Updates the dropdown so the UI reflects the change on next open.
+     */
+    _toggleFlightMode() {
+        const newMode = this._currentMode === 'drone' ? 'fpv' : 'drone';
+        const modeSelect = document.getElementById('flight-mode-select');
+        if (modeSelect) modeSelect.value = newMode;
+        // Programmatic .value changes don't fire 'change', so call the handler
+        // directly to snapshot/restore per-mode rate-expo and PID gains.
+        this._onModeSwitch(newMode);
     }
 
     // ---- Private methods ----
@@ -989,12 +1086,16 @@ export class Controller {
                 if (!bm.source) bm.source = 'button';
                 if (bm.axisIndex === undefined) bm.axisIndex = -1;
                 if (bm.axisThreshold === undefined) bm.axisThreshold = 0.5;
+                if (bm.inverted === undefined) bm.inverted = false;
+                if (bm.triggerMode === undefined) bm.triggerMode = 'toggle';
 
                 const row = document.createElement('div');
                 row.className = 'setting-row';
 
                 const label = document.createElement('label');
-                label.textContent = bAction.charAt(0).toUpperCase() + bAction.slice(1);
+                // Human-readable label; fall back to capitalised action name.
+                const LABELS = { arm: 'Arm', modeSwitch: 'Mode Switch' };
+                label.textContent = LABELS[bAction] || (bAction.charAt(0).toUpperCase() + bAction.slice(1));
                 row.appendChild(label);
 
                 const controls = document.createElement('div');
@@ -1010,52 +1111,28 @@ export class Controller {
                 }
                 controls.appendChild(srcLabel);
 
-                // Assign Button (detect button press)
-                const assignBtnBtn = document.createElement('button');
-                assignBtnBtn.className = 'assign-btn';
-                assignBtnBtn.textContent = 'Btn';
-                assignBtnBtn.title = 'Assign to a button';
-                assignBtnBtn.addEventListener('click', () => {
-                    if (this._listenButtonAction === bAction) {
-                        this.cancelButtonListening();
-                        assignBtnBtn.classList.remove('listening');
-                        assignBtnBtn.textContent = 'Btn';
-                        return;
-                    }
-                    this.cancelButtonListening();
-                    this.cancelListening();
-                    document.querySelectorAll('.assign-btn.listening').forEach(b => {
-                        b.classList.remove('listening');
-                        b.textContent = b._origText || 'Assign';
-                    });
+                // --- DOM element construction (no DOM insertion yet) -------
+                // All children below are appended at the end of this block in
+                // the desired visual order:
+                //   [Src] [Trigger (axis only)] [Inv] [Assign] [None]
+                // srcLabel is appended earlier above; the others are gathered
+                // here first so the final append sequence stays readable.
 
-                    const started = this.startButtonListening(bAction, (a, btnIdx) => {
-                        assignBtnBtn.classList.remove('listening');
-                        assignBtnBtn.textContent = 'Btn';
-                        bm.source = 'button';
-                        bm.buttonIndex = btnIdx;
-                        srcLabel.textContent = `Btn ${btnIdx}`;
-                    });
-                    if (started) {
-                        assignBtnBtn.classList.add('listening');
-                        assignBtnBtn.textContent = 'Press...';
-                    } else {
-                        alert('No gamepad detected.');
-                    }
-                });
-                assignBtnBtn._origText = 'Btn';
-                controls.appendChild(assignBtnBtn);
-
-                // Assign Axis (detect axis movement)
-                const assignAxisBtn = document.createElement('button');
-                assignAxisBtn.className = 'assign-btn';
-                assignAxisBtn.textContent = 'Axis';
-                assignAxisBtn.title = 'Assign to an axis/channel';
-                assignAxisBtn.addEventListener('click', () => {
-                    if (this._listenAction === bAction) {
+                // Unified Assign button. The user thinks in terms of a single
+                // "button" binding; the code picks the right underlying source
+                // automatically: HID → axis (switch), Gamepad → whichever of
+                // axis-movement or button-press happens first during listen.
+                const assignBtn2 = document.createElement('button');
+                assignBtn2.className = 'assign-btn';
+                assignBtn2.textContent = 'Assign';
+                assignBtn2.title = 'Press a button, flick a switch, or move a channel to bind it';
+                assignBtn2.addEventListener('click', () => {
+                    const isListening = this._listenAction === bAction || this._listenButtonAction === bAction;
+                    if (isListening) {
                         this.cancelListening();
-                        assignAxisBtn.classList.remove('listening');
-                        assignAxisBtn.textContent = 'Axis';
+                        this.cancelButtonListening();
+                        assignBtn2.classList.remove('listening');
+                        assignBtn2.textContent = 'Assign';
                         return;
                     }
                     this.cancelListening();
@@ -1065,24 +1142,60 @@ export class Controller {
                         b.textContent = b._origText || 'Assign';
                     });
 
-                    const started = this.startListening(bAction, (a, axisIdx, inverted) => {
-                        assignAxisBtn.classList.remove('listening');
-                        assignAxisBtn.textContent = 'Axis';
+                    const viaHid = this._hidConnected;
+                    const onAxis = (a, axisIdx, inverted) => {
                         bm.source = 'axis';
                         bm.axisIndex = axisIdx;
-                        srcLabel.textContent = `Axis ${axisIdx}`;
+                        bm.inverted = inverted;
                         this._saveConfig();
                         this._buildSettingsUI();
-                    });
-                    if (started) {
-                        assignAxisBtn.classList.add('listening');
-                        assignAxisBtn.textContent = 'Move...';
+                    };
+                    const onButton = (a, btnIdx) => {
+                        bm.source = 'button';
+                        bm.buttonIndex = btnIdx;
+                        bm.inverted = false;
+                        this._saveConfig();
+                        this._buildSettingsUI();
+                    };
+
+                    let started;
+                    if (viaHid) {
+                        // HID has no button concept; axis-listen only.
+                        started = this.startListening(bAction, onAxis);
                     } else {
-                        alert('No gamepad detected.');
+                        // Gamepad: arm both axis- and button-listen. The detection
+                        // loops cross-cancel, so whichever input the user touches
+                        // first decides the binding type.
+                        const a = this.startListening(bAction, onAxis);
+                        const b = this.startButtonListening(bAction, onButton);
+                        started = a || b;
+                    }
+
+                    if (started) {
+                        assignBtn2.classList.add('listening');
+                        assignBtn2.textContent = viaHid ? 'Flick…' : 'Press / Move…';
+                    } else {
+                        alert('No gamepad or HID device detected.');
                     }
                 });
-                assignAxisBtn._origText = 'Axis';
-                controls.appendChild(assignAxisBtn);
+                assignBtn2._origText = 'Assign';
+
+                // Inv toggle — flips which side of the switch / button state
+                // counts as "pressed". For an axis source this swaps the
+                // high/low end; for a button source it flips active-high ↔
+                // active-low (useful if a 3-pos switch is wired inverted).
+                const invLabel = document.createElement('label');
+                invLabel.style.cssText = 'display:inline-flex;align-items:center;gap:3px;font-size:11px;color:#aaa;margin-left:2px;cursor:pointer;';
+                const invCb = document.createElement('input');
+                invCb.type = 'checkbox';
+                invCb.checked = !!bm.inverted;
+                invCb.title = 'Invert: flip which end of the switch counts as pressed';
+                invCb.addEventListener('change', () => {
+                    bm.inverted = invCb.checked;
+                    this._saveConfig();
+                });
+                invLabel.appendChild(invCb);
+                invLabel.appendChild(document.createTextNode('Inv'));
 
                 // None button (unassign)
                 const noneBtnB = document.createElement('button');
@@ -1095,34 +1208,44 @@ export class Controller {
                     bm.source = 'button';
                     bm.buttonIndex = -1;
                     bm.axisIndex = -1;
+                    bm.inverted = false;
                     srcLabel.textContent = 'None';
                     this._saveConfig();
                     this._buildSettingsUI();
                 });
-                controls.appendChild(noneBtnB);
 
-                // Threshold slider (for axis mode)
+                // Trigger-mode dropdown (axis source only).
+                // Toggle: rising edge of the switch flips the action state
+                //         (matches a momentary keyboard / gamepad button press).
+                // Level:  switch position *is* the action state, re-evaluated
+                //         every frame (matches a real 2-position arm switch).
+                // Keyboard input always uses toggle regardless of this setting.
+                // The axis threshold is kept fixed at its default (0.5) — these
+                // are two-state button actions, so a user-tunable threshold has
+                // no meaningful effect on behaviour.
+                let trigSelect = null;
                 if (bm.source === 'axis') {
-                    const thLabel = document.createElement('span');
-                    thLabel.style.cssText = 'font-size:11px;color:#888;margin-left:4px;';
-                    thLabel.textContent = 'TH';
-                    controls.appendChild(thLabel);
-                    const thSlider = document.createElement('input');
-                    thSlider.type = 'range';
-                    thSlider.min = '0.1'; thSlider.max = '0.9'; thSlider.step = '0.05';
-                    thSlider.value = bm.axisThreshold;
-                    thSlider.style.width = '50px';
-                    const thVal = document.createElement('span');
-                    thVal.className = 'deadzone-val';
-                    thVal.textContent = bm.axisThreshold.toFixed(2);
-                    thSlider.addEventListener('input', () => {
-                        bm.axisThreshold = parseFloat(thSlider.value);
-                        thVal.textContent = parseFloat(thSlider.value).toFixed(2);
+                    trigSelect = document.createElement('select');
+                    trigSelect.style.cssText = 'background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:11px;margin-right:6px;';
+                    trigSelect.title = 'Toggle: rising edge flips state. Level: switch position directly drives state.';
+                    const optT = document.createElement('option');
+                    optT.value = 'toggle'; optT.textContent = 'Toggle';
+                    const optL = document.createElement('option');
+                    optL.value = 'level'; optL.textContent = 'Level';
+                    trigSelect.appendChild(optT);
+                    trigSelect.appendChild(optL);
+                    trigSelect.value = bm.triggerMode;
+                    trigSelect.addEventListener('change', () => {
+                        bm.triggerMode = trigSelect.value;
                         this._saveConfig();
                     });
-                    controls.appendChild(thSlider);
-                    controls.appendChild(thVal);
                 }
+
+                // --- Final append order: Src | Trigger | Inv | Assign | None
+                if (trigSelect) controls.appendChild(trigSelect);
+                controls.appendChild(invLabel);
+                controls.appendChild(assignBtn2);
+                controls.appendChild(noneBtnB);
 
                 row.appendChild(controls);
                 btnContainer.appendChild(row);
@@ -1505,11 +1628,33 @@ export class Controller {
             });
         }
 
-        // Flight mode select — swap per-mode settings on change
+        // Flight mode select — swap per-mode settings on change.
+        //
+        // Two guards against accidental mode switches:
+        //   1. Block letter-prefix navigation: native <select> lets you jump
+        //      to an option by pressing its first letter (D → "Drone", F →
+        //      "FPV"). We swallow any key that isn't a navigation key, so
+        //      pressing D no longer flips the mode.
+        //   2. Blur the select after a commit so that a later arrow-press
+        //      on the (focused-but-closed) control can't silently cycle the
+        //      value without the dropdown being explicitly re-opened.
         const modeSelect = document.getElementById('flight-mode-select');
         if (modeSelect && !modeSelect._bound) {
             modeSelect._bound = true;
-            modeSelect.addEventListener('change', () => this._onModeSwitch(modeSelect.value));
+            const ALLOWED_KEYS = new Set([
+                'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+                'Enter', 'Escape', 'Tab', 'Space',
+            ]);
+            modeSelect.addEventListener('keydown', (e) => {
+                if (!ALLOWED_KEYS.has(e.code)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+            });
+            modeSelect.addEventListener('change', () => {
+                this._onModeSwitch(modeSelect.value);
+                modeSelect.blur();
+            });
         }
 
         // Physics slider+number pairs (bidirectional sync)
@@ -1597,7 +1742,6 @@ export class Controller {
                     for (const bAction of BUTTON_ACTIONS) {
                         if (config.buttonMapping[bAction]) {
                             this.buttonMapping[bAction] = { ...this.buttonMapping[bAction], ...config.buttonMapping[bAction] };
-                            delete this.buttonMapping[bAction].inverted; // legacy cleanup
                         }
                     }
                 }
