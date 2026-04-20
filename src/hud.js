@@ -21,6 +21,37 @@
 
 import { formatLap } from './gates.js';
 
+/**
+ * Render a race-panel readout string as a sequence of fixed-width
+ * `<span>` slots, so the whole line stays rock-still even when the
+ * active font is proportional (Orbitron, Rajdhani, …). Without this
+ * the millisecond digits in `01:40.718` would shift every frame
+ * because '8' and '1' render at different widths and the line is
+ * `text-align: center`.
+ *
+ * Three slot widths cover every character we actually emit:
+ *   digits / dashes       → 0.60 em (widest slot, keeps 0-9 + '-' aligned)
+ *   colons / periods      → 0.30 em (narrow punctuation)
+ *   spaces / slashes      → 0.45 em (for the GATE "1 / 16" separator)
+ *
+ * Returns a ready-to-assign HTML string. Input is assumed to be one of
+ * our own format outputs (digits / ':' / '.' / '-' / ' ' / '/') so we
+ * don't bother HTML-escaping — the small allow-list rules out the
+ * injection vectors on the way in.
+ */
+function _monoDigits(str) {
+    let out = '';
+    for (let i = 0; i < str.length; i++) {
+        const c = str[i];
+        let cls;
+        if (c === ':' || c === '.')      cls = 'hrp-char hrp-char-sep';
+        else if (c === ' ' || c === '/') cls = 'hrp-char hrp-char-sp';
+        else                              cls = 'hrp-char hrp-char-d';
+        out += `<span class="${cls}">${c}</span>`;
+    }
+    return out;
+}
+
 export class HUD {
     constructor() {
         this.altitudeEl = document.getElementById('hud-altitude');
@@ -31,9 +62,13 @@ export class HUD {
         this.collisionWarnEl = document.getElementById('hud-collision-warn');
         this.armedEl = document.getElementById('armed-indicator');
         this.collisionFlashEl = document.getElementById('collision-flash');
-        this.raceProgressEl = document.getElementById('hud-race-progress');
-        this.lapTimerEl = document.getElementById('hud-lap-timer');
         this.hudContainer = document.getElementById('hud');
+
+        // F1-style race timing panel (left side of the viewport).
+        this.racePanelEl     = document.getElementById('hud-race-panel');
+        this.hrpLapTimeEl    = document.getElementById('hrp-lap-time');
+        this.hrpBestTimeEl   = document.getElementById('hrp-best-time');
+        this.hrpGateProgEl   = document.getElementById('hrp-gate-progress');
 
         // FPS tracking
         this._frameTimes = [];
@@ -125,65 +160,93 @@ export class HUD {
             }
         }
 
-        // Race-course readouts. Two elements in the bottom-centre zone:
-        //   hud-lap-timer     — "Lap 3 · 00:42.314 · best 00:39.120"
-        //   hud-race-progress — "Gate 2 / 7"
-        // Both hidden unless gateMode is on (isVisible()) AND a path of
-        // >= 3 gates exists. Out-of-order gate crossings are silently
-        // ignored by the course, so there is no "missed lap" state to
-        // surface here.
+        // F1-style race timing panel on the left side. Hidden unless
+        // the gate course is visible AND the path has >= 3 gates. Shows
+        // current lap number + live clock, the session best (gold), and
+        // the gate-progress counter (chartreuse, pulses on each pass).
         const hasCourse = !!(gateCourse &&
                              typeof gateCourse.isVisible === 'function' &&
                              gateCourse.isVisible() &&
                              gateCourse.gates && gateCourse.gates.length >= 3);
 
-        if (this.raceProgressEl) {
-            if (hasCourse) {
-                const passed = gateCourse.passedCount();
-                const total  = gateCourse.gates.length;
-
-                if (passed > this._raceLastPassed) this._raceFlashTimer = 400;
-                this._raceLastPassed = passed;
-
-                const next = ((gateCourse.nextGateIdx | 0) % total) + 1;
-                this.raceProgressEl.textContent = `Gate ${next} / ${total}`;
-                this.raceProgressEl.style.display = 'block';
-
-                if (this._raceFlashTimer > 0) {
-                    this._raceFlashTimer -= dt;
-                    const t = Math.max(0, this._raceFlashTimer) / 400;
-                    this.raceProgressEl.style.color     = `rgb(${Math.round(77 + 178 * t)}, ${Math.round(221 + 34 * t)}, ${Math.round(255 - 80 * t)})`;
-                    this.raceProgressEl.style.transform = `scale(${1 + 0.15 * t})`;
-                } else {
-                    this.raceProgressEl.style.color     = '#4df';
-                    this.raceProgressEl.style.transform = 'scale(1)';
-                }
-            } else {
-                this.raceProgressEl.style.display = 'none';
+        if (this.racePanelEl) {
+            if (!hasCourse) {
+                this.racePanelEl.style.display = 'none';
                 this._raceLastPassed = 0;
                 this._raceFlashTimer = 0;
-            }
-        }
-
-        if (this.lapTimerEl) {
-            if (hasCourse) {
-                const lapStartedYet = gateCourse.lapStart != null;
-                const lapMs   = lapStartedYet ? gateCourse.currentLapMs : 0;
-                const bestMs  = gateCourse.bestLapMs;
-                const lapNum  = gateCourse.lapCount + 1;
-
-                let text;
-                if (!lapStartedYet) {
-                    text = `Cross gate 1 to start the timer${bestMs != null ? ` · best ${formatLap(bestMs)}` : ''}`;
-                } else {
-                    const bestBit = (bestMs != null) ? ` · best ${formatLap(bestMs)}` : '';
-                    text = `Lap ${lapNum} · ${formatLap(lapMs)}${bestBit}`;
-                }
-                this.lapTimerEl.textContent = text;
-                this.lapTimerEl.style.display = 'block';
-                this.lapTimerEl.style.color = lapStartedYet ? '#4df' : '#aaa';
             } else {
-                this.lapTimerEl.style.display = 'none';
+                this.racePanelEl.style.display = 'block';
+
+                const total         = gateCourse.gates.length;
+                const passed        = gateCourse.passedCount();
+                const next          = ((gateCourse.nextGateIdx | 0) % total) + 1;
+                const lapStartedYet = gateCourse.lapStart != null;
+                const lapMs         = lapStartedYet ? gateCourse.currentLapMs : 0;
+                const bestMs        = gateCourse.bestLapMs;
+
+                // Current lap time — big central readout. Dimmed when
+                // the timer hasn't started yet. Wrapped in fixed-width
+                // character slots (see `_monoDigits`) so the ms ticks
+                // don't make the line jitter left-right under a
+                // proportional font.
+                if (this.hrpLapTimeEl) {
+                    this.hrpLapTimeEl.innerHTML = _monoDigits(lapStartedYet
+                        ? formatLap(lapMs)
+                        : '--:--.---');
+                    this.hrpLapTimeEl.classList.toggle('idle', !lapStartedYet);
+                }
+
+                // Best lap — purple when we have one, dashed placeholder
+                // otherwise. Placeholder uses the same `mm:ss.mmm` width
+                // as formatLap() so the row geometry doesn't shift when
+                // the first lap is set. The .empty class dims the colour
+                // and kills the glow so the slots obviously read "no PB
+                // on this layout yet".
+                if (this.hrpBestTimeEl) {
+                    if (bestMs != null) {
+                        this.hrpBestTimeEl.innerHTML = _monoDigits(formatLap(bestMs));
+                        this.hrpBestTimeEl.classList.remove('empty');
+                    } else {
+                        this.hrpBestTimeEl.innerHTML = _monoDigits('--:--.---');
+                        this.hrpBestTimeEl.classList.add('empty');
+                    }
+                }
+
+                // Gate progress — briefly enlarged + tinted cyan on each
+                // clean pass; fades back to white over ~400 ms.
+                if (this.hrpGateProgEl) {
+                    if (passed > this._raceLastPassed) this._raceFlashTimer = 400;
+                    this._raceLastPassed = passed;
+
+                    // Split into two spans so CSS can keep the current
+                    // gate number bright while dimming the separator
+                    // and the total (matching the F1 'LAP 36/52' look).
+                    // Each span's inner text is further broken into
+                    // fixed-width character slots by `_monoDigits` so a
+                    // one-digit → two-digit transition (e.g. gate 9 →
+                    // gate 10) doesn't shift the line horizontally.
+                    // The current number is also left-padded with
+                    // spaces to the total's digit count so the string
+                    // length itself is stable across the whole lap.
+                    const totalStr = String(total);
+                    const currStr  = String(next).padStart(totalStr.length, ' ');
+                    this.hrpGateProgEl.innerHTML =
+                        `<span class="hrp-gate-curr">${_monoDigits(currStr)}</span>` +
+                        `<span class="hrp-gate-total">${_monoDigits(' / ' + totalStr)}</span>`;
+                    if (this._raceFlashTimer > 0) {
+                        this._raceFlashTimer -= dt;
+                        const t = Math.max(0, this._raceFlashTimer) / 400;
+                        // Blend white (idle) → cyan (#4dfcff) at peak.
+                        const r = Math.round(255 + (77  - 255) * t);
+                        const g = Math.round(255 + (252 - 255) * t);
+                        const b = 255;
+                        this.hrpGateProgEl.style.color     = `rgb(${r}, ${g}, ${b})`;
+                        this.hrpGateProgEl.style.transform = `scale(${1 + 0.18 * t})`;
+                    } else {
+                        this.hrpGateProgEl.style.color     = '';
+                        this.hrpGateProgEl.style.transform = 'scale(1)';
+                    }
+                }
             }
         }
     }

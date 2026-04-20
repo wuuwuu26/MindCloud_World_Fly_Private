@@ -22,7 +22,66 @@
     <title>MindCloud World Fly</title>
     <script src="https://cdn.jsdelivr.net/npm/playcanvas@2.17.2/build/playcanvas.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+    <!--
+      Race-panel type testbed. The CSS variables defined in `:root`
+      (`--race-font-family`, `--race-font-weight`, `--race-font-style`)
+      drive the four HUD readouts (GATE label, gate counter, lap clock,
+      best lap) in a single place — swap the family / weight / style
+      there to audition a look, no other CSS edits needed.
+
+      This `<link>` eagerly preloads every candidate so changing
+      --race-font-family to any of the names below just works without
+      touching the URL:
+        - Orbitron          (500/700/900)      futuristic sci-fi
+        - Share Tech Mono   (400)              pure monospace, digital
+        - Chakra Petch      (400/700 + italic) cyberpunk / F1 dash
+        - Rajdhani          (400/500/700)      condensed sporty sans
+        - JetBrains Mono    (400/700 + italic) modern bold monospace
+        - Teko              (400/500/700)      very condensed racing
+        - VT323             (400)              retro terminal LCD
+        - Audiowide         (400)              bold geometric display
+        - Michroma          (400)              wide F1-timing feel
+        - Wallpoet          (400)              LCD-geometric
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Share+Tech+Mono&family=Chakra+Petch:ital,wght@0,400;0,700;1,400;1,700&family=Rajdhani:wght@400;500;700&family=JetBrains+Mono:ital,wght@0,400;0,700;1,400;1,700&family=Teko:wght@400;500;700&family=VT323&family=Audiowide&family=Michroma&family=Wallpoet&display=swap" rel="stylesheet">
     <style>
+        /* ================================================================
+         * RACE-PANEL TYPE CONTROL — edit the three variables below to
+         * audition font/weight/italic across all four readouts at once
+         * (GATE label, gate counter "1 / 16", lap clock, best lap).
+         *
+         *   --race-font-family   any family name preloaded in the
+         *                        <link> above, e.g.:
+         *                          'Orbitron', 'Share Tech Mono',
+         *                          'Chakra Petch', 'Rajdhani',
+         *                          'JetBrains Mono', 'Teko', 'VT323',
+         *                          'Audiowide', 'Michroma', 'Wallpoet'
+         *                        Always keep a mono fallback in the
+         *                        stack so a missed download still
+         *                        renders as a tabular readout.
+         *
+         *   --race-font-weight   400 (regular) / 500 / 600 / 700 (bold)
+         *                        / 800 / 900 — only values the chosen
+         *                        family actually ships will render at
+         *                        the intended weight; browsers fake the
+         *                        rest (usually poorly).
+         *
+         *   --race-font-style    `normal` or `italic`. Chakra Petch and
+         *                        JetBrains Mono are the only preloaded
+         *                        families that ship true italics; the
+         *                        others will be slanted synthetically
+         *                        by the browser, which often looks
+         *                        worse than upright — prefer `normal`
+         *                        unless you explicitly loaded italics.
+         * ================================================================ */
+        :root {
+            --race-font-family: 'Chakra Petch', 'Share Tech Mono', 'Courier New', monospace;
+            --race-font-weight: 700;
+            --race-font-style:  normal;
+        }
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
         html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
 
@@ -87,6 +146,158 @@
         .hud-label { color: #0a0; font-size: 11px; }
         .hud-value { color: #0f0; font-size: 16px; font-weight: bold; }
         .hud-warn { color: #f44; }
+
+        /* Race timing panel (F1 timing-tower style, left-middle). */
+        #hud-race-panel {
+            position: absolute;
+            top: 50%;
+            left: 16px;
+            transform: translateY(-50%);
+            width: 150px;
+            padding: 7px 10px 8px;
+            background: rgba(10, 12, 18, 0.86);
+            border: 1px solid rgba(255, 255, 255, 0.10);
+            border-radius: 7px;
+            font-family: 'Courier New', monospace;
+            color: #cde;
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.55);
+            pointer-events: none;
+            z-index: 11;
+        }
+        .hrp-header {
+            display: flex; align-items: center; gap: 7px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+            margin-bottom: 6px;
+        }
+        /* Logo is a 13259×7620 PNG (aspect ~1.74). The blue circle mark
+           occupies roughly x=[0.299..0.701] y=[0..0.701] of that canvas,
+           with incidental branding content filling the rest of the
+           frame. To prevent squishing (which an <img width=h=22> forced)
+           we render the logo as a background-image scaled and cropped
+           to the circle region only. */
+        .hrp-logo {
+            display: block;
+            width: 34px; height: 34px;
+            flex-shrink: 0;
+            background-image: url('asset/display/logo.png');
+            background-repeat: no-repeat;
+            background-size: 212% 122%;
+            background-position: center 3px;
+            filter: drop-shadow(0 0 4px rgba(66, 114, 245, 0.55));
+        }
+        .hrp-header-text {
+            /* The "FPV RACE" banner is deliberately decoupled from the
+               --race-font-* variables — those drive the GATE / BEST
+               labels and the two time readouts, which the user wants
+               to keep in lockstep, whereas the banner is auditioned
+               independently. Edit font-family / font-weight /
+               font-style here directly; everything else in the panel
+               will stay on whatever the :root vars say. */
+            font-family: "JetBrains Mono", "Helvetica Neue", Impact, sans-serif;
+            font-weight: 900;
+            font-style:  italic;
+            font-size: 15px;
+            letter-spacing: 1.5px;
+            color: #98a4b2;    /* match the muted GATE label tone */
+        }
+        .hrp-gate-banner {
+            display: flex; align-items: baseline; justify-content: space-between;
+            padding: 4px 8px;
+            background: rgba(255, 255, 255, 0.06);
+            border-radius: 3px;
+            margin-bottom: 6px;
+        }
+        .hrp-label {
+            /* Shared base for both GATE (inside .hrp-gate-banner) and
+               BEST (inside .hrp-row). Picks up the race-panel font vars
+               so BEST matches the clock beside it — the gate banner
+               then overrides size/colour in a more specific rule. */
+            font-family: var(--race-font-family);
+            font-weight:  var(--race-font-weight);
+            font-style:   var(--race-font-style);
+            font-size: 10px; letter-spacing: 1.5px;
+            color: #7a8c9e;
+        }
+        /* GATE label sits inside .hrp-gate-banner; scope the F1-style
+           bold-italic treatment so the BEST row label stays dim. Size
+           matches the counter next to it so the two read as a pair.
+           Colour is muted to match the "LAP" label in the F1 reference
+           — only the current gate number stays bright white. */
+        .hrp-gate-banner .hrp-label {
+            font-family: var(--race-font-family);
+            font-weight:  var(--race-font-weight);
+            font-style:   var(--race-font-style);
+            font-size: 14px;
+            letter-spacing: 1.5px;
+            color: #98a4b2;
+        }
+        .hrp-gate-progress {
+            font-family: var(--race-font-family);
+            font-weight:  var(--race-font-weight);
+            font-style:   var(--race-font-style);
+            font-size: 14px;
+            letter-spacing: 0.5px;
+            color: #fff;     /* default colour picked up by .hrp-gate-curr
+                                via inherit so the cyan flash animation
+                                (set as inline style on this element by
+                                hud.js) propagates to the current number
+                                without overriding the dim total. */
+            font-variant-numeric: tabular-nums;
+            transition: transform 120ms ease-out, color 200ms ease-out;
+        }
+        /* Split styling inside .hrp-gate-progress: the current gate
+           number (“1”) stays bright (inheriting the wrapper colour so
+           the gate-pass flash reaches it), while the separator and
+           total (“ / 16”) hold a fixed muted colour. Mirrors the
+           ‘36 / 52’ rendering in the F1 reference. */
+        .hrp-gate-curr  { color: inherit; }
+        .hrp-gate-total { color: #98a4b2; }
+        .hrp-big-time {
+            font-family: var(--race-font-family);
+            font-weight:  var(--race-font-weight);
+            font-style:   var(--race-font-style);
+            font-size: 19px;
+            letter-spacing: 1px;
+            color: #4df;
+            text-shadow: 0 0 5px rgba(77, 220, 255, 0.45);
+            margin: 3px 0 5px;
+            text-align: center;
+            font-variant-numeric: tabular-nums;
+        }
+        .hrp-big-time.idle { color: #6a7a88; text-shadow: none; }
+        .hrp-row {
+            display: flex; align-items: baseline; justify-content: space-between;
+        }
+        .hrp-best-time {
+            font-family: var(--race-font-family);
+            font-weight:  var(--race-font-weight);
+            font-style:   var(--race-font-style);
+            font-size: 12px;
+            letter-spacing: 0.5px;
+            color: #c084fc;
+            text-shadow: 0 0 4px rgba(192, 132, 252, 0.45);
+            font-variant-numeric: tabular-nums;
+        }
+        .hrp-best-time.empty { color: #556; text-shadow: none; }
+
+        /* ------------------------------------------------------------
+         * Fixed-width character slots for the race-panel readouts.
+         * Every character the HUD emits through `_monoDigits()` in
+         * hud.js gets wrapped in one of these slot classes, which
+         * freezes its horizontal width. Result: '01:40.718' → '01:40.719'
+         * no longer nudges the centred line left/right, regardless of
+         * whether the active font is monospace or proportional.
+         *   .hrp-char-d   digits + dashes (widest)
+         *   .hrp-char-sep colon + period  (narrow punctuation)
+         *   .hrp-char-sp  space + slash   (gate "1 / 16" separator)
+         * ------------------------------------------------------------ */
+        .hrp-char     { display: inline-block; text-align: center; }
+        .hrp-char-d   { width: 0.62em; }
+        .hrp-char-sep { width: 0.28em; }
+        .hrp-char-sp  { width: 0.42em; }
 
 
         /* Collision flash */
@@ -316,10 +527,22 @@
         </div>
         <div id="hud-bottom-center">
             <div id="hud-collision-warn" class="hud-warn" style="display:none;">COLLISION</div>
-            <div id="hud-lap-timer"
-                 style="display:none;font-family:'Courier New',monospace;font-size:18px;font-weight:bold;letter-spacing:0.5px;color:#4df;text-shadow:0 0 4px rgba(0,191,255,0.5);margin-bottom:4px;"></div>
-            <div id="hud-race-progress"
-                 style="display:none;color:#4df;font-size:15px;font-weight:bold;letter-spacing:0.5px;text-shadow:0 0 4px rgba(0,191,255,0.5);"></div>
+        </div>
+        <!-- F1-style race timing panel (logo + gate counter + lap timer + best lap). -->
+        <div id="hud-race-panel" style="display:none;">
+            <div class="hrp-header">
+                <span class="hrp-logo" aria-hidden="true"></span>
+                <span class="hrp-header-text">FPV RACE</span>
+            </div>
+            <div class="hrp-gate-banner">
+                <span class="hrp-label">GATE</span>
+                <span class="hrp-gate-progress" id="hrp-gate-progress"><span class="hrp-gate-curr">—</span><span class="hrp-gate-total"> / —</span></span>
+            </div>
+            <div class="hrp-big-time idle" id="hrp-lap-time">--:--.---</div>
+            <div class="hrp-row">
+                <span class="hrp-label">BEST</span>
+                <span class="hrp-best-time empty" id="hrp-best-time">--:--.---</span>
+            </div>
         </div>
         <div id="hud-bottom-left">
             <div class="hud-label">CONTROLLER</div>

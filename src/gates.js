@@ -164,9 +164,40 @@ function getStartLabelTexture(app) {
     return tex;
 }
 
-// Pulse animation (next gate only): +/- 8 % scale @ 2 Hz.
+// Pulse animation (next gate only): +/- 8 % scale @ 0.8 Hz — roughly
+// one breath every 1.25 s, calmer than the earlier 2 Hz throb.
 const PULSE_AMP = 0.08;
-const PULSE_HZ  = 2.0;
+const PULSE_HZ  = 0.8;
+
+// Fake-lighting multipliers baked into each face's emissive intensity.
+// A gate frame is a square ring, and from any viewing angle the visible
+// surfaces fall into exactly four categories — every bar contributes
+// one face to each category, and the whole category shares a single
+// brightness so the ring reads as "one continuous surface lit from a
+// consistent direction" instead of four boxes lit independently.
+//
+//   front → faces the drone on approach (brightest, catches light)
+//   back  → opposite side of the ring (deepest shadow)
+//   outer → the outward-pointing rim of the ring (side-lit)
+//   inner → the rim facing the ring's opening (AO-darkened by the lip)
+//
+// Because materials are unlit (`useLighting=false`, needed to punch
+// through bright 3DGS backgrounds) these multipliers are the only 3D
+// cue we can bake in. End caps on the horizontal bars inherit the
+// outer brightness since they visually blend with the outer corners.
+const FACE_BRIGHTNESS = {
+    front: 1.35,
+    back:  0.45,
+    outer: 1.00,
+    inner: 0.60,
+};
+
+// START sign offset above the gate-0 frame (in gate-local units,
+// multiplied by the gate's edge length). Pushed well clear of the top
+// bar so the label no longer visually crowds the frame; the surrounding
+// pulse animation counter-translates this value every frame so the sign
+// sits at a constant world-height even as the frame breathes.
+const START_SIGN_GAP = 0.50;
 
 export class GateCourse {
     constructor() {
@@ -247,12 +278,30 @@ export class GateCourse {
                 travelDir: td,
                 passed:    false,
                 entity:    null,
+                // Four category materials for normal gates (front /
+                // back / outer / inner, see FACE_BRIGHTNESS) or one
+                // per bar for the finish gate. The per-category
+                // brightness is baked into `emissiveIntensity` at
+                // build time so every subsequent colour repaint
+                // preserves the directional-lighting cue.
+                // `material` is kept as an alias to `materials[0]` for
+                // legacy probes that still expect a single reference.
+                materials: null,
                 material:  null,
                 invWorld:  null,
                 // `fixedTint` gates (currently just the finish gate) carry
                 // a texture that must not be overwritten by the per-frame
                 // color-state repaint in `_updateGateAppearance`.
                 fixedTint: false,
+                // Set on gate 0 only — the floating START sign plate.
+                // Kept as a separate reference so the pulse animation can
+                // counter-scale it (so the sign holds its natural size)
+                // AND counter-translate it along local Y (so the sign's
+                // world-height stays constant while the frame breathes,
+                // instead of floating up and down with the pulse).
+                signEntity:    null,
+                signBaseScale: null,
+                signBaseLocalY: 0,
             };
         }
         this.gates = gates;
@@ -368,68 +417,21 @@ export class GateCourse {
         const q = new pc.Quat().setFromMat4(m);
         e.setRotation(q);
 
-        // Four edges of the square outline, positioned in the gate's
-        // local XY plane. `tileU/tileV` only matter for the finish gate
-        // — they make the checker squares come out roughly square on
-        // each bar despite the bars' different aspect ratios.
-        const edges = [
-            { pos: [0,  half, 0], scale: [size + thickness, thickness, thickness], tileU: 6, tileV: 1 }, // top
-            { pos: [0, -half, 0], scale: [size + thickness, thickness, thickness], tileU: 6, tileV: 1 }, // bottom
-            { pos: [-half, 0, 0], scale: [thickness, size - thickness, thickness], tileU: 1, tileV: 5 }, // left
-            { pos: [ half, 0, 0], scale: [thickness, size - thickness, thickness], tileU: 1, tileV: 5 }, // right
-        ];
-
         // Finish gate (last in the closed loop) wears a checker-flag
         // texture so it is instantly recognisable as the lap terminator,
-        // just like real motorsport circuits.
+        // just like real motorsport circuits. Its shading strategy is
+        // intentionally different from the rest: the chequered pattern
+        // already provides strong visual signal, so we keep the simpler
+        // 4-box construction with uniform brightness on all bars — no
+        // per-face shading — which also avoids the material-explosion
+        // that per-face checker tiling would force (each bar needs its
+        // own tile ratio for the squares to render roughly square).
         const isFinish = (index === this.gates.length - 1);
-        const makeMat = (tileU, tileV) => {
-            const m = new pc.StandardMaterial();
-            if (isFinish) {
-                const tex = getCheckerTexture(this._app);
-                if (tex) {
-                    m.diffuseMap  = tex;
-                    m.emissiveMap = tex;
-                    m.diffuseMapTiling  = new pc.Vec2(tileU, tileV);
-                    m.emissiveMapTiling = new pc.Vec2(tileU, tileV);
-                }
-                m.diffuse.set(1, 1, 1);
-                m.emissive.set(1, 1, 1);
-            } else {
-                m.diffuse.set(COL_UPCOMING.r, COL_UPCOMING.g, COL_UPCOMING.b);
-                m.emissive.set(COL_UPCOMING.r, COL_UPCOMING.g, COL_UPCOMING.b);
-            }
-            m.emissiveIntensity = EMISSIVE_INTENSITY;
-            m.useLighting       = false;
-            m.useFog            = false;
-            m.opacity           = 1.0;
-            m.update();
-            return m;
-        };
 
-        // Non-finish gates share a single material across all four bars
-        // (so `_updateGateAppearance` can repaint with one call). The
-        // finish gate needs one material per bar so each bar can carry
-        // its own checker tiling.
-        let edgeMats;
         if (isFinish) {
-            edgeMats = edges.map(ed => makeMat(ed.tileU, ed.tileV));
-            gate.fixedTint = true;
+            this._buildFinishFrame(e, gate, size, half, thickness);
         } else {
-            const shared = makeMat(1, 1);
-            edgeMats = [shared, shared, shared, shared];
-        }
-        gate.material = edgeMats[0];
-
-        for (let ei = 0; ei < edges.length; ei++) {
-            const edge = edges[ei];
-            const seg = new pc.Entity();
-            seg.addComponent('render', { type: 'box' });
-            const mis = seg.render.meshInstances;
-            for (let mi = 0; mi < mis.length; mi++) mis[mi].material = edgeMats[ei];
-            seg.setLocalPosition(edge.pos[0], edge.pos[1], edge.pos[2]);
-            seg.setLocalScale(edge.scale[0], edge.scale[1], edge.scale[2]);
-            e.addChild(seg);
+            this._buildFacedFrame(e, gate, size, half, thickness);
         }
 
         // Gate 0 gets a floating "START" sign above the top bar so it
@@ -453,9 +455,16 @@ export class GateCourse {
                 const signMis = sign.render.meshInstances;
                 for (let mi = 0; mi < signMis.length; mi++) signMis[mi].material = signMat;
                 // Plate size: full gate width, ~1/4 of gate height, thin.
-                sign.setLocalPosition(0, half + size * 0.22, 0);
-                sign.setLocalScale(size * 0.9, size * 0.28, thickness * 0.6);
+                const signSX = size * 0.9;
+                const signSY = size * 0.28;
+                const signSZ = thickness * 0.6;
+                const signY  = half + size * START_SIGN_GAP;
+                sign.setLocalPosition(0, signY, 0);
+                sign.setLocalScale(signSX, signSY, signSZ);
                 e.addChild(sign);
+                gate.signEntity     = sign;
+                gate.signBaseScale  = new pc.Vec3(signSX, signSY, signSZ);
+                gate.signBaseLocalY = signY;
             }
         }
 
@@ -463,6 +472,199 @@ export class GateCourse {
         // caller) reflects the final rotation.
         e.getWorldTransform();
         return e;
+    }
+
+    /**
+     * Finish-gate builder: four checker-textured boxes, uniform brightness.
+     * Deliberately skips the per-face shading path used for normal gates —
+     * the chequered flag already carries all the visual weight this gate
+     * needs, and per-face rebuild would quadruple the material count and
+     * force per-face tile-ratio recalculation for the squares to stay
+     * roughly square on every face.
+     *
+     * Sets `gate.fixedTint = true` so `_updateGateAppearance` does not
+     * overwrite the white diffuse/emissive that lets the checker colours
+     * show through.
+     */
+    _buildFinishFrame(parent, gate, size, half, thickness) {
+        /* global pc */
+        const edges = [
+            { pos: [0,  half, 0], scale: [size + thickness, thickness, thickness], tileU: 6, tileV: 1 },
+            { pos: [0, -half, 0], scale: [size + thickness, thickness, thickness], tileU: 6, tileV: 1 },
+            { pos: [-half, 0, 0], scale: [thickness, size - thickness, thickness], tileU: 1, tileV: 5 },
+            { pos: [ half, 0, 0], scale: [thickness, size - thickness, thickness], tileU: 1, tileV: 5 },
+        ];
+        const tex = getCheckerTexture(this._app);
+        const mats = edges.map((ed) => {
+            const m = new pc.StandardMaterial();
+            if (tex) {
+                m.diffuseMap  = tex;
+                m.emissiveMap = tex;
+                m.diffuseMapTiling  = new pc.Vec2(ed.tileU, ed.tileV);
+                m.emissiveMapTiling = new pc.Vec2(ed.tileU, ed.tileV);
+            }
+            m.diffuse.set(1, 1, 1);
+            m.emissive.set(1, 1, 1);
+            m.emissiveIntensity = EMISSIVE_INTENSITY;
+            m.useLighting       = false;
+            m.useFog            = false;
+            m.opacity           = 1.0;
+            m.update();
+            return m;
+        });
+        gate.fixedTint = true;
+        gate.materials = mats;
+        gate.material  = mats[0];
+        for (let ei = 0; ei < edges.length; ei++) {
+            const ed  = edges[ei];
+            const seg = new pc.Entity();
+            seg.addComponent('render', { type: 'box' });
+            const mis = seg.render.meshInstances;
+            for (let mi = 0; mi < mis.length; mi++) mis[mi].material = mats[ei];
+            seg.setLocalPosition(ed.pos[0], ed.pos[1], ed.pos[2]);
+            seg.setLocalScale(ed.scale[0], ed.scale[1], ed.scale[2]);
+            parent.addChild(seg);
+        }
+    }
+
+    /**
+     * Normal-gate builder: four category materials (front / back / outer
+     * / inner) and per-face plane meshes so the ring reads as one lit
+     * surface. See `FACE_BRIGHTNESS` for the directional-lighting logic.
+     *
+     * Geometry, all in gate-local coords (gate lies in the XY plane with
+     * +Z = travel direction, +Y = up relative to the path):
+     *   Top bar:    center (0,  half, 0), long along X, length size+t
+     *   Bottom bar: center (0, -half, 0), long along X, length size+t
+     *   Left bar:   center (-half, 0, 0), long along Y, length size-t
+     *   Right bar:  center ( half, 0, 0), long along Y, length size-t
+     *
+     * Each bar contributes one plane per face category; top and bottom
+     * bars also emit two end-cap planes (±X) to close the corners — the
+     * left/right bars' ±Y ends sit inside the top/bottom bars and stay
+     * hidden, so we skip them.
+     *
+     * Materials are shared by category across all four bars, so a single
+     * loop in `_updateGateAppearance` recolours the whole ring with four
+     * `material.update()` calls regardless of gate count.
+     */
+    _buildFacedFrame(parent, gate, size, half, thickness) {
+        /* global pc */
+        const t  = thickness;
+        const hT = t / 2;
+        const c  = COL_UPCOMING;
+
+        // One StandardMaterial per face category, reused by every bar's
+        // face of that category. Only the `emissiveIntensity` differs —
+        // the diffuse/emissive RGB gets repainted together on state
+        // changes, which is why category-sharing is safe.
+        const mkMat = (brightness) => {
+            const m = new pc.StandardMaterial();
+            m.diffuse.set(c.r, c.g, c.b);
+            m.emissive.set(c.r, c.g, c.b);
+            m.emissiveIntensity = EMISSIVE_INTENSITY * brightness;
+            m.useLighting = false;
+            m.useFog      = false;
+            m.opacity     = 1.0;
+            m.cull        = pc.CULLFACE_BACK;
+            m.update();
+            return m;
+        };
+        const matFront = mkMat(FACE_BRIGHTNESS.front);
+        const matBack  = mkMat(FACE_BRIGHTNESS.back);
+        const matOuter = mkMat(FACE_BRIGHTNESS.outer);
+        const matInner = mkMat(FACE_BRIGHTNESS.inner);
+
+        // Order matters only for `gate.material` aliasing; every entry
+        // is visited identically by `_updateGateAppearance`.
+        gate.materials = [matFront, matBack, matOuter, matInner];
+        gate.material  = matFront;
+
+        // Precomputed plane orientations. A PlayCanvas plane primitive
+        // lies in the XZ plane with its visible side facing +Y, so we
+        // rotate +Y onto each of the six world-space directions we need.
+        //   • front / back  → rotate ±90° around +X  (UP → ±Z)
+        //   • outer / inner → rotate  0° or 180° around +X for ±Y, or
+        //                     ∓90° around +Z for ±X
+        const rotPlusY  = new pc.Quat();                                    // UP → +Y (identity)
+        const rotMinusY = new pc.Quat().setFromAxisAngle(new pc.Vec3(1, 0, 0), 180);  // UP → -Y
+        const rotPlusZ  = new pc.Quat().setFromAxisAngle(new pc.Vec3(1, 0, 0),  90);  // UP → +Z
+        const rotMinusZ = new pc.Quat().setFromAxisAngle(new pc.Vec3(1, 0, 0), -90);  // UP → -Z
+        const rotPlusX  = new pc.Quat().setFromAxisAngle(new pc.Vec3(0, 0, 1), -90);  // UP → +X
+        const rotMinusX = new pc.Quat().setFromAxisAngle(new pc.Vec3(0, 0, 1),  90);  // UP → -X
+
+        // Helper: spawn a single face plane as a child of `parent`.
+        // `scale` is the plane's local (sx, 1, sz) — after rotation,
+        // sx ends up along the plane's local +X direction in world
+        // coords and sz along its local +Z.
+        const addFace = (pos, rot, scale, material) => {
+            const f = new pc.Entity();
+            f.addComponent('render', { type: 'plane' });
+            const mis = f.render.meshInstances;
+            for (let mi = 0; mi < mis.length; mi++) mis[mi].material = material;
+            f.setLocalPosition(pos[0], pos[1], pos[2]);
+            f.setLocalRotation(rot);
+            f.setLocalScale(scale[0], scale[1], scale[2]);
+            parent.addChild(f);
+        };
+
+        // ---- Horizontal bars (top + bottom) -------------------------
+        // Length along X is (size + t) so the bar laps over the left/
+        // right bars' outer edges and closes the ring cleanly.
+        const lenH  = size + t;
+        const hLenH = lenH / 2;
+        const horiz = [
+            { cy:  half, outerY: +1 },   // top bar: outer = +Y
+            { cy: -half, outerY: -1 },   // bottom bar: outer = -Y
+        ];
+        for (const bar of horiz) {
+            const cy = bar.cy;
+            // FRONT (+Z): plane local X maps to world X, local Z to world -Y.
+            //             scale (lenH, 1, t) → world X=lenH, world Y=t. ✓
+            addFace([0, cy,  hT], rotPlusZ,  [lenH, 1, t], matFront);
+            // BACK (-Z): plane local X → world X, local Z → world +Y.
+            addFace([0, cy, -hT], rotMinusZ, [lenH, 1, t], matBack);
+            // OUTER (±Y based on which bar): plane local X → world X,
+            //                                local Z → world Z.
+            if (bar.outerY > 0) addFace([0, cy + hT, 0], rotPlusY,  [lenH, 1, t], matOuter);
+            else                addFace([0, cy - hT, 0], rotMinusY, [lenH, 1, t], matOuter);
+            // INNER: opposite side from OUTER.
+            if (bar.outerY > 0) addFace([0, cy - hT, 0], rotMinusY, [lenH, 1, t], matInner);
+            else                addFace([0, cy + hT, 0], rotPlusY,  [lenH, 1, t], matInner);
+            // END CAPS: small t×t squares at ±X ends. Coloured with the
+            // outer brightness since they visually blend with the ring's
+            // outer corners when viewed from any angle.
+            // LEFT END (-X): plane local X → world Y, local Z → world Z.
+            addFace([-hLenH, cy, 0], rotMinusX, [t, 1, t], matOuter);
+            // RIGHT END (+X): same dimensions, opposite rotation.
+            addFace([ hLenH, cy, 0], rotPlusX,  [t, 1, t], matOuter);
+        }
+
+        // ---- Vertical bars (left + right) ---------------------------
+        // Length along Y is (size - t) so they sit between the top and
+        // bottom bars without overlap.
+        const lenV  = size - t;
+        const vert  = [
+            { cx: -half, outerX: -1 },   // left bar: outer = -X
+            { cx:  half, outerX: +1 },   // right bar: outer = +X
+        ];
+        for (const bar of vert) {
+            const cx = bar.cx;
+            // FRONT (+Z): plane local X → world X (scaled to t),
+            //             local Z → world -Y (scaled to lenV).
+            addFace([cx, 0,  hT], rotPlusZ,  [t, 1, lenV], matFront);
+            // BACK (-Z):
+            addFace([cx, 0, -hT], rotMinusZ, [t, 1, lenV], matBack);
+            // OUTER (±X): plane local X → world ±Y (scaled to lenV),
+            //             local Z → world Z (scaled to t).
+            if (bar.outerX > 0) addFace([cx + hT, 0, 0], rotPlusX,  [lenV, 1, t], matOuter);
+            else                addFace([cx - hT, 0, 0], rotMinusX, [lenV, 1, t], matOuter);
+            // INNER: opposite side.
+            if (bar.outerX > 0) addFace([cx - hT, 0, 0], rotMinusX, [lenV, 1, t], matInner);
+            else                addFace([cx + hT, 0, 0], rotPlusX,  [lenV, 1, t], matInner);
+            // No end caps here — the top/bottom bars' end caps already
+            // close the corners over these ±Y ends.
+        }
     }
 
     /**
@@ -479,7 +681,7 @@ export class GateCourse {
      *     seamless rollover between laps.
      */
     _updateGateAppearance(gate, index) {
-        if (!gate || !gate.material) return;
+        if (!gate || !gate.materials || !gate.materials.length) return;
         const N = this.gates.length;
 
         // Horizon-only visibility. Circular distance already handles the
@@ -509,9 +711,17 @@ export class GateCourse {
         if (index === 0)             c = COL_START;
         else if (isNext)             c = COL_NEXT;
         else                          c = COL_UPCOMING;
-        gate.material.diffuse.set(c.r, c.g, c.b);
-        gate.material.emissive.set(c.r, c.g, c.b);
-        gate.material.update();
+        // Repaint every material with the same base colour. Per-face
+        // brightness lives in each material's `emissiveIntensity` (set
+        // once at build time from FACE_BRIGHTNESS) so we don't touch it
+        // here — that keeps the ring's directional-lighting cue stable
+        // across colour-state changes.
+        for (let ei = 0; ei < gate.materials.length; ei++) {
+            const m = gate.materials[ei];
+            m.diffuse.set(c.r, c.g, c.b);
+            m.emissive.set(c.r, c.g, c.b);
+            m.update();
+        }
     }
 
     /**
@@ -548,7 +758,27 @@ export class GateCourse {
         this._pulseTime += dt;
         const s = 1 + PULSE_AMP * Math.sin(this._pulseTime * PULSE_HZ * Math.PI * 2);
         const nextG = this.gates[this.nextGateIdx];
-        if (nextG && nextG.entity) nextG.entity.setLocalScale(s, s, s);
+        if (nextG && nextG.entity) {
+            nextG.entity.setLocalScale(s, s, s);
+            // START sign decoupling: the sign is a child of the gate
+            // entity so it inherits the gate's rotation and world
+            // position, BUT we do not want it to inherit the pulse
+            // scaling. Two corrections, both run every frame:
+            //   • counter-scale    → sign holds its natural size,
+            //                        instead of breathing in step.
+            //   • counter-translate → sign sits at a constant world
+            //                        height above the frame centre,
+            //                        instead of bobbing up/down with
+            //                        the scale (otherwise parent scale
+            //                        s multiplies the sign's local Y
+            //                        offset, producing visible float).
+            if (nextG.signEntity && nextG.signBaseScale) {
+                const inv = 1 / s;
+                const b = nextG.signBaseScale;
+                nextG.signEntity.setLocalScale(b.x * inv, b.y * inv, b.z * inv);
+                nextG.signEntity.setLocalPosition(0, nextG.signBaseLocalY * inv, 0);
+            }
+        }
 
         if (!drone) return;
         const now = Number.isFinite(nowMs) ? nowMs : (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -623,6 +853,11 @@ export class GateCourse {
 
         // Reset the pulse scale of the just-passed gate.
         if (g.entity) g.entity.setLocalScale(1, 1, 1);
+        if (g.signEntity && g.signBaseScale) {
+            const b = g.signBaseScale;
+            g.signEntity.setLocalScale(b.x, b.y, b.z);
+            g.signEntity.setLocalPosition(0, g.signBaseLocalY, 0);
+        }
 
         // Visibility depends on `nextGateIdx`, so every advance may
         // reveal the newly-in-horizon gate at the far end and hide the
@@ -643,8 +878,14 @@ export class GateCourse {
      */
     _beginLap(now) {
         for (let i = 0; i < this.gates.length; i++) {
-            this.gates[i].passed = false;
-            if (this.gates[i].entity) this.gates[i].entity.setLocalScale(1, 1, 1);
+            const gi = this.gates[i];
+            gi.passed = false;
+            if (gi.entity) gi.entity.setLocalScale(1, 1, 1);
+            if (gi.signEntity && gi.signBaseScale) {
+                const b = gi.signBaseScale;
+                gi.signEntity.setLocalScale(b.x, b.y, b.z);
+                gi.signEntity.setLocalPosition(0, gi.signBaseLocalY, 0);
+            }
         }
         this.nextGateIdx  = 0;
         this.lapStart     = now;
@@ -695,8 +936,14 @@ export class GateCourse {
      */
     resetLap() {
         for (let i = 0; i < this.gates.length; i++) {
-            this.gates[i].passed = false;
-            if (this.gates[i].entity) this.gates[i].entity.setLocalScale(1, 1, 1);
+            const gi = this.gates[i];
+            gi.passed = false;
+            if (gi.entity) gi.entity.setLocalScale(1, 1, 1);
+            if (gi.signEntity && gi.signBaseScale) {
+                const b = gi.signBaseScale;
+                gi.signEntity.setLocalScale(b.x, b.y, b.z);
+                gi.signEntity.setLocalPosition(0, gi.signBaseLocalY, 0);
+            }
         }
         this.nextGateIdx    = 0;
         this.lapStart       = null;
