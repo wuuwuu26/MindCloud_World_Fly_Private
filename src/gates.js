@@ -89,7 +89,7 @@ const HORIZON = 5;
 // Emissive strength used by every gate material. 3.5 was chosen
 // empirically against bright 3DGS scenes where anything below ~3 gets
 // washed out by the cloud.
-const EMISSIVE_INTENSITY = 3.5;
+const EMISSIVE_INTENSITY = 1.5;
 
 // ------------------------------------------------------------------
 // Procedural canvas textures (finish-gate checker & gate-0 START sign)
@@ -186,10 +186,10 @@ const PULSE_HZ  = 0.8;
 // cue we can bake in. End caps on the horizontal bars inherit the
 // outer brightness since they visually blend with the outer corners.
 const FACE_BRIGHTNESS = {
-    front: 1.35,
-    back:  0.45,
-    outer: 1.00,
-    inner: 0.60,
+    front: 1.00,
+    back:  1.00,
+    outer: 0.40,
+    inner: 0.40,
 };
 
 // START sign offset above the gate-0 frame (in gate-local units,
