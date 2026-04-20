@@ -74,7 +74,7 @@ export class OSD {
     _drawHorizon(ctx, w, h, pitch, roll) {
         const cx = w / 2;
         const cy = h / 2;
-        const horizonW = w * 0.35;
+        const horizonW = w * 0.22;
         const pxPerDeg = h / 60; // pixels per degree of pitch
 
         ctx.save();
@@ -149,7 +149,7 @@ export class OSD {
 
     // ---- Speed Tape (left side) ----
     _drawSpeedTape(ctx, w, h, speed) {
-        const tapeX = w * 0.15;
+        const tapeX = w * 0.22;
         const tapeH = h * 0.4;
         const tapeW = 55;
         const cy = h / 2;
@@ -213,7 +213,7 @@ export class OSD {
 
     // ---- Altitude Tape (right side) ----
     _drawAltTape(ctx, w, h, alt) {
-        const tapeX = w * 0.85;
+        const tapeX = w * 0.78;
         const tapeH = h * 0.4;
         const tapeW = 55;
         const cy = h / 2;
@@ -278,7 +278,7 @@ export class OSD {
     _drawHeading(ctx, w, h, yaw) {
         const cx = w / 2;
         const barY = h * 0.08;
-        const barW = w * 0.35;
+        const barW = w * 0.22;
         const barH = 22;
         const pxPerDeg = barW / 90; // 90° visible range
 
@@ -355,7 +355,7 @@ export class OSD {
 
     // ---- Vertical Speed Indicator (far right) ----
     _drawVSI(ctx, w, h, vs) {
-        const x = w * 0.92;
+        const x = w * 0.85;
         const cy = h / 2;
         const barH = h * 0.3;
         const barW = 8;

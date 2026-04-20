@@ -29,6 +29,8 @@ import { HUD } from './hud.js';
 import { OSD } from './osd.js';
 import { EngineAudio } from './audio.js';
 import { BgmAudio } from './bgm.js';
+import { GateCourse } from './gates.js';
+import * as pathStore from './path-store.js';
 
 // ---- Globals ----
 let app = null;
@@ -42,6 +44,22 @@ let bgmAudio = null;
 let octree = null;
 let sceneLoaded = false;
 let pcInitialized = false;
+
+// Race-course subsystem. Constructed at module init (same as controller) so
+// the settings panel works before a scene is loaded; entities materialise
+// only when `rebuildGateCourse` fires after a filter commit, and they stay
+// hidden until the user presses G in flight mode (see gateMode below).
+let gateCourse = null;
+let sceneFilteredBounds = null; // { min:[x,y,z], max:[x,y,z] } — set after filter commit
+
+// The File object the user dropped; needed by path-store.js to build the
+// per-scene storage key (filename + size).  Reset on _exitToLoading.
+let currentSceneFile = null;
+
+// G-key toggle — always starts `false` on a new scene load (per spec);
+// flipping via G in flight mode shows/hides the whole race course. We
+// also use this as the gate for whether lap timing is engaged.
+let gateMode = false;
 
 
 // Mode: 'loading' | 'placement' | 'flight'
@@ -337,6 +355,12 @@ function setupOrbitControls() {
         } else if (mode === 'flight' && e.code === 'KeyP') {
             // Re-enter placement mode
             enterPlacementMode();
+        } else if (mode === 'flight' && e.code === 'KeyG') {
+            // Toggle gate-race mode. No-op when no path has been drawn
+            // for this scene — print a console hint so the user knows
+            // to open Settings → Gate Path → Edit Path… first.
+            e.preventDefault();
+            _toggleGateMode();
         }
     });
     window.addEventListener('keyup', (e) => {
@@ -486,6 +510,15 @@ function _exitToLoading() {
         if (gs) gs.destroy();
     } catch (_) {}
     if (spawnMarkerEntity) spawnMarkerEntity.enabled = false;
+
+    // Tear down the race course so no stale gate entities linger. The
+    // next rebuildGateCourse() call (triggered after the next scene's
+    // filter commit) will materialise fresh gates from whatever path
+    // the per-scene JSON file contains for that map.
+    try { gateCourse?.destroy(); } catch (_) {}
+    sceneFilteredBounds = null;
+    currentSceneFile = null;
+    gateMode = false;  // always off on new scene; G toggles after load
 
     // Disarm so there is no "ARMED" flash if the HUD ever re-shows before a
     // fresh confirmSpawnAndFly().
@@ -713,6 +746,57 @@ async function loadSceneFile(file) {
         const arrayBuffer = await file.arrayBuffer();
         console.log(`File read: ${file.name} (${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)} MB)`);
 
+        // Remember the file for per-scene persistence (gate path + coord
+        // system). Must be set before the filter UI opens so the coord
+        // selector can be pre-populated with the remembered choice.
+        currentSceneFile = file;
+
+        // Best-lap is per-scene: clear whatever the previous scene
+        // contributed BEFORE we try to load the new scene's record, so
+        // that a fresh map (no saved JSON yet) or a map without a
+        // stored PB starts at "--:--.---" instead of inheriting the
+        // previous map's time.
+        if (gateCourse) gateCourse.setBestLapMs(null);
+        // Same goes for the gate path: if the incoming scene has no
+        // saved layout we must not keep the outgoing scene's path
+        // around, otherwise the user would see the old gates ghosting
+        // into the new map.
+        if (controller && controller.gatePathSettings) {
+            controller.gatePathSettings.path = null;
+        }
+
+        // Load any previously-saved gate path + coord system for this
+        // scene. File-based persistence key is filename + size (see
+        // path-store.js#keyFor); missing file is normal for first-time
+        // loads of a scene. Fetch is non-blocking for UI responsiveness.
+        const savedScene = await pathStore.loadForScene(file);
+        if (savedScene) {
+            if (savedScene.coordSystem === 'zup' || savedScene.coordSystem === 'yup') {
+                coordSystem = savedScene.coordSystem;
+                console.log(`[path-store] restored coord=${coordSystem} for ${file.name}`);
+            }
+            if (savedScene.path && Array.isArray(savedScene.path.points) && controller) {
+                // Hydrate controller's copy so the settings UI shows the
+                // right gate count + best lap immediately. gateSize +
+                // clearance come bundled with the path record.
+                controller.gatePathSettings.path = {
+                    closed: true,
+                    points: savedScene.path.points.map(p => ({ x: p.x, y: p.y, z: p.z })),
+                    yMin:   Number(savedScene.path.yMin),
+                    yMax:   Number(savedScene.path.yMax),
+                };
+                if (Number.isFinite(Number(savedScene.path.gateSize))) {
+                    controller.gatePathSettings.gateSize = Number(savedScene.path.gateSize);
+                }
+                if (Number.isFinite(Number(savedScene.path.clearance))) {
+                    controller.gatePathSettings.clearance = Number(savedScene.path.clearance);
+                }
+            }
+            if (gateCourse && Number.isFinite(Number(savedScene.bestLapMs))) {
+                gateCourse.setBestLapMs(Number(savedScene.bestLapMs));
+            }
+        }
+
         // ---- Format-specific: extract opacities & render buffer (coord-independent) ----
         let opacities = null;
         let rawCentroid = null;
@@ -859,6 +943,17 @@ async function loadSceneFile(file) {
         cachedArrayBuffer = arrayBuffer;
         cachedFilename = file.name;
         cachedFormat = ext;
+        sceneFilteredBounds = filteredBounds;
+
+        // Persist the (possibly updated) coord system back to the
+        // per-scene JSON file. Overwrites previous value if any; path +
+        // bestLap are preserved. Fire-and-forget — UI shouldn't wait.
+        _persistSceneRecord();
+
+        // Build the race course entities for this scene+filter. Entities
+        // start hidden (gateMode is off on scene load); the user presses
+        // G in flight mode to reveal them.
+        rebuildGateCourse();
 
         // Done loading
         loadingOverlay.classList.remove('visible');
@@ -1151,6 +1246,103 @@ function updateCameraFov() {
     cameraEntity.camera.fov = vfov;
 }
 
+// ---- Race Course ----
+/**
+ * Rebuild the gate entities from `controller.gatePathSettings.path`.
+ *
+ * Called from three places:
+ *   1. End of loadSceneFile(), once the octree is built.
+ *   2. controller.js `_applyGatePath()` → attachGateCourse(applyCb) →
+ *      here. Fires whenever gateSize/clearance/path change in the
+ *      settings panel or the path editor.
+ *   3. Itself is a no-op when no scene is loaded or the user hasn't
+ *      drawn a path.
+ *
+ * Visibility follows `gateMode` (G-key toggle): entities always exist
+ * after rebuild, but `setVisible(false)` hides them until the player
+ * presses G in flight mode.
+ */
+function rebuildGateCourse() {
+    if (!gateCourse) return;
+    if (controller && controller.gatePathSettings) {
+        gateCourse.configure(controller.gatePathSettings);
+    }
+
+    // Preconditions: need a scene loaded and an app. Without these the
+    // course silently destroys itself so nothing stale lingers.
+    if (!app || !octree || !sceneFilteredBounds) {
+        gateCourse.destroy();
+        return;
+    }
+
+    const path = controller && controller.gatePathSettings && controller.gatePathSettings.path;
+    const points = (path && Array.isArray(path.points)) ? path.points : [];
+    if (points.length < 3) {
+        // Not enough to form a closed loop — wipe any prior entities.
+        gateCourse.destroy();
+        return;
+    }
+
+    gateCourse.rebuild({ app, octree, points });
+    gateCourse.setVisible(gateMode);
+
+    console.log(`[Race] rebuilt ${gateCourse.gates.length} gates`
+        + (gateCourse.bestLapMs != null ? ` (best ${(gateCourse.bestLapMs / 1000).toFixed(3)}s)` : '')
+        + ` [mode=${gateMode ? 'on' : 'off'}]`);
+}
+
+/**
+ * Write the current per-scene record (coord system, path, best lap) to
+ * the backing JSON file via `src/path-store.js`. Silently no-ops when
+ * no scene is loaded. Intentionally fire-and-forget — the UI never
+ * blocks on persistence completion, and any network failure is logged
+ * from inside `path-store`.
+ */
+function _persistSceneRecord() {
+    if (!currentSceneFile) return;
+    const gp = controller && controller.gatePathSettings;
+    if (!gp) return;
+    const path = (gp.path && Array.isArray(gp.path.points) && gp.path.points.length >= 3)
+        ? {
+            closed:    true,
+            points:    gp.path.points.map(p => ({ x: p.x, y: p.y, z: p.z })),
+            yMin:      Number(gp.path.yMin),
+            yMax:      Number(gp.path.yMax),
+            gateSize:  Number(gp.gateSize),
+            clearance: Number(gp.clearance),
+        }
+        : null;
+    pathStore.saveForScene(currentSceneFile, {
+        coordSystem: coordSystem,
+        path,
+        bestLapMs: gateCourse ? gateCourse.bestLapMs : null,
+    });
+}
+
+/**
+ * Flip the G-key gate-race toggle. Silently refuses if no path is drawn
+ * (so G becomes a no-op on a fresh scene, matching the spec). On toggle
+ * ON we force-rebuild to make sure entities match the latest settings
+ * even if the user changed gateSize/clearance while gates were hidden.
+ */
+function _toggleGateMode() {
+    const gp = controller && controller.gatePathSettings;
+    const hasPath = gp && gp.path && Array.isArray(gp.path.points) && gp.path.points.length >= 3;
+    if (!hasPath) {
+        console.info('[Race] no path drawn yet — open Settings → Gate Path → Edit Path… first');
+        return;
+    }
+    gateMode = !gateMode;
+    if (gateMode && (!gateCourse || gateCourse.gates.length === 0)) {
+        // Entities not yet built for this session; build now so G reveals
+        // a real course on the first press after a fresh scene load.
+        rebuildGateCourse();
+    } else if (gateCourse) {
+        gateCourse.setVisible(gateMode);
+    }
+    console.log(`[Race] gate mode ${gateMode ? 'ON' : 'OFF'}`);
+}
+
 // ---- Game Loop ----
 function gameLoop(dt) {
     if (!sceneLoaded) return;
@@ -1176,6 +1368,10 @@ function gameLoop(dt) {
         console.log('RESET triggered — drone position before:', drone.x.toFixed(2), drone.y.toFixed(2), drone.z.toFixed(2));
         drone.reset();
         controller.armed = true; // Stay armed after reset
+        // Wipe current-lap progress so the player starts fresh. Layout,
+        // best-lap record, and the G-mode toggle are all preserved —
+        // only the in-progress lap timer + gate pass flags reset.
+        gateCourse?.resetLap();
         console.log('RESET done — drone position after:', drone.x.toFixed(2), drone.y.toFixed(2), drone.z.toFixed(2));
     }
 
@@ -1212,6 +1408,11 @@ function gameLoop(dt) {
     cameraEntity.setPosition(transform.position.x, transform.position.y, transform.position.z);
     cameraEntity.setEulerAngles(transform.rotation.x, transform.rotation.y, transform.rotation.z);
 
+    // Race course: pulse the next gate and run pass-through detection using
+    // the drone's current world position. Safe no-op when the course is
+    // disabled or empty.
+    gateCourse?.update(dt, drone);
+
     // Clean mode: hide key guide and logo only (OSD is independent)
     const cleanToggle = document.getElementById('clean-mode-toggle');
     const cleanMode = cleanToggle ? cleanToggle.checked : false;
@@ -1219,7 +1420,7 @@ function gameLoop(dt) {
     // HUD - always visible in flight mode (not affected by Clean Mode)
     const hudEl = document.getElementById('hud');
     hudEl?.classList.remove('hidden');
-    hud.update(drone, controller);
+    hud.update(drone, controller, gateCourse);
 
     // FPV OSD - independent of Clean Mode, only controlled by its own toggle
     if (osd) {
@@ -1267,6 +1468,7 @@ function updateKeyGuide() {
             '<kbd>Space</kbd> Arm / Disarm\n' +
             '<kbd>Shift</kbd> Boost\n' +
             '<kbd>R</kbd>     Reset\n' +
+            '<kbd>G</kbd>     Gate race on/off\n' +
             '<kbd>M</kbd>     Flight Mode (FPV/Drone)\n' +
             '<kbd>P</kbd>     Placement mode\n' +
             '<kbd>Tab</kbd>   Settings';
@@ -1328,5 +1530,32 @@ function _initAudio() {
     _loadBgmPlaylists().catch(e => console.warn('[BgmAudio] playlist discovery failed:', e));
 }
 _initAudio();
+
+// Race course. Constructed eagerly so the settings panel can edit its
+// parameters before the first scene is loaded; gate entities are
+// created only when rebuildGateCourse() runs after a filter commit.
+gateCourse = new GateCourse();
+
+// Persist a fresh best-lap record the instant the player sets one,
+// so a browser crash mid-session doesn't cost them the new PB.
+gateCourse.onBestLap = () => { _persistSceneRecord(); };
+
+if (controller && typeof controller.attachGateCourse === 'function') {
+    // applyCb: rebuild entities + push current settings through to disk.
+    // ctxProvider: live getter exposing module-scoped globals to
+    //              controller.js (it avoids importing main.js itself).
+    controller.attachGateCourse(
+        gateCourse,
+        () => {
+            rebuildGateCourse();
+            _persistSceneRecord();
+        },
+        () => ({
+            octree,
+            bounds:     sceneFilteredBounds,
+            spawnPoint: spawnPoint,
+        })
+    );
+}
 
 console.log('MindCloud World Fly ready — drop a .ply, .sog, or .splat file to begin');

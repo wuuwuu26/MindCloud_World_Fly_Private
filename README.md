@@ -261,6 +261,63 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 - Velocity is reflected and dampened
 - Screen flashes red + HUD shows collision warning
 
+## Race Course
+
+A **closed-loop gate track** you draw yourself with a top-down path editor, then race for best lap time. Every gate you place becomes a sensor ring on a smooth Catmull-Rom spline; the drone never physically collides with them, pass-through is detected as a segment-vs-plane test per frame.
+
+### Workflow
+
+1. Drop / pick a scene as usual.
+2. Open settings (**Tab → Race Course**) and click **Edit path…**.
+3. In the modal: left-click to drop gates, drag to nudge, `Z` / `X` to lower / raise the selected gate's altitude. Each gate lights **green** when its frame is clear of cloud geometry and **red** when it intersects the point cloud.
+4. Close the loop by placing ≥ 3 gates, click **Accept**. The path is saved to `asset/gate-paths/<sceneName>_<size>.json` via the server API, so the next time you load the same scene your track is recovered automatically.
+5. In flight mode, press **G** to toggle gate visibility on / off. First press enables it; timer doesn't start until you cross gate 1.
+6. Fly the course. Lap timer runs from gate 1 → through all gates in order → gate 1 again. Crossing a gate out of order turns the current lap red (`MISS` label) — the timer keeps running but that lap is not recorded. Best lap per scene is persisted the instant it's set.
+
+### Editor controls
+
+| Input | Effect |
+|---|---|
+| Left-click empty space | Append new gate at cursor (Y = midpoint of yMin / yMax) |
+| Left-click a gate | Select (highlighted orange) |
+| Drag a selected gate | Move its XZ (altitude preserved) |
+| `Z` / `X` with a selection | Lower / raise by 0.1 m (1 m with Shift), clamped to yMin / yMax |
+| `Del` / `Backspace` (with selection) | Remove the selected gate |
+| `Backspace` (no selection) | Undo last appended gate |
+| Wheel | Zoom around cursor |
+| Right-drag | Pan |
+| `Enter` | Accept (≥ 3 gates required) |
+| `Esc` | Cancel without saving |
+
+The `y min` / `y max` sliders clamp every gate's altitude and filter the octree-point backdrop so you only see clouds at the altitude band you intend to fly.
+
+### Flight-mode controls for the course
+
+| Key | Effect |
+|---|---|
+| **G** | Toggle the gate course visible / hidden (no-op if no path drawn) |
+| **R** | Reset drone to spawn + clear current-lap progress (path + best lap preserved) |
+
+### Settings panel (Tab → Race Course)
+
+| Setting | Effect |
+|---|---|
+| **Gate size** | Edge length of the square ring — used both visually and for pass detection |
+| **Clearance** | Radius used by the editor's live red/green check around each gate |
+| **Path** | Status line + **Edit path…** / **Clear** buttons. "Clear" deletes the per-scene JSON file and resets best-lap for this scene (after a confirm dialog) |
+
+### Persistence (`asset/gate-paths/`)
+
+Each scene gets its own `<safeName>_<fileSize>.json` record containing:
+
+- `coordSystem` — the zup / yup choice committed in the filter UI (re-pre-filled on next load)
+- `path` — gates (points + yMin / yMax), gateSize, clearance
+- `bestLapMs` — best lap ever recorded for this scene
+
+The server (`serve.py`) exposes the record via `GET / PUT / DELETE /api/path/<safeName>.json`. Records are developer-local (the directory's `.gitignore` excludes `*.json`); delete the file by hand or via the **Clear** button.
+
+**Colour legend**: next gate **yellow** (pulsing), upcoming **cyan**, already-passed **green** for the current lap. HUD shows `Lap N · 00:42.3 · best 00:39.1` above `Gate X / N`.
+
 ## Project Structure
 
 ```
@@ -277,6 +334,10 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 │   ├── controller.js       # Keyboard + gamepad + WebHID input, per-mode settings UI
 │   ├── drone.js            # Quaternion physics, FPV/drone control laws, PID controller
 │   ├── collision.js        # Octree spatial index + collision response
+│   ├── gates.js            # Closed-loop race course from user path + lap timer (Phase B)
+│   ├── path-editor.js      # Modal top-down gate-path editor (click/drag/Z-X)
+│   ├── path-store.js       # Per-scene JSON path persistence client (fetch to /api/path)
+│   ├── catmull-rom.js      # Centripetal closed-loop Catmull-Rom curve math
 │   ├── hud.js              # Head-up display overlay
 │   ├── osd.js              # On-screen display (artificial horizon, telemetry)
 │   ├── audio.js            # FPV engine sound (sample playback + throttle-modulated rate)
@@ -295,6 +356,7 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 │   │   ├── demo_nanjing.gif
 │   │   ├── demo_teaser.jpg
 │   │   └── demo_teaser2.jpg
+│   ├── gate-paths/          # Per-scene JSON path records (gitignored via inner .gitignore)
 │   └── music/               # Audio assets (engine sound + BGM tracks)
 │       ├── fpv_loop.wav       # Looped FPV engine audio (pre-processed)
 │       ├── init/              # BGM playlist for loading / filtering / placement
