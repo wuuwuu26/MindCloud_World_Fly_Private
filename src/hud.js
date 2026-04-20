@@ -179,7 +179,6 @@ export class HUD {
 
                 const total         = gateCourse.gates.length;
                 const passed        = gateCourse.passedCount();
-                const next          = ((gateCourse.nextGateIdx | 0) % total) + 1;
                 const lapStartedYet = gateCourse.lapStart != null;
                 const lapMs         = lapStartedYet ? gateCourse.currentLapMs : 0;
                 const bestMs        = gateCourse.bestLapMs;
@@ -218,18 +217,18 @@ export class HUD {
                     if (passed > this._raceLastPassed) this._raceFlashTimer = 400;
                     this._raceLastPassed = passed;
 
-                    // Split into two spans so CSS can keep the current
-                    // gate number bright while dimming the separator
+                    // Split into two spans so CSS can keep the passed
+                    // gate count bright while dimming the separator
                     // and the total (matching the F1 'LAP 36/52' look).
                     // Each span's inner text is further broken into
                     // fixed-width character slots by `_monoDigits` so a
                     // one-digit → two-digit transition (e.g. gate 9 →
                     // gate 10) doesn't shift the line horizontally.
-                    // The current number is also left-padded with
+                    // The passed count is also left-padded with
                     // spaces to the total's digit count so the string
                     // length itself is stable across the whole lap.
                     const totalStr = String(total);
-                    const currStr  = String(next).padStart(totalStr.length, ' ');
+                    const currStr  = String(passed).padStart(totalStr.length, ' ');
                     this.hrpGateProgEl.innerHTML =
                         `<span class="hrp-gate-curr">${_monoDigits(currStr)}</span>` +
                         `<span class="hrp-gate-total">${_monoDigits(' / ' + totalStr)}</span>`;

@@ -69,11 +69,11 @@ const DEFAULT_OPTS = {
 
 // Gate colors — emissive-only (no lighting contribution), chosen for
 // max contrast against bright 3DGS backgrounds.
-//   start      → gate 0, the launch / finish line (chartreuse, pulses
-//                when it is also the next gate)
+//   start      → gate 0, the launch / finish line — now wears the
+//                checker-flag texture with a "START" sign above it
 //   next       → the gate you must fly next (yellow, pulses)
 //   upcoming   → any other gate within the horizon window (cyan)
-// The finish gate (index N-1) carries a checker-flag texture instead
+// The start gate (index 0) carries a checker-flag texture instead
 // of a solid colour — see `getCheckerTexture` below.
 const COL_START    = { r: 0.40, g: 1.00, b: 0.10 }; // chartreuse
 const COL_NEXT     = { r: 1.00, g: 0.84, b: 0.00 }; // yellow
@@ -92,7 +92,7 @@ const HORIZON = 5;
 const EMISSIVE_INTENSITY = 1.5;
 
 // ------------------------------------------------------------------
-// Procedural canvas textures (finish-gate checker & gate-0 START sign)
+// Procedural canvas textures (start-gate checker & gate-0 START sign)
 // ------------------------------------------------------------------
 //
 // Both textures are built from HTMLCanvasElements on first use so no
@@ -289,7 +289,7 @@ export class GateCourse {
                 materials: null,
                 material:  null,
                 invWorld:  null,
-                // `fixedTint` gates (currently just the finish gate) carry
+                // `fixedTint` gates (currently just the start gate) carry
                 // a texture that must not be overwritten by the per-frame
                 // color-state repaint in `_updateGateAppearance`.
                 fixedTint: false,
@@ -417,18 +417,18 @@ export class GateCourse {
         const q = new pc.Quat().setFromMat4(m);
         e.setRotation(q);
 
-        // Finish gate (last in the closed loop) wears a checker-flag
-        // texture so it is instantly recognisable as the lap terminator,
-        // just like real motorsport circuits. Its shading strategy is
-        // intentionally different from the rest: the chequered pattern
-        // already provides strong visual signal, so we keep the simpler
-        // 4-box construction with uniform brightness on all bars — no
-        // per-face shading — which also avoids the material-explosion
-        // that per-face checker tiling would force (each bar needs its
-        // own tile ratio for the squares to render roughly square).
-        const isFinish = (index === this.gates.length - 1);
+        // Start gate (gate 0) wears a checker-flag texture so it is
+        // instantly recognisable as the launch line, just like real
+        // motorsport circuits. Its shading strategy is intentionally
+        // different from the rest: the chequered pattern already provides
+        // strong visual signal, so we keep the simpler 4-box construction
+        // with uniform brightness on all bars — no per-face shading —
+        // which also avoids the material-explosion that per-face checker
+        // tiling would force (each bar needs its own tile ratio for the
+        // squares to render roughly square).
+        const isStart = (index === 0);
 
-        if (isFinish) {
+        if (isStart) {
             this._buildFinishFrame(e, gate, size, half, thickness);
         } else {
             this._buildFacedFrame(e, gate, size, half, thickness);
@@ -475,7 +475,7 @@ export class GateCourse {
     }
 
     /**
-     * Finish-gate builder: four checker-textured boxes, uniform brightness.
+     * Start-gate builder: four checker-textured boxes, uniform brightness.
      * Deliberately skips the per-face shading path used for normal gates —
      * the chequered flag already carries all the visual weight this gate
      * needs, and per-face rebuild would quadruple the material count and
@@ -485,6 +485,9 @@ export class GateCourse {
      * Sets `gate.fixedTint = true` so `_updateGateAppearance` does not
      * overwrite the white diffuse/emissive that lets the checker colours
      * show through.
+     *
+     * Note: named `_buildFinishFrame` for historical reasons, but now used
+     * for the start gate (gate 0) rather than the finish gate.
      */
     _buildFinishFrame(parent, gate, size, half, thickness) {
         /* global pc */
@@ -696,21 +699,18 @@ export class GateCourse {
         }
         if (!visible) return;
 
-        // Gates with a fixed texture (currently just the finish gate's
+        // Gates with a fixed texture (currently just the start gate's
         // chequered flag) must not have their material diffuse/emissive
         // overwritten — doing so would tint the checker pattern.
         if (gate.fixedTint) return;
 
-        // Gate 0 is the launch / finish line and always shows as
-        // chartreuse, even when it is the next gate — the pulse scale
-        // animation (applied elsewhere) plus the extra horizontal
-        // crossbar built into its geometry already signal "this is the
-        // one to fly through", so we don't override with yellow.
+        // Gate 0 has the checker texture (fixedTint = true), so it returns
+        // early above and never reaches this code path. All other gates
+        // (including the last gate) are colored based on their state.
         const isNext = (index === this.nextGateIdx);
         let c;
-        if (index === 0)             c = COL_START;
-        else if (isNext)             c = COL_NEXT;
-        else                          c = COL_UPCOMING;
+        if (isNext)                  c = COL_NEXT;
+        else                         c = COL_UPCOMING;
         // Repaint every material with the same base colour. Per-face
         // brightness lives in each material's `emissiveIntensity` (set
         // once at build time from FACE_BRIGHTNESS) so we don't touch it
