@@ -43,6 +43,16 @@ python3 serve.py
 
 Open **http://localhost:8080** in your browser (Chrome/Edge recommended for native Gamepad API; Firefox supported via WebHID bridge).
 
+### Scene Files
+
+Scene files (`.ply`, `.sog`) are not included in this repository due to their large size. After cloning, place your 3D Gaussian Splatting scene files into the `scene/` directory:
+
+    scene/
+    ├── your_scene.ply
+    └── your_scene.sog
+
+The simulator will load scenes from this directory automatically. You can also drag and drop files directly onto the page from any location.
+
 ## Supported Formats
 
 | Format | Extension | Description |

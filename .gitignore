@@ -1,4 +1,5 @@
-scene/
+scene/*
+!scene/.gitignore
 # Audio preprocessing — only the final fpv_loop.wav is committed. The raw
 # source clip, the prep script, and any tooling artefacts stay local.
 asset/music/fpv.wav
