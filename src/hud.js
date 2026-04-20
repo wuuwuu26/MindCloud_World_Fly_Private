@@ -19,6 +19,8 @@
  * HUD overlay — updates HTML elements with drone telemetry, FPS, controller status.
  */
 
+import { formatLap } from './gates.js';
+
 export class HUD {
     constructor() {
         this.altitudeEl = document.getElementById('hud-altitude');
@@ -29,12 +31,19 @@ export class HUD {
         this.collisionWarnEl = document.getElementById('hud-collision-warn');
         this.armedEl = document.getElementById('armed-indicator');
         this.collisionFlashEl = document.getElementById('collision-flash');
+        this.raceProgressEl = document.getElementById('hud-race-progress');
+        this.lapTimerEl = document.getElementById('hud-lap-timer');
         this.hudContainer = document.getElementById('hud');
 
         // FPS tracking
         this._frameTimes = [];
         this._lastTime = performance.now();
         this._collisionFlashTimer = 0;
+
+        // Race HUD flash: briefly tint green + enlarge on each gate-pass.
+        // The timer counts down in milliseconds inside update().
+        this._raceFlashTimer = 0;
+        this._raceLastPassed = 0;
     }
 
     show() {
@@ -49,8 +58,11 @@ export class HUD {
      * Update HUD each frame.
      * @param {Drone} drone
      * @param {Controller} controller
+     * @param {GateCourse} [gateCourse] - optional; when present and
+     *   enabled with at least one placed gate, renders a
+     *   "Gate X / N" progress readout in the bottom-center HUD zone.
      */
-    update(drone, controller) {
+    update(drone, controller, gateCourse) {
         const now = performance.now();
         const dt = now - this._lastTime;
         this._lastTime = now;
@@ -110,6 +122,68 @@ export class HUD {
         } else {
             if (this.collisionFlashEl) {
                 this.collisionFlashEl.classList.remove('active');
+            }
+        }
+
+        // Race-course readouts. Two elements in the bottom-centre zone:
+        //   hud-lap-timer     — "Lap 3 · 00:42.314 · best 00:39.120"
+        //   hud-race-progress — "Gate 2 / 7"
+        // Both hidden unless gateMode is on (isVisible()) AND a path of
+        // >= 3 gates exists. Out-of-order gate crossings are silently
+        // ignored by the course, so there is no "missed lap" state to
+        // surface here.
+        const hasCourse = !!(gateCourse &&
+                             typeof gateCourse.isVisible === 'function' &&
+                             gateCourse.isVisible() &&
+                             gateCourse.gates && gateCourse.gates.length >= 3);
+
+        if (this.raceProgressEl) {
+            if (hasCourse) {
+                const passed = gateCourse.passedCount();
+                const total  = gateCourse.gates.length;
+
+                if (passed > this._raceLastPassed) this._raceFlashTimer = 400;
+                this._raceLastPassed = passed;
+
+                const next = ((gateCourse.nextGateIdx | 0) % total) + 1;
+                this.raceProgressEl.textContent = `Gate ${next} / ${total}`;
+                this.raceProgressEl.style.display = 'block';
+
+                if (this._raceFlashTimer > 0) {
+                    this._raceFlashTimer -= dt;
+                    const t = Math.max(0, this._raceFlashTimer) / 400;
+                    this.raceProgressEl.style.color     = `rgb(${Math.round(77 + 178 * t)}, ${Math.round(221 + 34 * t)}, ${Math.round(255 - 80 * t)})`;
+                    this.raceProgressEl.style.transform = `scale(${1 + 0.15 * t})`;
+                } else {
+                    this.raceProgressEl.style.color     = '#4df';
+                    this.raceProgressEl.style.transform = 'scale(1)';
+                }
+            } else {
+                this.raceProgressEl.style.display = 'none';
+                this._raceLastPassed = 0;
+                this._raceFlashTimer = 0;
+            }
+        }
+
+        if (this.lapTimerEl) {
+            if (hasCourse) {
+                const lapStartedYet = gateCourse.lapStart != null;
+                const lapMs   = lapStartedYet ? gateCourse.currentLapMs : 0;
+                const bestMs  = gateCourse.bestLapMs;
+                const lapNum  = gateCourse.lapCount + 1;
+
+                let text;
+                if (!lapStartedYet) {
+                    text = `Cross gate 1 to start the timer${bestMs != null ? ` · best ${formatLap(bestMs)}` : ''}`;
+                } else {
+                    const bestBit = (bestMs != null) ? ` · best ${formatLap(bestMs)}` : '';
+                    text = `Lap ${lapNum} · ${formatLap(lapMs)}${bestBit}`;
+                }
+                this.lapTimerEl.textContent = text;
+                this.lapTimerEl.style.display = 'block';
+                this.lapTimerEl.style.color = lapStartedYet ? '#4df' : '#aaa';
+            } else {
+                this.lapTimerEl.style.display = 'none';
             }
         }
     }

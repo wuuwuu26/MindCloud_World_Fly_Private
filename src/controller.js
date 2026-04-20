@@ -20,6 +20,9 @@
  * Supports channel assignment, axis inversion, dead zones, and listen-mode mapping.
  */
 
+import { editPath } from './path-editor.js';
+import { formatLap } from './gates.js';
+
 const ACTIONS = ['roll', 'pitch', 'throttle', 'yaw', 'cameraTilt'];
 const BUTTON_ACTIONS = ['arm', 'modeSwitch'];
 
@@ -146,6 +149,28 @@ export class Controller {
         };
         this._engineAudio = null;
         this._bgmAudio = null;
+
+        // Gate-path settings. See src/gates.js for runtime behaviour.
+        // `gateSize` and `clearance` are global knobs shared by all gates.
+        // `path` is either null (no course drawn) or the user-edited
+        // closed-loop description that gets fed to GateCourse.rebuild().
+        // Persistence of the path itself is per-map (see src/path-store.js);
+        // the localStorage copy here is a runtime fallback — on scene load
+        // main.js overwrites `path` from the per-map file if one exists.
+        this.gatePathSettings = {
+            gateSize:  1.2,
+            clearance: 0.8,
+            path: null,   // { closed: true, points: [{x,y,z}, ...], yMin, yMax }
+        };
+        // Wired from main.js after the GateCourse is constructed.
+        //   _gatePathApplyCb()         → called whenever path/size/clearance
+        //                                changes; main.js rebuilds entities
+        //                                and persists to asset/gate-paths/.
+        //   _gatePathCtxProvider()     → returns { octree, bounds, spawnPoint }
+        //                                snapshot for the path editor backdrop.
+        this._gateCourse = null;
+        this._gatePathApplyCb = null;
+        this._gatePathCtxProvider = null;
 
         // Load saved config
         this._loadConfig();
@@ -529,6 +554,46 @@ export class Controller {
         this._buildSettingsUI();
     }
 
+    /**
+     * Wire the gate-path subsystem. Called from main.js once the
+     * GateCourse is constructed and the scene-context provider + apply
+     * callback are available.
+     *
+     * @param {GateCourse} course
+     * @param {() => void} applyCb - main.js function that rebuilds the
+     *   gate entities from the current gatePathSettings (and persists the
+     *   result to the per-map JSON file). Fire-and-forget; safe to call
+     *   when no scene is loaded (it will no-op).
+     * @param {() => { octree, bounds, spawnPoint }} ctxProvider - returns
+     *   a fresh snapshot of the runtime scene context; the path editor
+     *   uses it for its point-cloud backdrop and spawn marker.
+     */
+    attachGateCourse(course, applyCb, ctxProvider) {
+        this._gateCourse = course || null;
+        this._gatePathApplyCb     = typeof applyCb === 'function' ? applyCb : null;
+        this._gatePathCtxProvider = typeof ctxProvider === 'function' ? ctxProvider : null;
+        if (this._gateCourse) {
+            this._gateCourse.configure(this.gatePathSettings);
+        }
+        this._buildSettingsUI();
+    }
+
+    /**
+     * Push `gatePathSettings` into the running GateCourse and trigger
+     * main.js to rebuild + persist. Called from the settings UI after any
+     * gate-path-related change (size, clearance, or a fresh path from
+     * the editor).
+     */
+    _applyGatePath() {
+        if (this._gateCourse) {
+            this._gateCourse.configure(this.gatePathSettings);
+        }
+        if (this._gatePathApplyCb) {
+            try { this._gatePathApplyCb(); }
+            catch (e) { console.warn('[Race] apply failed:', e); }
+        }
+    }
+
     _applyAudioSettings() {
         const { engine, bgm } = this.audioSettings;
         if (this._engineAudio) {
@@ -653,6 +718,184 @@ export class Controller {
         return row;
     }
 
+    /**
+     * Populate the Gate Path section of the settings panel. Three rows
+     * only: gate size, clearance, and path (status + Edit / Clear
+     * buttons). No enable-toggle, no seed — `G` in flight mode toggles
+     * visibility, and the path is explicitly edited via the modal.
+     */
+    _buildRaceCourseSection() {
+        const container = document.getElementById('race-course-settings');
+        if (!container) return;
+        container.innerHTML = '';
+
+        const S = this.gatePathSettings;
+
+        // --- Shared slider factory ---------------------------------
+        // Same visual pattern as the old UI but writes to gatePathSettings
+        // and triggers the apply callback (main.js rebuilds + persists).
+        const mkSlider = (key, label, min, max, step, unit) => {
+            const row = document.createElement('div');
+            row.className = 'setting-row';
+            const l = document.createElement('label');
+            l.textContent = unit ? `${label} (${unit})` : label;
+            row.appendChild(l);
+            const ctrls = document.createElement('div');
+            ctrls.className = 'controls';
+
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = String(min);
+            slider.max = String(max);
+            slider.step = String(step);
+            slider.value = String(S[key]);
+            slider.style.width = '100px';
+
+            const num = document.createElement('input');
+            num.type = 'number';
+            num.min = String(min);
+            num.max = String(max);
+            num.step = String(step);
+            num.value = String(S[key]);
+            num.style.cssText = 'width:54px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;';
+
+            const sync = (v) => {
+                const clamped = Math.max(min, Math.min(max, v));
+                S[key] = clamped;
+                slider.value = String(clamped);
+                num.value = String(clamped);
+            };
+            slider.addEventListener('input', () => {
+                const v = parseFloat(slider.value);
+                if (!Number.isFinite(v)) return;
+                S[key] = v;
+                num.value = String(v);
+                this._saveConfig();
+                this._applyGatePath();
+            });
+            num.addEventListener('change', () => {
+                const v = parseFloat(num.value);
+                if (!Number.isFinite(v)) return;
+                sync(v);
+                this._saveConfig();
+                this._applyGatePath();
+            });
+            ctrls.appendChild(slider);
+            ctrls.appendChild(num);
+            row.appendChild(ctrls);
+            return row;
+        };
+
+        container.appendChild(mkSlider('gateSize',  'Gate size', 0.4, 5.0, 0.1, 'm'));
+        container.appendChild(mkSlider('clearance', 'Clearance', 0.1, 3.0, 0.1, 'm'));
+
+        // --- Path row ---------------------------------------------
+        // Single row that shows current path status (gate count + best
+        // lap if any) and exposes Edit / Clear buttons. The editor is
+        // launched asynchronously so the user can tweak and re-accept
+        // without leaving the settings panel.
+        const pathRow = document.createElement('div');
+        pathRow.className = 'setting-row';
+        const pathLbl = document.createElement('label');
+        pathLbl.textContent = 'Path';
+        pathRow.appendChild(pathLbl);
+
+        const pathCtrls = document.createElement('div');
+        pathCtrls.className = 'controls';
+        pathCtrls.style.cssText = 'display:flex;gap:6px;align-items:center;';
+
+        const status = document.createElement('span');
+        status.style.cssText = 'font-size:12px;color:#888;margin-right:4px;min-width:140px;';
+        const pathObj = S.path;
+        const nPts = (pathObj && Array.isArray(pathObj.points)) ? pathObj.points.length : 0;
+        const bestLapMs = this._gateCourse && this._gateCourse.bestLapMs;
+        if (nPts >= 3) {
+            const best = Number.isFinite(bestLapMs) ? ` · best ${formatLap(bestLapMs)}` : '';
+            status.textContent = `${nPts} gates${best}`;
+        } else if (nPts > 0) {
+            status.textContent = `${nPts} / 3 gates — editor to finish`;
+        } else {
+            status.textContent = 'no path drawn';
+        }
+
+        const editBtn = document.createElement('button');
+        editBtn.className = 'assign-btn';
+        editBtn.textContent = nPts > 0 ? 'Edit\u2026' : 'Edit path\u2026';
+        editBtn.addEventListener('click', async () => {
+            // Scene context required for the editor backdrop + clearance.
+            const provider = this._gatePathCtxProvider;
+            const ctx = provider ? provider() : null;
+            if (!ctx || !ctx.octree || !ctx.bounds) {
+                status.textContent = 'load a scene first';
+                status.style.color = '#f77';
+                setTimeout(() => this._buildRaceCourseSection(), 1500);
+                return;
+            }
+            const initial = S.path ? {
+                closed:    true,
+                points:    S.path.points,
+                yMin:      S.path.yMin,
+                yMax:      S.path.yMax,
+            } : null;
+            const result = await editPath({
+                octree:      ctx.octree,
+                bounds:      ctx.bounds,
+                spawnPoint:  ctx.spawnPoint || null,
+                initialPath: initial,
+                gateSize:    S.gateSize,
+                clearance:   S.clearance,
+            });
+            if (result) {
+                // Editor returns latest gate/clearance sliders too — sync
+                // them so the settings panel stays consistent with what
+                // the user saw in the modal.
+                S.gateSize  = result.gateSize;
+                S.clearance = result.clearance;
+                S.path = {
+                    closed: true,
+                    points: result.points,
+                    yMin:   result.yMin,
+                    yMax:   result.yMax,
+                };
+                this._saveConfig();
+                this._applyGatePath();
+                this._buildRaceCourseSection();
+            }
+        });
+
+        const clearBtn = document.createElement('button');
+        clearBtn.className = 'assign-btn';
+        clearBtn.textContent = 'Clear';
+        clearBtn.style.opacity = S.path ? '1' : '0.4';
+        clearBtn.addEventListener('click', () => {
+            if (!S.path) return;
+            if (!window.confirm('Clear the current gate path for this scene? (best lap will also reset)')) return;
+            S.path = null;
+            if (this._gateCourse) this._gateCourse.bestLapMs = null;
+            this._saveConfig();
+            this._applyGatePath();
+            this._buildRaceCourseSection();
+        });
+        pathCtrls.append(status, editBtn, clearBtn);
+        pathRow.appendChild(pathCtrls);
+        container.appendChild(pathRow);
+
+        // --- Hint line -------------------------------------------
+        const hintRow = document.createElement('div');
+        hintRow.className = 'setting-row';
+        hintRow.style.cssText = 'opacity:0.7;';
+        const hintLbl = document.createElement('label');
+        hintLbl.textContent = '';
+        hintRow.appendChild(hintLbl);
+        const hintText = document.createElement('span');
+        hintText.style.cssText = 'font-size:11px;color:#889;font-style:italic;';
+        hintText.textContent = nPts >= 3
+            ? 'Press G in flight mode to show / hide gates.'
+            : 'Draw ≥ 3 gates in the editor; then press G in flight.';
+        hintRow.appendChild(hintText);
+        container.appendChild(hintRow);
+    }
+
     getConfig() {
         const settings = {};
         for (const id of SETTINGS_IDS) {
@@ -673,7 +916,8 @@ export class Controller {
             modeRateExpo: JSON.parse(JSON.stringify(this._modeRateExpo)),
             modePidSettings: JSON.parse(JSON.stringify(this._modePidSettings)),
             currentMode: this._currentMode,
-            audioSettings: JSON.parse(JSON.stringify(this.audioSettings)),
+            audioSettings:    JSON.parse(JSON.stringify(this.audioSettings)),
+            gatePathSettings: JSON.parse(JSON.stringify(this.gatePathSettings)),
         };
     }
 
@@ -686,7 +930,14 @@ export class Controller {
         if (config.currentMode) this._currentMode = config.currentMode;
         if (config.settings) this._restoreSettings(config.settings);
         if (config.audioSettings) this._mergeAudioSettings(config.audioSettings);
+        // Accept both the new `gatePathSettings` key and the legacy
+        // `raceCourseSettings` key (we only need gateSize + clearance from
+        // the legacy schema; everything else — seed / region / straight —
+        // is dropped now).
+        if (config.gatePathSettings)        this._mergeGatePathSettings(config.gatePathSettings);
+        else if (config.raceCourseSettings) this._mergeGatePathSettings(config.raceCourseSettings);
         this._applyAudioSettings();
+        if (this._gateCourse) this._gateCourse.configure(this.gatePathSettings);
         this._saveConfig();
         this._buildSettingsUI();
     }
@@ -703,6 +954,54 @@ export class Controller {
             s.lastV  = Math.max(0, Math.min(1, Number(s.lastV)  || s.volume));
             s.muted  = !!s.muted;
             if (s.lastV < 0.001) s.lastV = 0.5;
+        }
+    }
+
+    /**
+     * Merge saved gate-path settings onto defaults, clamping the numeric
+     * fields and validating the optional `path` object. Tolerant of:
+     *   - Missing fields (newer defaults kept for any absent key).
+     *   - Legacy `raceCourseSettings` blobs (seed/count/region silently
+     *     dropped; gateSize + clearance preserved).
+     *   - Hand-edited localStorage dumps with wrong types.
+     *
+     * Note: path persistence is per-map via src/path-store.js. The copy
+     * in localStorage here is purely a fallback that lets the Gate Path
+     * section show sensible UI before a scene is loaded.
+     */
+    _mergeGatePathSettings(saved) {
+        if (!saved || typeof saved !== 'object') return;
+        const S = this.gatePathSettings;
+        if (Number.isFinite(Number(saved.gateSize)))  S.gateSize  = Number(saved.gateSize);
+        if (Number.isFinite(Number(saved.clearance))) S.clearance = Number(saved.clearance);
+        S.gateSize  = Math.max(0.4, Math.min(5.0, S.gateSize  || 1.2));
+        S.clearance = Math.max(0.1, Math.min(3.0, S.clearance || 0.8));
+
+        // Path validation — require closed + >= 3 points of finite xyz.
+        const raw = saved.path;
+        if (raw && typeof raw === 'object' && Array.isArray(raw.points) && raw.points.length >= 3) {
+            const pts = [];
+            let ok = true;
+            for (const p of raw.points) {
+                if (!p || !Number.isFinite(Number(p.x)) || !Number.isFinite(Number(p.y)) || !Number.isFinite(Number(p.z))) {
+                    ok = false; break;
+                }
+                pts.push({ x: Number(p.x), y: Number(p.y), z: Number(p.z) });
+            }
+            if (ok) {
+                const yMin = Number.isFinite(Number(raw.yMin)) ? Number(raw.yMin) : -4;
+                const yMax = Number.isFinite(Number(raw.yMax)) ? Number(raw.yMax) :  4;
+                S.path = {
+                    closed: true,
+                    points: pts,
+                    yMin:   Math.min(yMin, yMax),
+                    yMax:   Math.max(yMin, yMax),
+                };
+            } else {
+                S.path = null;
+            }
+        } else {
+            S.path = null;
         }
     }
 
@@ -1152,6 +1451,10 @@ export class Controller {
         // it first; it survives an early-return later in the function when
         // the channel-assignments container is missing (e.g. during init).
         this._buildAudioSection();
+
+        // Race Course section is likewise independent of RC state, so it
+        // also renders before the early-return.
+        this._buildRaceCourseSection();
 
         const container = document.getElementById('channel-assignments');
         if (!container) return;
@@ -1951,6 +2254,12 @@ export class Controller {
                 }
                 if (config.audioSettings) {
                     this._mergeAudioSettings(config.audioSettings);
+                }
+                if (config.gatePathSettings) {
+                    this._mergeGatePathSettings(config.gatePathSettings);
+                } else if (config.raceCourseSettings) {
+                    // Legacy blob — keep gateSize + clearance, drop everything else.
+                    this._mergeGatePathSettings(config.raceCourseSettings);
                 }
             }
         } catch (e) { /* ignore */ }

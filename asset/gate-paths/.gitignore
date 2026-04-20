@@ -1,0 +1,7 @@
+# Per-scene gate course JSON tracks are developer-local; each operator
+# has their own flying preferences.  The directory itself is tracked
+# so the server has somewhere to write without needing to mkdir at
+# startup — but the contents are private.
+*.json
+*.tmp
+!.gitignore
