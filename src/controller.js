@@ -52,6 +52,27 @@ const DEFAULT_MAPPING = {
     cameraTilt: { axisIndex: -1, inverted: false, deadzone: 0, rate: 1.0, expo: 0.0 },
 };
 
+/**
+ * Strict-but-fuzzy comparison for gate-path control-point arrays.
+ * Used to decide whether an editor commit actually changed the layout
+ * and therefore invalidates the per-scene best-lap record. Any change
+ * in length, or any coordinate that moved more than ~1 mm on any axis,
+ * counts as a redesign.
+ */
+function _pointsEqual(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    if (a.length !== b.length) return false;
+    const EPS = 1e-3; // metres — gate positions are stored in metres
+    for (let i = 0; i < a.length; i++) {
+        const p = a[i], q = b[i];
+        if (!p || !q) return false;
+        if (Math.abs(Number(p.x) - Number(q.x)) > EPS) return false;
+        if (Math.abs(Number(p.y) - Number(q.y)) > EPS) return false;
+        if (Math.abs(Number(p.z) - Number(q.z)) > EPS) return false;
+    }
+    return true;
+}
+
 const DEFAULT_BUTTON_MAPPING = {
     // triggerMode applies only to axis-source bindings (RC switches / gamepad
     // axes) and selects between 'toggle' (rising edge flips state) and 'level'
@@ -846,6 +867,16 @@ export class Controller {
                 clearance:   S.clearance,
             });
             if (result) {
+                // Layout-change detection: if the new control points
+                // differ from the previously-saved set (any point moved,
+                // added, or removed) the old best-lap record no longer
+                // applies to this course, so we clear it. Re-opening the
+                // editor and pressing Save without touching anything
+                // keeps the current PB intact. Tolerance is ~1 mm which
+                // is well below anything the user can nudge by eye.
+                const prevPts = (S.path && Array.isArray(S.path.points)) ? S.path.points : [];
+                const layoutChanged = !_pointsEqual(prevPts, result.points);
+
                 // Editor returns latest gate/clearance sliders too — sync
                 // them so the settings panel stays consistent with what
                 // the user saw in the modal.
@@ -857,6 +888,9 @@ export class Controller {
                     yMin:   result.yMin,
                     yMax:   result.yMax,
                 };
+                if (layoutChanged && this._gateCourse) {
+                    this._gateCourse.bestLapMs = null;
+                }
                 this._saveConfig();
                 this._applyGatePath();
                 this._buildRaceCourseSection();

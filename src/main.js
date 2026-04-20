@@ -751,6 +751,20 @@ async function loadSceneFile(file) {
         // selector can be pre-populated with the remembered choice.
         currentSceneFile = file;
 
+        // Best-lap is per-scene: clear whatever the previous scene
+        // contributed BEFORE we try to load the new scene's record, so
+        // that a fresh map (no saved JSON yet) or a map without a
+        // stored PB starts at "--:--.---" instead of inheriting the
+        // previous map's time.
+        if (gateCourse) gateCourse.setBestLapMs(null);
+        // Same goes for the gate path: if the incoming scene has no
+        // saved layout we must not keep the outgoing scene's path
+        // around, otherwise the user would see the old gates ghosting
+        // into the new map.
+        if (controller && controller.gatePathSettings) {
+            controller.gatePathSettings.path = null;
+        }
+
         // Load any previously-saved gate path + coord system for this
         // scene. File-based persistence key is filename + size (see
         // path-store.js#keyFor); missing file is normal for first-time
