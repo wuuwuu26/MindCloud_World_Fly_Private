@@ -100,6 +100,10 @@ class HIDBridge:
 
     def close_device(self):
         self._running = False
+        # 等待读取线程退出，避免在 dev.read() 阻塞时关闭句柄导致崩溃
+        if self._reader_thread and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=2.0)
+        self._reader_thread = None
         if self._device:
             try:
                 self._device.close()
