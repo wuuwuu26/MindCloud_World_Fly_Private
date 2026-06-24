@@ -92,8 +92,8 @@ let rawArrayBuffer = null; // unfiltered original buffer
 // we use showOpenFilePicker with `startIn: _lastFileHandle` so that the open
 // dialog re-opens at the directory of the previously-picked scene file and
 // highlights it — this survives ESC → re-pick cycles, which the legacy
-// <input type=file> element does not reliably preserve. Firefox / Safari fall
-// back to the legacy input in setupFileLoading().
+// <input type=file> element does not reliably preserve. Browsers without
+// File System Access API fall back to the legacy input in setupFileLoading().
 let _lastFileHandle = null;
 
 function showError(msg) {
@@ -638,7 +638,7 @@ function setupFileLoading() {
     // (Chromium-based browsers on secure contexts): it lets us pass the last
     // picked FileSystemFileHandle as `startIn`, so the dialog re-opens at the
     // previous directory with the previous file highlighted — even across
-    // ESC → re-pick cycles. Firefox / Safari fall back to the legacy
+    // ESC → re-pick cycles. Browsers without that API fall back to the legacy
     // <input type=file>.click() path, which has less reliable memory but at
     // least gives the OS's own last-directory behaviour.
     const hasFsAccess = typeof window.showOpenFilePicker === 'function';
@@ -795,6 +795,9 @@ async function loadSceneFile(file) {
             if (gateCourse && Number.isFinite(Number(savedScene.bestLapMs))) {
                 gateCourse.setBestLapMs(Number(savedScene.bestLapMs));
             }
+        }
+        if (controller && typeof controller.refreshSettingsUI === 'function') {
+            controller.refreshSettingsUI();
         }
 
         // ---- Format-specific: extract opacities & render buffer (coord-independent) ----

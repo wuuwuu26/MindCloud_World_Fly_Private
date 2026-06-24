@@ -120,7 +120,7 @@ export class Controller {
         this._hidConnected = false;
         this._hidDeviceName = '';
         
-        // Option to disable Gamepad API (allows WebHID to claim the device)
+        // Option to disable Gamepad API (allows Chrome WebHID to claim the device)
         this._gamepadApiDisabled = false;
 
         // Current input state (merged keyboard + gamepad, range [-1, 1])
@@ -596,6 +596,10 @@ export class Controller {
         if (this._gateCourse) {
             this._gateCourse.configure(this.gatePathSettings);
         }
+        this._buildSettingsUI();
+    }
+
+    refreshSettingsUI() {
         this._buildSettingsUI();
     }
 
@@ -1143,7 +1147,7 @@ export class Controller {
     // ---- Private methods ----
 
     _getGamepad() {
-        // If Gamepad API is disabled, return null to allow WebHID to claim device
+        // If Gamepad API is disabled, return null to allow Chrome WebHID to claim the device.
         if (this._gamepadApiDisabled) return null;
         
         const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
@@ -1778,7 +1782,7 @@ export class Controller {
             }
         }
 
-        // Gamepad status and WebHID button
+        // Gamepad status and Chrome WebHID button
         const statusEl = document.getElementById('gamepad-status');
         if (statusEl) {
             let statusHtml = '';
@@ -1788,7 +1792,7 @@ export class Controller {
             statusHtml += `<div style="margin-bottom:8px;">
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
                     <input type="checkbox" id="disable-gamepad-api" ${disabledChecked}>
-                    <span style="color:#fa0;">Disable Gamepad API (for WebHID)</span>
+                    <span style="color:#fa0;">Disable Gamepad API (use Chrome WebHID)</span>
                 </label>
             </div>`;
             
@@ -1798,7 +1802,7 @@ export class Controller {
             } else if (this.connected && !this._gamepadApiDisabled) {
                 statusHtml += `<span style="color:#4af;">Gamepad: ${this.gamepadName}</span>`;
             } else if (this._gamepadApiDisabled) {
-                statusHtml += `<span style="color:#fa0;">Gamepad API disabled - use WebHID</span>`;
+                statusHtml += `<span style="color:#fa0;">Gamepad API disabled - use Chrome WebHID</span>`;
             } else {
                 statusHtml += `<span style="color:#888;">No gamepad detected</span>`;
             }

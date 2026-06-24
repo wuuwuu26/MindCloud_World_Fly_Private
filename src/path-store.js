@@ -131,7 +131,7 @@ export async function saveForScene(file, record) {
         fileSize:      file.size,
         coordSystem:   record.coordSystem || 'zup',
         path:          record.path || null,
-        bestLapMs:     Number.isFinite(Number(record.bestLapMs)) ? Number(record.bestLapMs) : null,
+        bestLapMs:     _normaliseBestLap(record.bestLapMs),
         lastUpdated:   new Date().toISOString(),
     });
     try {
@@ -190,4 +190,9 @@ function _validate(data, file) {
         console.warn(`[path-store] size mismatch for ${data.filename}: stored=${data.fileSize} current=${file.size}`);
     }
     return true;
+}
+
+function _normaliseBestLap(ms) {
+    const n = Number(ms);
+    return Number.isFinite(n) && n > 0 ? n : null;
 }
