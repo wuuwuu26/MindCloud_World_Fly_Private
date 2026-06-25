@@ -41,40 +41,32 @@ export function parseSplatForPositions(arrayBuffer, options = {}) {
     const vertexCount = arrayBuffer.byteLength / SPLAT_RECORD_SIZE;
     const dataView = new DataView(arrayBuffer);
     const positions = new Float32Array(vertexCount * 3);
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
 
     for (let i = 0; i < vertexCount; i++) {
         const base = i * SPLAT_RECORD_SIZE;
-        const rawX = dataView.getFloat32(base, true);
-        const rawY = dataView.getFloat32(base + 4, true);
-        const rawZ = dataView.getFloat32(base + 8, true);
+        let rawX = dataView.getFloat32(base, true);
+        let rawY = dataView.getFloat32(base + 4, true);
+        let rawZ = dataView.getFloat32(base + 8, true);
+        if (!isFinite(rawX)) rawX = 0;
+        if (!isFinite(rawY)) rawY = 0;
+        if (!isFinite(rawZ)) rawZ = 0;
 
+        const off = i * 3;
         if (zUp) {
             // Z-up to Y-up: x' = x, y' = z, z' = -y
-            positions[i * 3]     = rawX;
-            positions[i * 3 + 1] = rawZ;
-            positions[i * 3 + 2] = -rawY;
+            positions[off]     = rawX;
+            positions[off + 1] = rawZ;
+            positions[off + 2] = -rawY;
         } else {
             // Y-up (COLMAP/OpenCV convention: Y-down) → flip Y
-            positions[i * 3]     = rawX;
-            positions[i * 3 + 1] = -rawY;
-            positions[i * 3 + 2] = -rawZ;
+            positions[off]     = rawX;
+            positions[off + 1] = -rawY;
+            positions[off + 2] = -rawZ;
         }
-    }
 
-    // Sanitize NaN/Inf positions to avoid poisoning octree and distance calculations
-    for (let i = 0; i < vertexCount; i++) {
-        const off = i * 3;
-        if (!isFinite(positions[off]))     positions[off]     = 0;
-        if (!isFinite(positions[off + 1])) positions[off + 1] = 0;
-        if (!isFinite(positions[off + 2])) positions[off + 2] = 0;
-    }
-
-    // Compute bounding box (skip NaN/Inf vertices)
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-    for (let i = 0; i < vertexCount; i++) {
-        const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
-        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+        const x = positions[off], y = positions[off + 1], z = positions[off + 2];
         if (x < minX) minX = x; if (x > maxX) maxX = x;
         if (y < minY) minY = y; if (y > maxY) maxY = y;
         if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;

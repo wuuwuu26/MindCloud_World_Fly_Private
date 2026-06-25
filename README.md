@@ -1,6 +1,6 @@
 # MindCloud World Fly 用户手册
 
-这是一个浏览器里的 3DGS 无人机飞行模拟器。当前版本默认使用 **Chrome + NVIDIA GPU**，手柄走 Chrome 的 Gamepad API，RC 遥控器可以走 Chrome 原生 WebHID。旧的 Firefox 兼容路径已经删掉，不再需要 `python3-hid` 或 `python3-websockets`。
+这是一个浏览器里的 3DGS 无人机飞行模拟器。当前版本默认使用 **Chrome + NVIDIA GPU**，手柄走 Chrome 的 Gamepad API，RC 遥控器可以走 Chrome 原生 WebHID。
 
 ## 环境准备
 
@@ -30,7 +30,7 @@ sudo bash setup_udev.sh
 
 执行后重新插拔遥控器；如果脚本提示加入了 `plugdev` 组，注销重登一次。
 
-## 启动
+## 一键启动
 
 ```bash
 cd /home/dzp/projects/MindCloud_World_Fly

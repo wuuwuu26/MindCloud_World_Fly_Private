@@ -307,12 +307,14 @@ export function editPath({ octree, bounds, spawnPoint, initialPath, gateSize, cl
             const r = Math.max(curGateSize * 0.5, curClearance);
             for (let i = 0; i < points.length; i++) {
                 const p = points[i];
-                // querySphere returns indices of cloud points inside the sphere.
-                // Clear (green) iff empty.
-                let hits;
-                try { hits = octree.querySphere(p.x, p.y, p.z, r); }
-                catch (_) { hits = []; }
-                clearanceCache[i] = hits.length === 0;
+                // Clear (green) iff no cloud point sits inside the sphere.
+                let hitCount = 0;
+                try {
+                    hitCount = typeof octree.querySphereCount === 'function'
+                        ? octree.querySphereCount(p.x, p.y, p.z, r)
+                        : octree.querySphere(p.x, p.y, p.z, r).length;
+                } catch (_) { hitCount = 0; }
+                clearanceCache[i] = hitCount === 0;
             }
         }
 

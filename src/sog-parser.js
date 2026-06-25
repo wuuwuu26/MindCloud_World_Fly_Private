@@ -98,6 +98,8 @@ export async function parseSogForPositions(arrayBuffer, options = {}) {
     // Reconstruct positions
     const zUp = options.zUp || false;
     const positions = new Float32Array(vertexCount * 3);
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
 
     for (let i = 0; i < vertexCount; i++) {
         const pixelOffset = i * 4; // RGBA per pixel
@@ -113,37 +115,27 @@ export async function parseSogForPositions(arrayBuffer, options = {}) {
         const nz = lerp(mins[2], maxs[2], qz / 65535);
 
         // Undo symmetric log transform
-        const rawX = unlog(nx);
-        const rawY = unlog(ny);
-        const rawZ = unlog(nz);
+        let rawX = unlog(nx);
+        let rawY = unlog(ny);
+        let rawZ = unlog(nz);
+        if (!isFinite(rawX)) rawX = 0;
+        if (!isFinite(rawY)) rawY = 0;
+        if (!isFinite(rawZ)) rawZ = 0;
 
+        const off = i * 3;
         if (zUp) {
             // Z-up to Y-up: x' = x, y' = z, z' = -y
-            positions[i * 3]     = rawX;
-            positions[i * 3 + 1] = rawZ;
-            positions[i * 3 + 2] = -rawY;
+            positions[off]     = rawX;
+            positions[off + 1] = rawZ;
+            positions[off + 2] = -rawY;
         } else {
             // Y-up — pass through directly
-            positions[i * 3]     = rawX;
-            positions[i * 3 + 1] = rawY;
-            positions[i * 3 + 2] = rawZ;
+            positions[off]     = rawX;
+            positions[off + 1] = rawY;
+            positions[off + 2] = rawZ;
         }
-    }
 
-    // Sanitize NaN/Inf positions to avoid poisoning octree and distance calculations
-    for (let i = 0; i < vertexCount; i++) {
-        const off = i * 3;
-        if (!isFinite(positions[off]))     positions[off]     = 0;
-        if (!isFinite(positions[off + 1])) positions[off + 1] = 0;
-        if (!isFinite(positions[off + 2])) positions[off + 2] = 0;
-    }
-
-    // Compute bounding box (skip NaN/Inf vertices)
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-    for (let i = 0; i < vertexCount; i++) {
-        const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
-        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+        const x = positions[off], y = positions[off + 1], z = positions[off + 2];
         if (x < minX) minX = x; if (x > maxX) maxX = x;
         if (y < minY) minY = y; if (y > maxY) maxY = y;
         if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;

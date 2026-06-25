@@ -21,21 +21,22 @@
  * sphere-vs-pointcloud queries for drone collision.
  */
 
-const MAX_POINTS_PER_NODE = 64;
-const MAX_DEPTH = 12;
+const MAX_POINTS_PER_NODE = 1024;
+const MAX_DEPTH = 32;
+const MIN_SPLIT_EXTENT = 1e-6;
 
 class OctreeNode {
     constructor(minX, minY, minZ, maxX, maxY, maxZ, depth) {
         this.minX = minX; this.minY = minY; this.minZ = minZ;
         this.maxX = maxX; this.maxY = maxY; this.maxZ = maxZ;
         this.depth = depth;
-        this.children = null; // null = leaf
-        this.pointIndices = [];
+        this.left = null;
+        this.right = null;
+        this.first = 0;
+        this.count = 0;
     }
 
-    get midX() { return (this.minX + this.maxX) * 0.5; }
-    get midY() { return (this.minY + this.maxY) * 0.5; }
-    get midZ() { return (this.minZ + this.maxZ) * 0.5; }
+    get isLeaf() { return this.left === null && this.right === null; }
 
     intersectsSphere(cx, cy, cz, r) {
         // Closest point on AABB to sphere center
@@ -50,69 +51,139 @@ export class Octree {
     constructor() {
         this.root = null;
         this.positions = null;
+        this.indices = null;
         this.pointCount = 0;
+        this._leafBoundsCache = null;
     }
 
     /**
      * Build the octree from a Float32Array of positions [x0,y0,z0, x1,y1,z1, ...]
      */
-    build(positions, bounds) {
+    build(positions, bounds = null) {
         this.positions = positions;
         this.pointCount = positions.length / 3;
+        this._leafBoundsCache = null;
 
-        // Add small padding to bounds
-        const pad = 0.1;
-        this.root = new OctreeNode(
-            bounds.min[0] - pad, bounds.min[1] - pad, bounds.min[2] - pad,
-            bounds.max[0] + pad, bounds.max[1] + pad, bounds.max[2] + pad,
-            0
-        );
-
-        // Insert all points
-        const indices = [];
+        this.indices = new Uint32Array(this.pointCount);
         for (let i = 0; i < this.pointCount; i++) {
-            indices.push(i);
+            this.indices[i] = i;
         }
-        this._subdivide(this.root, indices);
+
+        if (this.pointCount === 0) {
+            const b = bounds || { min: [0, 0, 0], max: [0, 0, 0] };
+            this.root = new OctreeNode(b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2], 0);
+            return this;
+        }
+
+        this.root = this._buildRange(0, this.pointCount, 0);
 
         return this;
     }
 
-    _subdivide(node, indices) {
-        if (indices.length <= MAX_POINTS_PER_NODE || node.depth >= MAX_DEPTH) {
-            node.pointIndices = indices;
-            return;
+    _buildRange(first, count, depth) {
+        const bounds = this._computeBounds(first, first + count);
+        const node = new OctreeNode(bounds.minX, bounds.minY, bounds.minZ, bounds.maxX, bounds.maxY, bounds.maxZ, depth);
+
+        const spanX = bounds.maxX - bounds.minX;
+        const spanY = bounds.maxY - bounds.minY;
+        const spanZ = bounds.maxZ - bounds.minZ;
+        const maxSpan = Math.max(spanX, spanY, spanZ);
+
+        if (count <= MAX_POINTS_PER_NODE || depth >= MAX_DEPTH || maxSpan <= MIN_SPLIT_EXTENT) {
+            node.first = first;
+            node.count = count;
+            return node;
         }
 
-        node.children = new Array(8);
-        const mx = node.midX, my = node.midY, mz = node.midZ;
-        const childBounds = [
-            [node.minX, node.minY, node.minZ, mx, my, mz],
-            [mx, node.minY, node.minZ, node.maxX, my, mz],
-            [node.minX, my, node.minZ, mx, node.maxY, mz],
-            [mx, my, node.minZ, node.maxX, node.maxY, mz],
-            [node.minX, node.minY, mz, mx, my, node.maxZ],
-            [mx, node.minY, mz, node.maxX, my, node.maxZ],
-            [node.minX, my, mz, mx, node.maxY, node.maxZ],
-            [mx, my, mz, node.maxX, node.maxY, node.maxZ],
-        ];
+        const axis = spanX >= spanY && spanX >= spanZ ? 0 : (spanY >= spanZ ? 1 : 2);
+        const end = first + count;
+        const splitValue = axis === 0
+            ? (bounds.minX + bounds.maxX) * 0.5
+            : axis === 1
+                ? (bounds.minY + bounds.maxY) * 0.5
+                : (bounds.minZ + bounds.maxZ) * 0.5;
 
-        const childIndices = [[], [], [], [], [], [], [], []];
+        let mid = this._partitionByValue(first, end, axis, splitValue);
+        const leftCount = mid - first;
+        const rightCount = end - mid;
 
-        for (const idx of indices) {
-            const x = this.positions[idx * 3];
-            const y = this.positions[idx * 3 + 1];
-            const z = this.positions[idx * 3 + 2];
-            const ci = (x >= mx ? 1 : 0) | (y >= my ? 2 : 0) | (z >= mz ? 4 : 0);
-            childIndices[ci].push(idx);
+        // Large outliers make midpoint splits collapse into one huge leaf.
+        // Fall back to a median split whenever the midpoint split is empty
+        // or severely imbalanced; exact per-node bounds still make queries
+        // prune aggressively.
+        if (leftCount === 0 || rightCount === 0 || leftCount < count * 0.1 || rightCount < count * 0.1) {
+            mid = first + (count >> 1);
+            this._selectKth(first, end - 1, mid, axis);
         }
 
-        for (let i = 0; i < 8; i++) {
-            const b = childBounds[i];
-            node.children[i] = new OctreeNode(b[0], b[1], b[2], b[3], b[4], b[5], node.depth + 1);
-            if (childIndices[i].length > 0) {
-                this._subdivide(node.children[i], childIndices[i]);
+        node.left = this._buildRange(first, mid - first, depth + 1);
+        node.right = this._buildRange(mid, end - mid, depth + 1);
+        return node;
+    }
+
+    _computeBounds(first, end) {
+        let minX = Infinity, minY = Infinity, minZ = Infinity;
+        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+        const positions = this.positions;
+        const indices = this.indices;
+        for (let i = first; i < end; i++) {
+            const off = indices[i] * 3;
+            const x = positions[off];
+            const y = positions[off + 1];
+            const z = positions[off + 2];
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+            if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+        }
+        return { minX, minY, minZ, maxX, maxY, maxZ };
+    }
+
+    _valueAtIndexSlot(slot, axis) {
+        return this.positions[this.indices[slot] * 3 + axis];
+    }
+
+    _swapIndexSlots(a, b) {
+        const tmp = this.indices[a];
+        this.indices[a] = this.indices[b];
+        this.indices[b] = tmp;
+    }
+
+    _partitionByValue(first, end, axis, splitValue) {
+        let left = first;
+        let right = end - 1;
+        while (left <= right) {
+            while (left <= right && this._valueAtIndexSlot(left, axis) < splitValue) left++;
+            while (left <= right && this._valueAtIndexSlot(right, axis) >= splitValue) right--;
+            if (left < right) {
+                this._swapIndexSlots(left, right);
+                left++;
+                right--;
             }
+        }
+        return left;
+    }
+
+    _partitionAroundPivot(left, right, pivotIndex, axis) {
+        const pivotValue = this._valueAtIndexSlot(pivotIndex, axis);
+        this._swapIndexSlots(pivotIndex, right);
+        let store = left;
+        for (let i = left; i < right; i++) {
+            if (this._valueAtIndexSlot(i, axis) < pivotValue) {
+                this._swapIndexSlots(store, i);
+                store++;
+            }
+        }
+        this._swapIndexSlots(right, store);
+        return store;
+    }
+
+    _selectKth(left, right, kth, axis) {
+        while (left < right) {
+            const pivotIndex = (left + right) >> 1;
+            const pivotNew = this._partitionAroundPivot(left, right, pivotIndex, axis);
+            if (kth === pivotNew) return;
+            if (kth < pivotNew) right = pivotNew - 1;
+            else left = pivotNew + 1;
         }
     }
 
@@ -130,12 +201,39 @@ export class Octree {
     }
 
     _collectLeaves(node, list) {
-        if (node.children) {
-            for (const child of node.children) {
-                if (child) this._collectLeaves(child, list);
+        if (!node) return;
+        if (node.isLeaf) {
+            if (node.count > 0) {
+                list.push(node.minX, node.minY, node.minZ, node.maxX, node.maxY, node.maxZ);
             }
-        } else if (node.pointIndices.length > 0) {
-            list.push(node.minX, node.minY, node.minZ, node.maxX, node.maxY, node.maxZ);
+        } else {
+            this._collectLeaves(node.left, list);
+            this._collectLeaves(node.right, list);
+        }
+    }
+
+    _querySphereNode(node, cx, cy, cz, r, rSq, results) {
+        if (!node || !node.intersectsSphere(cx, cy, cz, r)) return;
+
+        if (node.isLeaf) {
+            const positions = this.positions;
+            const indices = this.indices;
+            const end = node.first + node.count;
+            for (let p = node.first; p < end; p++) {
+                const idx = indices[p];
+                const off = idx * 3;
+                const px = positions[off];
+                const py = positions[off + 1];
+                const pz = positions[off + 2];
+                const dx = px - cx, dy = py - cy, dz = pz - cz;
+                const distSq = dx * dx + dy * dy + dz * dz;
+                if (distSq <= rSq) {
+                    results.push({ index: idx, x: px, y: py, z: pz, distSq });
+                }
+            }
+        } else {
+            this._querySphereNode(node.left, cx, cy, cz, r, rSq, results);
+            this._querySphereNode(node.right, cx, cy, cz, r, rSq, results);
         }
     }
 
@@ -151,24 +249,79 @@ export class Octree {
         return results;
     }
 
-    _querySphereNode(node, cx, cy, cz, r, rSq, results) {
-        if (!node.intersectsSphere(cx, cy, cz, r)) return;
+    querySphereCount(cx, cy, cz, radius) {
+        const rSq = radius * radius;
+        return this.root ? this._querySphereCountNode(this.root, cx, cy, cz, radius, rSq) : 0;
+    }
 
-        if (node.children) {
-            for (const child of node.children) {
-                if (child) this._querySphereNode(child, cx, cy, cz, r, rSq, results);
-            }
-        } else {
-            for (const idx of node.pointIndices) {
-                const px = this.positions[idx * 3];
-                const py = this.positions[idx * 3 + 1];
-                const pz = this.positions[idx * 3 + 2];
-                const dx = px - cx, dy = py - cy, dz = pz - cz;
-                const distSq = dx * dx + dy * dy + dz * dz;
-                if (distSq <= rSq) {
-                    results.push({ index: idx, x: px, y: py, z: pz, distSq });
-                }
-            }
+    _querySphereCountNode(node, cx, cy, cz, r, rSq) {
+        if (!node || !node.intersectsSphere(cx, cy, cz, r)) return 0;
+        if (!node.isLeaf) {
+            return this._querySphereCountNode(node.left, cx, cy, cz, r, rSq) +
+                   this._querySphereCountNode(node.right, cx, cy, cz, r, rSq);
+        }
+
+        let count = 0;
+        const positions = this.positions;
+        const indices = this.indices;
+        const end = node.first + node.count;
+        for (let p = node.first; p < end; p++) {
+            const off = indices[p] * 3;
+            const dx = positions[off] - cx;
+            const dy = positions[off + 1] - cy;
+            const dz = positions[off + 2] - cz;
+            if (dx * dx + dy * dy + dz * dz <= rSq) count++;
+        }
+        return count;
+    }
+
+    queryCollisionResponse(cx, cy, cz, radius) {
+        if (!this.root) return null;
+        const state = { nx: 0, ny: 0, nz: 0, minDist: Infinity, count: 0 };
+        this._queryCollisionNode(this.root, cx, cy, cz, radius, radius * radius, state);
+        if (state.count === 0) return null;
+
+        const len = Math.sqrt(state.nx * state.nx + state.ny * state.ny + state.nz * state.nz);
+        if (len < 0.0001) {
+            return { normal: { x: 0, y: 1, z: 0 }, penetration: radius - state.minDist, pointCount: state.count };
+        }
+
+        const invLen = 1 / len;
+        return {
+            normal: { x: state.nx * invLen, y: state.ny * invLen, z: state.nz * invLen },
+            penetration: Math.max(0, radius - state.minDist),
+            pointCount: state.count,
+        };
+    }
+
+    _queryCollisionNode(node, cx, cy, cz, r, rSq, state) {
+        if (!node || !node.intersectsSphere(cx, cy, cz, r)) return;
+        if (!node.isLeaf) {
+            this._queryCollisionNode(node.left, cx, cy, cz, r, rSq, state);
+            this._queryCollisionNode(node.right, cx, cy, cz, r, rSq, state);
+            return;
+        }
+
+        const positions = this.positions;
+        const indices = this.indices;
+        const end = node.first + node.count;
+        for (let p = node.first; p < end; p++) {
+            const off = indices[p] * 3;
+            const dx = cx - positions[off];
+            const dy = cy - positions[off + 1];
+            const dz = cz - positions[off + 2];
+            const distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq > rSq) continue;
+
+            const dist = Math.sqrt(distSq);
+            state.count++;
+            if (dist < state.minDist) state.minDist = dist;
+            if (dist < 0.0001) continue;
+
+            const w = 1.0 / (dist + 0.001);
+            state.nx += dx * w;
+            state.ny += dy * w;
+            state.nz += dz * w;
         }
     }
 }

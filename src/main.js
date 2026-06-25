@@ -19,7 +19,7 @@
  * Main entry point — PlayCanvas app initialization, GSplat loading (.ply/.sog/.splat), game loop.
  */
 
-import { parsePlyForPositions, analyzePlyDistances, parsePlyOpacities, parsePlyRawCentroid, countFilteredPoints, sanitizePlyBuffer } from './ply-parser.js';
+import { parsePlyForPositions, parsePlySceneData, analyzePlyDistances, countFilteredPoints, sanitizePlyBuffer } from './ply-parser.js';
 import { parseSplatForPositions, parseSplatOpacities, parseSplatRawCentroid, splatToPlyBuffer } from './splat-parser.js';
 import { parseSogForPositions, parseSogOpacities, parseSogRawCentroid } from './sog-parser.js';
 import { Octree } from './collision.js';
@@ -245,6 +245,12 @@ function initPlayCanvas() {
     app = new pc.Application(canvas, {
         mouse: new pc.Mouse(canvas),
         keyboard: new pc.Keyboard(window),
+        graphicsDeviceOptions: {
+            alpha: false,
+            antialias: false,
+            powerPreference: 'high-performance',
+            preserveDrawingBuffer: false,
+        },
     });
 
     app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
@@ -558,7 +564,7 @@ function enterPlacementMode() {
     document.getElementById('placement-overlay').classList.add('visible');
     document.getElementById('hud').classList.add('hidden');
     document.getElementById('game-logo')?.classList.remove('visible');
-    updateKeyGuide();
+    applyDisplaySettings();
 
     // Auto-set spawn point at origin (or keep current if re-entering)
     if (drone && sceneLoaded && spawnPoint) {
@@ -589,6 +595,46 @@ function _updateSpawnCoordsUI() {
     }
 }
 
+function applyDisplaySettings() {
+    const cleanToggle = document.getElementById('clean-mode-toggle');
+    const cleanMode = cleanToggle ? cleanToggle.checked : false;
+    const displayMode = getDisplayMode();
+
+    if (osd) {
+        const osdToggle = document.getElementById('osd-toggle');
+        osd.setEnabled(osdToggle ? osdToggle.checked : true);
+    }
+
+    const logo = document.getElementById('game-logo');
+    const keyGuide = document.getElementById('key-guide');
+    if (cleanMode) {
+        logo?.classList.remove('visible');
+        keyGuide?.classList.remove('visible');
+    } else {
+        if (displayMode === 'flight') logo?.classList.add('visible');
+        else logo?.classList.remove('visible');
+        updateKeyGuide();
+    }
+}
+
+function getDisplayMode() {
+    const hudEl = document.getElementById('hud');
+    const placementEl = document.getElementById('placement-overlay');
+    if (hudEl && !hudEl.classList.contains('hidden') && !placementEl?.classList.contains('visible')) return 'flight';
+    if (placementEl?.classList.contains('visible')) return 'placement';
+    if (mode === 'flight' || mode === 'placement') return mode;
+    return mode;
+}
+
+function setupDisplaySettingsListeners() {
+    for (const id of ['clean-mode-toggle', 'osd-toggle']) {
+        const el = document.getElementById(id);
+        if (!el || el._mainDisplayBound) continue;
+        el._mainDisplayBound = true;
+        el.addEventListener('change', () => applyDisplaySettings());
+    }
+}
+
 function confirmSpawnAndFly() {
     if (!spawnPoint) return;
 
@@ -599,6 +645,7 @@ function confirmSpawnAndFly() {
     document.getElementById('placement-overlay').classList.remove('visible');
     hud.show();
     document.getElementById('game-logo')?.classList.add('visible');
+    applyDisplaySettings();
 
     // Hide spawn marker
     if (spawnMarkerEntity) spawnMarkerEntity.enabled = false;
@@ -800,6 +847,10 @@ async function loadSceneFile(file) {
             controller.refreshSettingsUI();
         }
 
+        const defaultCoord = coordSystem;
+        let initialParse = null;
+        let analysis = null;
+
         // ---- Format-specific: extract opacities & render buffer (coord-independent) ----
         let opacities = null;
         let rawCentroid = null;
@@ -807,10 +858,17 @@ async function loadSceneFile(file) {
         let renderFilename = file.name;
 
         if (ext === 'ply') {
-            loadingProgress.textContent = 'Parsing opacity values...';
+            loadingProgress.textContent = 'Parsing PLY scene data...';
             await sleep(10);
-            opacities = parsePlyOpacities(arrayBuffer);
-            rawCentroid = parsePlyRawCentroid(arrayBuffer);
+            const plyData = parsePlySceneData(arrayBuffer, { zUp: defaultCoord === 'zup' });
+            opacities = plyData.opacities;
+            rawCentroid = plyData.rawCentroid;
+            initialParse = {
+                positions: plyData.positions,
+                vertexCount: plyData.vertexCount,
+                bounds: plyData.bounds,
+            };
+            analysis = plyData.analysis;
 
         } else if (ext === 'splat') {
             loadingProgress.textContent = 'Parsing opacity values...';
@@ -829,8 +887,10 @@ async function loadSceneFile(file) {
         }
 
         // ---- Initial parse with default coord system (for first filter display) ----
-        const defaultCoord = coordSystem;
-        const initialParse = await parseForCoord(ext, arrayBuffer, defaultCoord);
+        if (!initialParse) {
+            initialParse = await parseForCoord(ext, arrayBuffer, defaultCoord);
+            analysis = analyzePlyDistances(initialParse.positions, initialParse.vertexCount);
+        }
 
         if (ext === 'sog') {
             rawCentroid = {
@@ -841,7 +901,6 @@ async function loadSceneFile(file) {
         }
 
         console.log(`Initial parse: ${initialParse.vertexCount} vertices (${ext}, ${defaultCoord}), bounds:`, initialParse.bounds);
-        let analysis = analyzePlyDistances(initialParse.positions, initialParse.vertexCount);
 
         // ---- Sanitize render buffer (replace NaN/Inf in all float properties) ----
         if (ext === 'ply' || ext === 'splat') {
@@ -878,8 +937,19 @@ async function loadSceneFile(file) {
         // Show filter UI — user picks coord system + filter sliders
         // Callback for live coord switching during filtering
         const onCoordChange = async (newCoord) => {
-            const parsed = await parseForCoord(ext, arrayBuffer, newCoord);
-            analysis = analyzePlyDistances(parsed.positions, parsed.vertexCount);
+            let parsed;
+            if (ext === 'ply') {
+                const plyData = parsePlySceneData(arrayBuffer, { zUp: newCoord === 'zup', includeOpacities: false });
+                parsed = {
+                    positions: plyData.positions,
+                    vertexCount: plyData.vertexCount,
+                    bounds: plyData.bounds,
+                };
+                analysis = plyData.analysis;
+            } else {
+                parsed = await parseForCoord(ext, arrayBuffer, newCoord);
+                analysis = analyzePlyDistances(parsed.positions, parsed.vertexCount);
+            }
             const rot = getEntityRotation(ext, newCoord);
             if (gsplatEntity) gsplatEntity.setEulerAngles(rot[0], rot[1], rot[2]);
             if (ext === 'sog') {
@@ -895,7 +965,7 @@ async function loadSceneFile(file) {
 
         const filterResult = await showFilterUI(
             gsplatEntity, initialParse.positions, opacities, initialParse.vertexCount,
-            analysis, rawCentroid, ext, defaultCoord, onCoordChange
+            analysis, initialParse.bounds, rawCentroid, ext, defaultCoord, onCoordChange
         );
 
         // ---- Apply final coord system choice ----
@@ -914,33 +984,22 @@ async function loadSceneFile(file) {
         const finalVertexCount = filterResult.finalVertexCount;
         const finalAnalysis = filterResult.finalAnalysis;
 
-        const maxDistSq = filterResult.maxDist * filterResult.maxDist;
-        const filteredPositions = [];
-        for (let i = 0; i < finalVertexCount; i++) {
-            if (opacities && opacities[i] < filterResult.minOpacity) continue;
-            const dx = finalPositions[i * 3] - finalAnalysis.centroid.x;
-            const dy = finalPositions[i * 3 + 1] - finalAnalysis.centroid.y;
-            const dz = finalPositions[i * 3 + 2] - finalAnalysis.centroid.z;
-            if (dx * dx + dy * dy + dz * dz <= maxDistSq) {
-                filteredPositions.push(finalPositions[i * 3]);
-                filteredPositions.push(finalPositions[i * 3 + 1]);
-                filteredPositions.push(finalPositions[i * 3 + 2]);
-            }
-        }
-        const keptCount = filteredPositions.length / 3;
-        const filteredPosArray = new Float32Array(filteredPositions);
+        const {
+            positions: filteredPosArray,
+            keptCount,
+            bounds: filteredBounds,
+        } = buildFilteredPositionBuffer(
+            finalPositions,
+            opacities,
+            finalVertexCount,
+            finalAnalysis,
+            filterResult.maxDist,
+            filterResult.minOpacity,
+            filterResult.finalBounds
+        );
         console.log(`Final filter: ${keptCount}/${finalVertexCount} kept (dist=${filterResult.maxDist}, opacity=${filterResult.minOpacity})`);
 
-        // Build collision octree
-        let fMinX = Infinity, fMinY = Infinity, fMinZ = Infinity;
-        let fMaxX = -Infinity, fMaxY = -Infinity, fMaxZ = -Infinity;
-        for (let i = 0; i < keptCount; i++) {
-            const x = filteredPosArray[i * 3], y = filteredPosArray[i * 3 + 1], z = filteredPosArray[i * 3 + 2];
-            if (x < fMinX) fMinX = x; if (x > fMaxX) fMaxX = x;
-            if (y < fMinY) fMinY = y; if (y > fMaxY) fMaxY = y;
-            if (z < fMinZ) fMinZ = z; if (z > fMaxZ) fMaxZ = z;
-        }
-        const filteredBounds = { min: [fMinX, fMinY, fMinZ], max: [fMaxX, fMaxY, fMaxZ] };
+        // Build collision spatial index
         octree = new Octree();
         octree.build(filteredPosArray, filteredBounds);
         cachedArrayBuffer = arrayBuffer;
@@ -976,6 +1035,81 @@ async function loadSceneFile(file) {
 /**
  * Parse positions for a given coordinate system. Works for all formats.
  */
+function buildFilteredPositionBuffer(positions, opacities, vertexCount, analysis, maxDist, minOpacity, fullBounds) {
+    const maxDistSq = maxDist * maxDist;
+    const cx = analysis.centroid.x;
+    const cy = analysis.centroid.y;
+    const cz = analysis.centroid.z;
+    const checkOpacity = !!opacities && minOpacity > 0;
+    const allDistanceKept = maxDist >= Math.ceil(analysis.maxDistance);
+
+    if (!checkOpacity && allDistanceKept) {
+        return {
+            positions,
+            keptCount: vertexCount,
+            bounds: fullBounds || computePositionBounds(positions, vertexCount),
+        };
+    }
+
+    let keptCount = 0;
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+    for (let i = 0, off = 0; i < vertexCount; i++, off += 3) {
+        if (checkOpacity && opacities[i] < minOpacity) continue;
+        const x = positions[off];
+        const y = positions[off + 1];
+        const z = positions[off + 2];
+        const dx = x - cx, dy = y - cy, dz = z - cz;
+        if (dx * dx + dy * dy + dz * dz > maxDistSq) continue;
+        keptCount++;
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+        if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    }
+
+    if (keptCount === 0) {
+        return {
+            positions: new Float32Array(0),
+            keptCount: 0,
+            bounds: { min: [0, 0, 0], max: [0, 0, 0] },
+        };
+    }
+
+    const filtered = new Float32Array(keptCount * 3);
+    let out = 0;
+    for (let i = 0, off = 0; i < vertexCount; i++, off += 3) {
+        if (checkOpacity && opacities[i] < minOpacity) continue;
+        const x = positions[off];
+        const y = positions[off + 1];
+        const z = positions[off + 2];
+        const dx = x - cx, dy = y - cy, dz = z - cz;
+        if (dx * dx + dy * dy + dz * dz > maxDistSq) continue;
+        filtered[out++] = x;
+        filtered[out++] = y;
+        filtered[out++] = z;
+    }
+
+    return {
+        positions: filtered,
+        keptCount,
+        bounds: { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] },
+    };
+}
+
+function computePositionBounds(positions, vertexCount) {
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let i = 0, off = 0; i < vertexCount; i++, off += 3) {
+        const x = positions[off], y = positions[off + 1], z = positions[off + 2];
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+        if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    }
+    if (vertexCount === 0) return { min: [0, 0, 0], max: [0, 0, 0] };
+    return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] };
+}
+
 async function parseForCoord(ext, arrayBuffer, coord) {
     const isZup = coord === 'zup';
     if (ext === 'sog') {
@@ -1063,14 +1197,14 @@ function setupGSplatFilter(entity, rawCentroid, maxDistance) {
         gsplat.setWorkBufferModifier({
             glsl: `
                 uniform vec3 filterCenter;
-                uniform float filterMaxDist;
+                uniform float filterMaxDistSq;
                 uniform float filterMinOpacity;
 
                 void modifySplatCenter(inout vec3 center) {}
 
                 void modifySplatRotationScale(vec3 originalCenter, vec3 modifiedCenter, inout vec4 rotation, inout vec3 scale) {
-                    float dist = distance(originalCenter, filterCenter);
-                    if (dist > filterMaxDist) {
+                    vec3 delta = originalCenter - filterCenter;
+                    if (dot(delta, delta) > filterMaxDistSq) {
                         scale = vec3(0.0);
                     }
                 }
@@ -1090,7 +1224,7 @@ function setupGSplatFilter(entity, rawCentroid, maxDistance) {
     const maxDist = Math.ceil(maxDistance);
     try {
         gsplat.setParameter('filterCenter', [rawCentroid.x, rawCentroid.y, rawCentroid.z]);
-        gsplat.setParameter('filterMaxDist', maxDist);
+        gsplat.setParameter('filterMaxDistSq', maxDist * maxDist);
         gsplat.setParameter('filterMinOpacity', 0.0);
     } catch (e) {
         console.warn('setParameter not available:', e);
@@ -1100,7 +1234,7 @@ function setupGSplatFilter(entity, rawCentroid, maxDistance) {
 function updateGSplatFilter(entity, maxDist, minOpacity) {
     if (!entity || !entity.gsplat) return;
     try {
-        entity.gsplat.setParameter('filterMaxDist', maxDist);
+        entity.gsplat.setParameter('filterMaxDistSq', maxDist * maxDist);
         entity.gsplat.setParameter('filterMinOpacity', minOpacity);
         // Trigger work buffer re-render
         if (pc.WORKBUFFER_UPDATE_ONCE !== undefined) {
@@ -1112,7 +1246,7 @@ function updateGSplatFilter(entity, maxDist, minOpacity) {
 }
 
 // ---- Scene filter UI ----
-function showFilterUI(gsplatEntity, positions, opacities, vertexCount, analysis, rawCentroid, ext, defaultCoord, onCoordChange) {
+function showFilterUI(gsplatEntity, positions, opacities, vertexCount, analysis, bounds, rawCentroid, ext, defaultCoord, onCoordChange) {
     return new Promise((resolve) => {
         const overlay = document.getElementById('filter-overlay');
         const filterGuide = document.getElementById('filter-guide');
@@ -1129,6 +1263,7 @@ function showFilterUI(gsplatEntity, positions, opacities, vertexCount, analysis,
         let curPositions = positions;
         let curVertexCount = vertexCount;
         let curAnalysis = analysis;
+        let curBounds = bounds;
         let curCoord = defaultCoord;
 
         // Configure coord selector (shown for all formats including SOG)
@@ -1149,8 +1284,25 @@ function showFilterUI(gsplatEntity, positions, opacities, vertexCount, analysis,
         opacitySlider.value = 0;
         opacityInput.value = '0.00';
 
+        let statsRaf = 0;
+        const runStatsUpdate = () => {
+            statsRaf = 0;
+            const dist = parseFloat(distSlider.value);
+            const minOp = parseFloat(opacitySlider.value);
+            const count = countFilteredPoints(
+                curPositions, opacities, curVertexCount,
+                curAnalysis.centroid.x, curAnalysis.centroid.y, curAnalysis.centroid.z,
+                dist, minOp
+            );
+            statsEl.textContent = `${count.toLocaleString()} / ${curVertexCount.toLocaleString()} points kept`;
+        };
+        const scheduleStatsUpdate = () => {
+            if (statsRaf) return;
+            statsRaf = requestAnimationFrame(runStatsUpdate);
+        };
+
         // Update stats + GPU filter
-        const updateFilter = () => {
+        const updateFilter = (immediateStats = false) => {
             const dist = parseFloat(distSlider.value);
             const minOp = parseFloat(opacitySlider.value);
             distInput.value = dist;
@@ -1159,13 +1311,13 @@ function showFilterUI(gsplatEntity, positions, opacities, vertexCount, analysis,
             // Update GPU shader uniforms (instant visual update)
             updateGSplatFilter(gsplatEntity, dist, minOp);
 
-            // Update CPU-side point count
-            const count = countFilteredPoints(
-                curPositions, opacities, curVertexCount,
-                curAnalysis.centroid.x, curAnalysis.centroid.y, curAnalysis.centroid.z,
-                dist, minOp
-            );
-            statsEl.textContent = `${count.toLocaleString()} / ${curVertexCount.toLocaleString()} points kept`;
+            if (immediateStats === true) {
+                if (statsRaf) cancelAnimationFrame(statsRaf);
+                statsRaf = 0;
+                runStatsUpdate();
+            } else {
+                scheduleStatsUpdate();
+            }
         };
 
         // Sync number inputs → sliders
@@ -1189,6 +1341,7 @@ function showFilterUI(gsplatEntity, positions, opacities, vertexCount, analysis,
             curPositions = result.positions;
             curVertexCount = result.vertexCount;
             curAnalysis = result.analysis;
+            curBounds = result.bounds;
 
             // Update distance slider range
             maxExtent = Math.ceil(curAnalysis.maxDistance);
@@ -1199,12 +1352,12 @@ function showFilterUI(gsplatEntity, positions, opacities, vertexCount, analysis,
                 distInput.value = maxExtent;
             }
 
-            updateFilter();
+            updateFilter(true);
             console.log(`Coord switched to ${newCoord} — ${curVertexCount} vertices`);
         };
 
         // Initial update
-        updateFilter();
+        updateFilter(true);
         updateGSplatFilter(gsplatEntity, defaultDist, 0);
 
         distSlider.addEventListener('input', updateFilter);
@@ -1220,6 +1373,10 @@ function showFilterUI(gsplatEntity, positions, opacities, vertexCount, analysis,
             opacityInput.removeEventListener('input', onOpacityInput);
             coordSelect.removeEventListener('change', onCoordSelect);
             applyBtn.removeEventListener('click', onApply);
+            if (statsRaf) {
+                cancelAnimationFrame(statsRaf);
+                statsRaf = 0;
+            }
             overlay.classList.remove('visible');
             if (filterGuide) filterGuide.style.display = 'none';
             resolve({
@@ -1229,6 +1386,7 @@ function showFilterUI(gsplatEntity, positions, opacities, vertexCount, analysis,
                 finalPositions: curPositions,
                 finalVertexCount: curVertexCount,
                 finalAnalysis: curAnalysis,
+                finalBounds: curBounds,
             });
         };
         applyBtn.addEventListener('click', onApply);
@@ -1416,32 +1574,13 @@ function gameLoop(dt) {
     // disabled or empty.
     gateCourse?.update(dt, drone);
 
-    // Clean mode: hide key guide and logo only (OSD is independent)
-    const cleanToggle = document.getElementById('clean-mode-toggle');
-    const cleanMode = cleanToggle ? cleanToggle.checked : false;
-
     // HUD - always visible in flight mode (not affected by Clean Mode)
     const hudEl = document.getElementById('hud');
     hudEl?.classList.remove('hidden');
     hud.update(drone, controller, gateCourse);
 
-    // FPV OSD - independent of Clean Mode, only controlled by its own toggle
-    if (osd) {
-        const osdToggle = document.getElementById('osd-toggle');
-        osd.setEnabled(osdToggle ? osdToggle.checked : true);
-        osd.update(drone, controller);
-    }
-
-    // Key guide and Logo - controlled by Clean Mode
-    const logo = document.getElementById('game-logo');
-    const keyGuide = document.getElementById('key-guide');
-    if (cleanMode) {
-        logo?.classList.remove('visible');
-        keyGuide?.classList.remove('visible');
-    } else {
-        if (mode === 'flight') logo?.classList.add('visible');
-        updateKeyGuide();
-    }
+    applyDisplaySettings();
+    if (osd) osd.update(drone, controller);
 }
 
 // ---- Key Guide ----
@@ -1449,7 +1588,8 @@ function updateKeyGuide() {
     const el = document.getElementById('key-guide');
     if (!el) return;
 
-    if (mode === 'placement') {
+    const displayMode = getDisplayMode();
+    if (displayMode === 'placement') {
         el.innerHTML =
             '<div class="guide-title">PLACEMENT MODE</div>' +
             '<kbd>W</kbd><kbd>S</kbd>  Forward / Back\n' +
@@ -1460,7 +1600,7 @@ function updateKeyGuide() {
             '<kbd>Enter</kbd> Confirm &amp; Fly\n' +
             '<kbd>Esc</kbd>   Cancel';
         el.classList.add('visible');
-    } else if (mode === 'flight') {
+    } else if (displayMode === 'flight') {
         el.innerHTML =
             '<div class="guide-title">FLIGHT CONTROLS</div>' +
             '<kbd>↑</kbd><kbd>↓</kbd>  Pitch (Fwd/Back)\n' +
@@ -1500,6 +1640,7 @@ try {
 } catch(e) {
     console.warn('OSD init deferred:', e);
 }
+setupDisplaySettingsListeners();
 
 // Audio subsystems (engine sound + BGM). Initialised at startup so the
 // initializ.flac BGM can start playing as soon as the user makes their first

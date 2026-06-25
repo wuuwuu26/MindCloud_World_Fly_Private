@@ -653,12 +653,13 @@ export class Drone {
         this.collisionIntensity = 0;
 
         if (octree) {
-            const results = octree.querySphere(this.x, this.y, this.z, this.collisionRadius);
-            const collision = computeCollisionResponse(
-                { x: this.x, y: this.y, z: this.z },
-                this.collisionRadius,
-                results
-            );
+            const collision = typeof octree.queryCollisionResponse === 'function'
+                ? octree.queryCollisionResponse(this.x, this.y, this.z, this.collisionRadius)
+                : computeCollisionResponse(
+                    { x: this.x, y: this.y, z: this.z },
+                    this.collisionRadius,
+                    octree.querySphere(this.x, this.y, this.z, this.collisionRadius)
+                );
 
             if (collision && collision.penetration > 0) {
                 this.isColliding = true;
