@@ -120,11 +120,14 @@ export class HUD {
         // Controller status
         if (this.controllerEl) {
             if (controller.connected) {
-                this.controllerEl.textContent = 'RC Connected';
+                const name = controller.gamepadName || 'Gamepad';
+                this.controllerEl.textContent = name.includes('(HID)') ? 'HID Connected' : 'Gamepad';
                 this.controllerEl.style.color = '#4272F5';
+                this.controllerEl.title = name;
             } else {
                 this.controllerEl.textContent = 'Keyboard';
                 this.controllerEl.style.color = '#0f0';
+                this.controllerEl.title = 'Keyboard';
             }
         }
 

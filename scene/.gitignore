@@ -1,4 +1,0 @@
-# Scene files are too large for Git — place your .ply / .sog files here
-# locally after cloning. See README.md for download instructions.
-*
-!.gitignore

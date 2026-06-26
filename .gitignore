@@ -1,11 +1,3 @@
-scene/*
-!scene/.gitignore
-# Audio preprocessing — only the final fpv_loop.wav is committed. The raw
-# source clip, the prep script, and any tooling artefacts stay local.
-asset/music/fpv.wav
-# Source archives for BGM tracks — the decoded audio files are tracked but
-# the zips / originals are not (too large). Match zips at any depth under
-# asset/music/ since tracks now live in subfolders (init/, flight/, …).
-asset/music/**/*.zip
-asset/music/*.zip
+__pycache__/
+*.pyc
 tools/

@@ -19,9 +19,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MindCloud World Fly</title>
-    <script src="https://cdn.jsdelivr.net/npm/playcanvas@2.17.2/build/playcanvas.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+	    <title>MindCloud World Fly</title>
+	    <link id="cesium-widgets-css" href="/ThirdParty/Cesium/Widgets/widgets.css" rel="stylesheet"
+	          onerror="this.onerror=null;this.href='https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Widgets/widgets.css';">
+	    <script>
+	        window.CESIUM_BASE_URL = '/ThirdParty/Cesium/';
+	    </script>
+	    <script src="/ThirdParty/Cesium/Cesium.js"
+	            onerror="this.onerror=null;window.CESIUM_BASE_URL='https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/';this.src=window.CESIUM_BASE_URL+'Cesium.js';"></script>
+	    <script src="https://cdn.jsdelivr.net/npm/playcanvas@2.17.2/build/playcanvas.min.js"></script>
     <!--
       Race-panel type testbed. The CSS variables defined in `:root`
       (`--race-font-family`, `--race-font-weight`, `--race-font-style`)
@@ -85,7 +91,11 @@
         * { margin: 0; padding: 0; box-sizing: border-box; }
         html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
 
-        #app-canvas { width: 100%; height: 100%; display: block; }
+	        #cesium-container {
+	            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+	            z-index: 0; background: #000;
+	        }
+	        #app-canvas { width: 100%; height: 100%; display: none; }
 
         /* Logo (flight mode — bottom center) */
         #game-logo {
@@ -113,7 +123,12 @@
             color: #4272F5; border-radius: 8px; cursor: pointer; transition: all 0.2s;
         }
         #file-picker-btn:hover { background: #4272F5; color: #000; }
-        #file-input { display: none; }
+        .primary-action {
+            padding: 12px 24px; font-size: 1em; border: 2px solid #4272F5; background: transparent;
+            color: #4272F5; border-radius: 8px; cursor: pointer; transition: all 0.2s;
+            min-width: 190px;
+        }
+        .primary-action:hover { background: #4272F5; color: #000; }
 
         /* Key Guide */
         #key-guide {
@@ -366,41 +381,6 @@
         #armed-indicator.armed { background: rgba(0,200,0,0.3); color: #0f0; border: 1px solid #0f0; }
         #armed-indicator.disarmed { background: rgba(200,0,0,0.3); color: #f44; border: 1px solid #f44; }
 
-        /* Scene filter overlay */
-        #filter-overlay {
-            position: absolute; bottom: 0; left: 0; width: 100%;
-            display: none; justify-content: center; z-index: 160; color: #fff;
-            pointer-events: none;
-        }
-        #filter-overlay > * { pointer-events: auto; }
-        #filter-overlay.visible { display: flex; }
-        #filter-panel {
-            background: rgba(20,20,30,0.85); border: 1px solid #4272F5; border-radius: 10px 10px 0 0;
-            padding: 12px 24px; width: 80vw;
-            display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
-        }
-        #filter-panel h2 { color: #4272F5; font-size: 1em; margin: 0; white-space: nowrap; }
-        #filter-panel p { display: none; }
-        #filter-dist-slider, #filter-opacity-slider { flex: 1; min-width: 100px; accent-color: #4272F5; margin: 0; }
-        .filter-num-input {
-            width: 60px; background: #112; color: #fff; border: 1px solid #446;
-            border-radius: 4px; padding: 2px 6px; font-size: 12px; text-align: center;
-            font-family: 'Courier New', monospace;
-        }
-        #filter-stats { color: #8cf; font-size: 12px; font-family: 'Courier New', monospace; margin: 0; }
-        #filter-apply-btn {
-            padding: 6px 18px; font-size: 0.9em; border: 1px solid #4272F5; background: transparent;
-            color: #4272F5; border-radius: 6px; cursor: pointer; transition: all 0.2s; margin: 0;
-        }
-        #filter-apply-btn:hover { background: #4272F5; color: #000; }
-        #filter-guide {
-            position: absolute; bottom: 60px; left: 50%; transform: translateX(-50%);
-            background: rgba(0,0,0,0.5); border-radius: 6px; padding: 6px 16px;
-            font-family: 'Courier New', monospace; font-size: 12px; color: #ccc;
-            white-space: nowrap; pointer-events: none; z-index: 161;
-            display: none;
-        }
-
         /* Loading overlay */
         #loading-overlay {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
@@ -445,55 +425,82 @@
             color: #4272F5; font-family: 'Courier New', monospace; font-size: 13px;
             display: none;
         }
+        #spawn-altitude-panel {
+            position: absolute; right: 20px; bottom: 82px; width: min(340px, calc(100vw - 40px));
+            background: rgba(0,0,0,0.72); color: #d9e6ff; padding: 12px 14px;
+            border: 1px solid rgba(66,114,245,0.55); border-radius: 8px;
+            font-family: 'Courier New', monospace; font-size: 12px;
+            pointer-events: auto; display: none;
+        }
+        #placement-overlay.visible #spawn-altitude-panel { display: block; }
+        .spawn-altitude-title {
+            color: #4272F5; font-weight: bold; margin-bottom: 8px;
+        }
+        .spawn-altitude-row {
+            display: grid; grid-template-columns: 1fr 86px; gap: 10px; align-items: center;
+        }
+        #spawn-altitude-range { width: 100%; }
+        #spawn-altitude-input {
+            width: 86px; box-sizing: border-box; background: #111827; color: #fff;
+            border: 1px solid #4b6bff; border-radius: 4px; padding: 5px 6px;
+            font-family: 'Courier New', monospace; font-size: 12px;
+        }
+        #spawn-altitude-hint {
+            margin-top: 8px; color: #9fb5ff; line-height: 1.35;
+        }
+
+        #view-choice-overlay {
+            position: absolute; inset: 0; z-index: 170; display: none;
+            align-items: center; justify-content: center;
+            background: rgba(0,0,0,0.64); color: #ddd;
+            pointer-events: auto;
+        }
+        #view-choice-overlay.visible { display: flex; }
+        #view-choice-panel {
+            width: min(420px, calc(100vw - 32px));
+            background: rgba(16,18,28,0.96);
+            border: 1px solid #4272F5;
+            border-radius: 10px;
+            padding: 22px;
+            box-shadow: 0 10px 32px rgba(0,0,0,0.5);
+            text-align: center;
+        }
+        #view-choice-panel h2 {
+            color: #4272F5; font-size: 18px; margin-bottom: 16px;
+        }
+        #view-choice-buttons {
+            display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;
+        }
+        #view-choice-hint {
+            margin-top: 14px; font-family: 'Courier New', monospace; font-size: 12px; color: #8aa;
+        }
     </style>
 </head>
 <body>
-    <canvas id="app-canvas"></canvas>
+	    <div id="cesium-container"></div>
+	    <canvas id="app-canvas"></canvas>
 
     <!-- Logo -->
     <img id="game-logo" src="asset/display/logo.png" alt="MindCloud World Fly">
 
-    <!-- Drop zone for PLY file -->
-    <div id="drop-zone">
-        <img src="asset/display/logo.png" alt="MindCloud World Fly" style="height:15vh;margin-bottom:16px;background:transparent;">
-        <p>Drop a .ply, .sog or .splat Gaussian Splat file here, or click to browse</p>
-        <button id="file-picker-btn">Choose File</button>
-        <input type="file" id="file-input" accept=".ply,.sog,.splat">
-        <p style="margin-top: 2em; font-size: 0.85em; color: #666;">
-            Controls: WASD + Arrow Keys | RC Transmitter via USB | Tab for settings
-        </p>
-    </div>
-
-    <!-- Scene filter guide (above panel) -->
-    <div id="filter-guide"><b>Left-drag</b> orbit &nbsp;|&nbsp; <b>Scroll</b> zoom &nbsp;|&nbsp; Adjust sliders below, then click <b>Apply</b></div>
-    <!-- Scene filter overlay -->
-    <div id="filter-overlay">
-        <div id="filter-panel">
-            <h2>Filter</h2>
-            <label style="font-size:12px;color:#aaa;">Dist</label>
-            <input type="range" id="filter-dist-slider" min="1" max="1000" value="500" step="1">
-            <input type="number" id="filter-dist-input" class="filter-num-input" value="500" min="1" max="1000" step="1">
-            <label style="font-size:12px;color:#aaa;margin-left:8px;">Opacity</label>
-            <input type="range" id="filter-opacity-slider" min="0" max="1" value="0" step="0.01">
-            <input type="number" id="filter-opacity-input" class="filter-num-input" value="0" min="0" max="1" step="0.01">
-            <div id="filter-stats">Calculating...</div>
-            <label id="filter-coord-label" style="font-size:12px;color:#aaa;margin-left:8px;">Up Axis</label>
-            <select id="filter-coord-select" style="background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 6px;font-size:12px;">
-                <option value="zup" selected>Z-Up</option>
-                <option value="yup">Y-Up</option>
-            </select>
-            <button id="filter-apply-btn">Apply</button>
-        </div>
-    </div>
+	    <!-- Start overlay -->
+	    <div id="drop-zone">
+	        <img src="asset/display/logo.png" alt="MindCloud World Fly" style="height:15vh;margin-bottom:16px;background:transparent;">
+	        <p>Fly inside Google Photorealistic 3D Tiles with the existing FPV controller stack</p>
+	        <button id="file-picker-btn">Start Google 3D Tiles Flight</button>
+	        <p style="margin-top: 2em; font-size: 0.85em; color: #666;">
+	            Placement: search a city, click a 2D location, set altitude, press Enter. Flight: keyboard, gamepad, or RC transmitter.
+	        </p>
+	    </div>
 
     <!-- Loading overlay -->
     <div id="loading-overlay">
         <div style="display:flex;flex-direction:column;align-items:center;">
-            <img src="asset/display/logo.png" alt="MindCloud World Fly" style="height:15vh;margin-bottom:20px;background:transparent;">
-            <div style="text-align:center; margin-bottom: 12px;">Loading 3DGS scene...</div>
-            <div id="loading-progress" style="color: #4272F5;"></div>
-        </div>
-    </div>
+	            <img src="asset/display/logo.png" alt="MindCloud World Fly" style="height:15vh;margin-bottom:20px;background:transparent;">
+	            <div style="text-align:center; margin-bottom: 12px;">Loading Google 3D Tiles world...</div>
+	            <div id="loading-progress" style="color: #4272F5;"></div>
+	        </div>
+	    </div>
 
     <!-- Key guide overlay -->
     <div id="key-guide"></div>
@@ -502,12 +509,31 @@
     <div id="collision-flash"></div>
 
     <!-- Placement mode overlay -->
-    <div id="placement-overlay">
-        <div id="placement-mode-label">PLACEMENT MODE</div>
-        <div id="spawn-coords"></div>
-        <div id="placement-instructions">
-            <kbd>WASD</kbd> move drone &nbsp;|&nbsp; <kbd>Q/E</kbd> height &nbsp;|&nbsp; <b>Left-drag</b> orbit &nbsp;|&nbsp; <b>Scroll</b> zoom<br>
-            <kbd>Enter</kbd> confirm &amp; fly &nbsp;|&nbsp; <kbd>Esc</kbd> cancel
+	    <div id="placement-overlay">
+	        <div id="placement-mode-label">PLACEMENT MODE</div>
+	        <div id="spawn-coords"></div>
+            <div id="spawn-altitude-panel">
+                <div class="spawn-altitude-title">SPAWN ALTITUDE (m)</div>
+                <div class="spawn-altitude-row">
+                    <input type="range" id="spawn-altitude-range" min="0" max="1000" step="1" value="100" aria-label="Spawn altitude in metres">
+                    <input type="number" id="spawn-altitude-input" min="0" max="20000" step="1" value="100" aria-label="Spawn altitude in metres">
+                </div>
+                <div id="spawn-altitude-hint">Scroll up or drag right = higher (+up). Scroll down or left = lower. Altitude cannot be negative.</div>
+            </div>
+	        <div id="placement-instructions">
+	            Search top-right, then <b>left-click</b> tiles to set 2D lon/lat &nbsp;|&nbsp; <kbd>WASD</kbd> nudge horizontally<br>
+	            <kbd>Enter</kbd> confirm &amp; fly &nbsp;|&nbsp; <kbd>Shift</kbd> faster nudge
+	        </div>
+	    </div>
+
+    <div id="view-choice-overlay">
+        <div id="view-choice-panel">
+            <h2>Select Flight View</h2>
+            <div id="view-choice-buttons">
+                <button class="primary-action" data-view-choice="first">First Person</button>
+                <button class="primary-action" data-view-choice="third">Third Person</button>
+            </div>
+            <div id="view-choice-hint">1 / Enter: First Person &nbsp;|&nbsp; 2: Third Person</div>
         </div>
     </div>
 
@@ -574,11 +600,8 @@
             </div>
         </div>
 
-        <h3>Audio</h3>
-        <div id="audio-settings"></div>
-
         <h3>Race Course</h3>
-        <div id="race-course-settings"></div>
+        <div style="font-size:12px;color:#777;margin:-4px 0 8px;">Gate rendering is disabled in Google Tiles mode for this migration step.</div>
 
         <h3>RC Channel Assignment</h3>
         <div id="channel-assignments"></div>
@@ -615,6 +638,23 @@
                     <option value="drone" selected>Drone (Easy)</option>
                     <option value="fpv">FPV (Manual)</option>
                 </select>
+            </div>
+        </div>
+        <div style="font-size:12px;color:#8aa;margin:-2px 0 8px;line-height:1.4;">
+            Drone (Easy): W/S climbs or descends; ↑/↓ moves forward/back. FPV (Manual): W/S is motor thrust, so forward flight needs pitch.
+        </div>
+        <div class="setting-row">
+            <label>Easy Max Speed (m/s)</label>
+            <div class="controls">
+                <input type="range" id="drone-max-speed" min="1" max="25" value="9" step="0.5">
+                <input type="number" id="drone-max-speed-num" min="1" max="25" step="0.5" value="9" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Easy W/S Vertical (m/s)</label>
+            <div class="controls">
+                <input type="range" id="drone-max-vspeed" min="1" max="15" value="6" step="0.5">
+                <input type="number" id="drone-max-vspeed-num" min="1" max="15" step="0.5" value="6" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
             </div>
         </div>
         <div class="setting-row">
@@ -711,6 +751,9 @@
                 <input type="range" id="phys-thrust" min="100" max="5000" value="1000" step="10">
                 <input type="number" id="phys-thrust-num" min="100" max="5000" step="10" value="1000" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
             </div>
+        </div>
+        <div style="font-size:12px;color:#8aa;margin:-2px 0 8px;line-height:1.4;">
+            Max Thrust mainly affects FPV motor authority. In Drone (Easy), use Easy Max Speed and Easy W/S Vertical for stronger stick response.
         </div>
         <div class="setting-row">
             <label>Drag Cd</label>

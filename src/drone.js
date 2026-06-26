@@ -33,8 +33,6 @@
  * Drone: sticks → velocity command → position setpoint,  cascaded PI position/velocity/tilt hold
  */
 
-import { computeCollisionResponse } from './collision.js';
-
 const DEG2RAD = Math.PI / 180;
 const RAD2DEG = 180 / Math.PI;
 const G = 9.81;              // gravitational acceleration (m/s²)
@@ -86,8 +84,8 @@ export class Drone {
 
         this.droneMaxAngle   = 30;
         this.droneAngleRate  = 150;
-        this.droneMaxVSpeed  = 3.0;
-        this.droneMaxSpeed   = 5.0;
+        this.droneMaxVSpeed  = 6.0;
+        this.droneMaxSpeed   = 9.0;
 
         // Cascaded PID gains
         this.dronePosKp  = 2.0;
@@ -180,6 +178,8 @@ export class Drone {
         const areaVal   = v('phys-drag-area');
         const radiusVal = v('phys-collision-radius');
         const sizeVal   = v('phys-drone-size');
+        const droneMaxSpeedVal  = v('drone-max-speed');
+        const droneMaxVSpeedVal = v('drone-max-vspeed');
         const modeEl    = el('flight-mode-select');
         const posKp = v('ctrl-pos-kp');
         const posKi = v('ctrl-pos-ki');
@@ -193,6 +193,8 @@ export class Drone {
         if (areaVal !== null)   this.dragArea = areaVal;
         if (radiusVal !== null) this.collisionRadius = radiusVal;
         if (sizeVal !== null)   this.droneSize = sizeVal;
+        if (droneMaxSpeedVal !== null)  this.droneMaxSpeed = droneMaxSpeedVal;
+        if (droneMaxVSpeedVal !== null) this.droneMaxVSpeed = droneMaxVSpeedVal;
         if (modeEl) this.flightMode = modeEl.value;
         const mountAngle = v('cam-mount-angle');
         if (mountAngle !== null) this.cameraMountAngle = mountAngle;
@@ -210,7 +212,7 @@ export class Drone {
         if (altKd !== null) this.droneAltKd = altKd;
     }
 
-    update(dt, input, octree) {
+    update(dt, input, collisionProvider) {
         dt = Math.min(dt, 0.05);
 
         // 0. Handle flight-mode transitions (M key, RC channel, or dropdown).
@@ -258,6 +260,8 @@ export class Drone {
             az -= (this.vz / spd) * dragAccel;
         }
 
+        const previousPosition = { x: this.x, y: this.y, z: this.z };
+
         // 4. Integrate velocity & position
         this.vx += ax * dt;
         this.vy += ay * dt;
@@ -275,7 +279,7 @@ export class Drone {
         }
 
         // 5. Collisions
-        this._handleCollisions(octree);
+        this._handleCollisions(collisionProvider, previousPosition, dt);
 
         // 6. Derive euler angles for HUD
         this._updateEulerFromQuat();
@@ -306,7 +310,21 @@ export class Drone {
                 y: this.y + _v3.y * halfSize,
                 z: this.z + _v3.z * halfSize
             },
-            rotation: { x: euler.x, y: euler.y, z: euler.z }
+            rotation: { x: euler.x, y: euler.y, z: euler.z },
+            orientation: { x: _quat2.x, y: _quat2.y, z: _quat2.z, w: _quat2.w }
+        };
+    }
+
+    getBodyTransform() {
+        return {
+            position: { x: this.x, y: this.y, z: this.z },
+            rotation: { x: this.pitch, y: this.yaw, z: this.roll },
+            orientation: {
+                x: this.orientation.x,
+                y: this.orientation.y,
+                z: this.orientation.z,
+                w: this.orientation.w
+            }
         };
     }
 
@@ -648,24 +666,27 @@ export class Drone {
 
     // ---- Collision ----
 
-    _handleCollisions(octree) {
+    _handleCollisions(collisionProvider, previousPosition = null, dt = 0.016) {
         this.isColliding = false;
         this.collisionIntensity = 0;
 
-        if (octree) {
-            const collision = typeof octree.queryCollisionResponse === 'function'
-                ? octree.queryCollisionResponse(this.x, this.y, this.z, this.collisionRadius)
-                : computeCollisionResponse(
-                    { x: this.x, y: this.y, z: this.z },
-                    this.collisionRadius,
-                    octree.querySphere(this.x, this.y, this.z, this.collisionRadius)
-                );
+        if (collisionProvider && typeof collisionProvider.queryCollisionResponse === 'function') {
+            let anyCollision = false;
+            let strongest = 0;
 
-            if (collision && collision.penetration > 0) {
-                this.isColliding = true;
-                this.collisionIntensity = Math.min(1, collision.penetration / this.collisionRadius);
+            for (let i = 0; i < 3; i++) {
+                const collision = collisionProvider.queryCollisionResponse(this.x, this.y, this.z, this.collisionRadius, {
+                    previous: i === 0 ? previousPosition : null,
+                    velocity: { x: this.vx, y: this.vy, z: this.vz },
+                    dt,
+                });
 
-                const pushDist = collision.penetration + 0.01;
+                if (!collision || collision.penetration <= 0) break;
+
+                anyCollision = true;
+                strongest = Math.max(strongest, collision.penetration);
+
+                const pushDist = collision.penetration + 0.04;
                 this.x += collision.normal.x * pushDist;
                 this.y += collision.normal.y * pushDist;
                 this.z += collision.normal.z * pushDist;
@@ -674,14 +695,32 @@ export class Drone {
                               this.vy * collision.normal.y +
                               this.vz * collision.normal.z;
                 if (vDotN < 0) {
-                    this.vx -= collision.normal.x * vDotN * (1 + this.bounceDamping);
-                    this.vy -= collision.normal.y * vDotN * (1 + this.bounceDamping);
-                    this.vz -= collision.normal.z * vDotN * (1 + this.bounceDamping);
+                    const bounce = collision.source === 'swept' || collision.source === 'ray'
+                        ? Math.max(this.bounceDamping, 0.55)
+                        : this.bounceDamping;
+                    this.vx -= collision.normal.x * vDotN * (1 + bounce);
+                    this.vy -= collision.normal.y * vDotN * (1 + bounce);
+                    this.vz -= collision.normal.z * vDotN * (1 + bounce);
                 }
 
-                this.vx *= 0.8;
-                this.vy *= 0.8;
-                this.vz *= 0.8;
+                const separationSpeed = Math.min(8, collision.penetration * 24);
+                this.vx += collision.normal.x * separationSpeed;
+                this.vy += collision.normal.y * separationSpeed;
+                this.vz += collision.normal.z * separationSpeed;
+
+                this.vx *= 0.65;
+                this.vy *= 0.65;
+                this.vz *= 0.65;
+            }
+
+            if (anyCollision) {
+                this.isColliding = true;
+                this.collisionIntensity = Math.min(1, strongest / Math.max(this.collisionRadius, 0.05));
+                if (this.flightMode === 'drone') {
+                    this._targetX = this.x;
+                    this._targetY = this.y;
+                    this._targetZ = this.z;
+                }
             }
         }
 

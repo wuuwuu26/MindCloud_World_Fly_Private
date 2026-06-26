@@ -19,8 +19,8 @@
  * Per-scene gate-path persistence.
  *
  * Thin client for the `/api/path/<safeName>.json` routes defined in
- * `serve.py`. Callers pass a `File` object (the scene file the user
- * dropped) plus — on save — a JSON-safe record, and we take care of the
+ * `scripts/server.js` and `scripts/serve.py`. Callers pass a `File` object
+ * plus — on save — a JSON-safe record, and we take care of the
  * filename sanitisation + size-suffix keying so identically-named scenes
  * with different sizes don't clobber each other.
  *
@@ -29,8 +29,7 @@
  *
  *   {
  *     schemaVersion: 1,
- *     filename:      "castle.ply",
- *     fileSize:      314572800,
+ *     sceneId:       "google-tiles-hong-kong",
  *     coordSystem:   "zup" | "yup",
  *     path: {
  *       closed:    true,
@@ -60,14 +59,13 @@ const SCHEMA_VERSION = 1;
  * the server-side regex.
  *
  * @param {{ name: string, size: number } | null} file
- * @returns {string | null}  safe filename like `castle_ply_314572800.json`, or null
+ * @returns {string | null}  safe filename like `google_tiles_hong_kong_0.json`, or null
  *   if the file argument is missing.
  */
 export function keyFor(file) {
     if (!file || !file.name) return null;
-    // Collapse every filesystem-hostile char to underscore. This also
-    // erases the dot in the original extension (.ply → _ply) which is
-    // intentional: the storage file's `.json` suffix comes from us.
+    // Collapse every filesystem-hostile char to underscore. The storage
+    // file's `.json` suffix comes from us.
     const safe = String(file.name).replace(/[^A-Za-z0-9._-]+/g, '_')
                                   .replace(/\.+/g, '_')
                                   .replace(/^_+|_+$/g, '');

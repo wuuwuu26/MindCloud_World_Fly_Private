@@ -68,55 +68,13 @@ const DEFAULT_OPTS = {
 };
 
 // Gate colors — emissive-only (no lighting contribution), chosen for
-// max contrast against bright 3DGS backgrounds.
+// high contrast against bright city/tile backgrounds.
 //   next       → the gate you must fly next (yellow, pulses)
 //   upcoming   → any other gate within the horizon window (cyan)
 // Gate 0 (start) carries a checker-flag texture instead of a solid
 // colour — see `getCheckerTexture` below.
 const COL_NEXT     = { r: 1.00, g: 0.84, b: 0.00 }; // yellow
 const COL_UPCOMING = { r: 0.00, g: 0.75, b: 1.00 }; // cyan
-
-// ---- Gate-pass SFX (procedural, no external file needed) ----
-// Short rising-pitch "ding" played on each clean gate pass.
-// Uses a shared AudioContext (created lazily on first call) so we
-// don't fight the browser autoplay policy — by the time a gate is
-// passed the user has already interacted.
-let _sfxCtx = null;
-function playGatePassSfx() {
-    if (!_sfxCtx) {
-        const Ctx = window.AudioContext || window.webkitAudioContext;
-        if (!Ctx) return;
-        _sfxCtx = new Ctx();
-    }
-    if (_sfxCtx.state === 'suspended') {
-        _sfxCtx.resume();
-    }
-    const now = _sfxCtx.currentTime;
-
-    // Two stacked oscillators for a richer "checkpoint ding":
-    // 1) A quick sine ping at 880 Hz rising to 1320 Hz over 80ms
-    // 2) A softer triangle harmonic at 1760 Hz, fading faster
-    const osc1 = _sfxCtx.createOscillator();
-    const gain1 = _sfxCtx.createGain();
-    osc1.type = 'sine';
-    osc1.frequency.setValueAtTime(1320, now);
-    osc1.frequency.linearRampToValueAtTime(1320, now + 0.08);
-    gain1.gain.setValueAtTime(0.18, now);
-    gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
-    osc1.connect(gain1).connect(_sfxCtx.destination);
-    osc1.start(now);
-    osc1.stop(now + 0.25);
-
-    const osc2 = _sfxCtx.createOscillator();
-    const gain2 = _sfxCtx.createGain();
-    osc2.type = 'triangle';
-    osc2.frequency.setValueAtTime(1760, now);
-    gain2.gain.setValueAtTime(0.08, now);
-    gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
-    osc2.connect(gain2).connect(_sfxCtx.destination);
-    osc2.start(now);
-    osc2.stop(now + 0.15);
-}
 
 // How many gates ahead of `nextGateIdx` remain visible (inclusive of
 // the next gate itself). Gates behind the drone naturally fall outside
@@ -125,9 +83,8 @@ function playGatePassSfx() {
 // gates of the next lap as the current lap winds down.
 const HORIZON = 5;
 
-// Emissive strength used by every gate material. 3.5 was chosen
-// empirically against bright 3DGS scenes where anything below ~3 gets
-// washed out by the cloud.
+// Emissive strength used by every gate material. Anything below ~3 gets hard
+// to read on bright textured scenes.
 const EMISSIVE_INTENSITY = 1.5;
 
 // ------------------------------------------------------------------
@@ -221,7 +178,7 @@ const PULSE_HZ  = 0.8;
 //   inner → the rim facing the ring's opening (AO-darkened by the lip)
 //
 // Because materials are unlit (`useLighting=false`, needed to punch
-// through bright 3DGS backgrounds) these multipliers are the only 3D
+// through bright textured backgrounds) these multipliers are the only 3D
 // cue we can bake in. End caps on the horizontal bars inherit the
 // outer brightness since they visually blend with the outer corners.
 const FACE_BRIGHTNESS = {
@@ -427,7 +384,7 @@ export class GateCourse {
         e.setPosition(gate.pos.x, gate.pos.y, gate.pos.z);
 
         // Build an orthonormal basis with local +Z = travelDir. Runtime is
-        // always Y-up (see ply-parser.js — all source coords transformed
+        // always Y-up in the flight-local coordinate frame
         // to Y-up at parse time), so worldUp is world +Y.
         const fwd = new pc.Vec3(gate.travelDir.x, gate.travelDir.y, gate.travelDir.z);
         const worldUp = new pc.Vec3(0, 1, 0);
@@ -903,7 +860,6 @@ export class GateCourse {
         // old `nextGateIdx - 0` slot — full refresh is cheapest.
         this._updateAllAppearances();
 
-        playGatePassSfx();
         console.log(`[Race] passed gate ${i + 1} / ${N}`);
         if (typeof this.onGatePassed === 'function') {
             try { this.onGatePassed(i, N); }
