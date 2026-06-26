@@ -76,6 +76,9 @@ export class HUD {
         // FPS tracking
         this._frameTimes = [];
         this._lastTime = performance.now();
+        this._lastDomUpdate = 0;
+        this._lastFpsDisplay = 0;
+        this._lastDisplayedFps = 0;
         this._collisionFlashTimer = 0;
 
         // Race HUD flash: briefly tint green + enlarge on each gate-pass.
@@ -110,6 +113,18 @@ export class HUD {
         if (this._frameTimes.length > 60) this._frameTimes.shift();
         const avgDt = this._frameTimes.reduce((a, b) => a + b, 0) / this._frameTimes.length;
         const fps = Math.round(1000 / avgDt);
+        const forceDomUpdate = drone.isColliding || this._collisionFlashTimer > 0;
+        const shouldUpdateDom = forceDomUpdate || now - this._lastDomUpdate >= 100;
+        const shouldUpdateFps = now - this._lastFpsDisplay >= 250 ||
+            Math.abs(fps - this._lastDisplayedFps) >= 5;
+
+        if (this.fpsEl && shouldUpdateFps) {
+            this.fpsEl.textContent = fps;
+            this._lastDisplayedFps = fps;
+            this._lastFpsDisplay = now;
+        }
+        if (!shouldUpdateDom) return;
+        this._lastDomUpdate = now;
 
         // Update values
         if (this.altitudeEl) this.altitudeEl.textContent = drone.y.toFixed(1);
@@ -153,8 +168,6 @@ export class HUD {
             }
             this.speedHintEl.textContent = hint;
         }
-        if (this.fpsEl) this.fpsEl.textContent = fps;
-
         // Controller status
         if (this.controllerEl) {
             if (controller.connected) {

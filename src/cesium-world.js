@@ -36,6 +36,8 @@ const DEFAULT_VIEW = {
     height: 1800,
 };
 const CESIUM_DRONE_MODEL_URI = 'asset/models/CesiumDrone.glb';
+const HEIGHT_CACHE_TTL_MS = 140;
+const HEIGHT_CACHE_LIMIT = 256;
 
 function urlNumber(name, fallback) {
     try {
@@ -146,6 +148,36 @@ export class CesiumWorld {
             latitude: urlNumber('lat', options.latitude ?? DEFAULT_VIEW.latitude),
             height: urlNumber('height', options.height ?? DEFAULT_VIEW.height),
         };
+        this.flightResolutionScale = clampNumber(
+            urlNumber('resolutionScale', options.resolutionScale ?? 0.72),
+            0.45,
+            1,
+            0.72
+        );
+        this.placementResolutionScale = clampNumber(
+            urlNumber('placementResolutionScale', options.placementResolutionScale ?? 0.88),
+            0.5,
+            1,
+            0.88
+        );
+        this.flightTileSSE = clampNumber(
+            urlNumber('flightTileSse', options.flightTileSSE ?? 24),
+            8,
+            64,
+            24
+        );
+        this.placementTileSSE = clampNumber(
+            urlNumber('placementTileSse', options.placementTileSSE ?? 16),
+            8,
+            64,
+            16
+        );
+        this.tileCacheMb = Math.round(clampNumber(
+            urlNumber('tileCacheMb', options.tileCacheMb ?? 2048),
+            512,
+            8192,
+            2048
+        ));
 
         this.Cesium = null;
         this.viewer = null;
@@ -163,6 +195,8 @@ export class CesiumWorld {
         this._tileLoadPending = null;
         this._tileLoadProcessing = null;
         this._lastPickWarning = 0;
+        this._heightSampleCache = new Map();
+        this._flightPerformanceMode = false;
     }
 
     async init(progressCb = null) {
@@ -194,11 +228,23 @@ export class CesiumWorld {
             globe: false,
             skyAtmosphere: new Cesium.SkyAtmosphere(),
             requestRenderMode: false,
+            targetFrameRate: 60,
+            useBrowserRecommendedResolution: true,
+            orderIndependentTranslucency: false,
+            contextOptions: {
+                webgl: {
+                    alpha: false,
+                    antialias: false,
+                    powerPreference: 'high-performance',
+                    failIfMajorPerformanceCaveat: false,
+                },
+            },
         });
 
         this.viewer.scene.fog.enabled = false;
-        this.viewer.scene.highDynamicRange = true;
+        this.viewer.scene.highDynamicRange = false;
         this.viewer.scene.screenSpaceCameraController.enableCollisionDetection = false;
+        this._configureScenePerformance(false);
 
         const origin = Cesium.Cartographic.fromDegrees(
             this.initialView.longitude,
@@ -209,7 +255,7 @@ export class CesiumWorld {
 
         if (progressCb) progressCb('Loading Google Photorealistic 3D Tiles...');
         this.tileset = await this._createGoogleTileset(progressCb);
-        this._configureTilesetStreaming();
+        this._configureTilesetStreaming(false);
         this.viewer.scene.primitives.add(this.tileset);
         this._wireTilesetDiagnostics(progressCb);
 
@@ -295,7 +341,24 @@ export class CesiumWorld {
         }
     }
 
-    _configureTilesetStreaming() {
+    _configureScenePerformance(flightMode = this._flightPerformanceMode) {
+        if (!this.viewer || !this.viewer.scene) return;
+        const scene = this.viewer.scene;
+        const resolutionScale = flightMode ? this.flightResolutionScale : this.placementResolutionScale;
+
+        if ('resolutionScale' in this.viewer) {
+            this.viewer.resolutionScale = resolutionScale;
+        }
+        if ('msaaSamples' in scene) {
+            scene.msaaSamples = 1;
+        }
+        if (scene.postProcessStages && scene.postProcessStages.fxaa) {
+            scene.postProcessStages.fxaa.enabled = false;
+        }
+        scene.highDynamicRange = false;
+    }
+
+    _configureTilesetStreaming(flightMode = this._flightPerformanceMode) {
         const tileset = this.tileset;
         if (!tileset) return;
 
@@ -303,26 +366,48 @@ export class CesiumWorld {
             if (key in tileset) tileset[key] = value;
         };
 
-        setIfPresent('maximumScreenSpaceError', 6);
-        setIfPresent('cullRequestsWhileMoving', false);
-        setIfPresent('preloadWhenHidden', true);
-        setIfPresent('preloadFlightDestinations', true);
-        setIfPresent('foveatedScreenSpaceError', false);
-        setIfPresent('dynamicScreenSpaceError', false);
-        setIfPresent('loadSiblings', true);
-        setIfPresent('skipLevelOfDetail', false);
-        setIfPresent('immediatelyLoadDesiredLevelOfDetail', true);
-        setIfPresent('preferLeaves', true);
+        setIfPresent('maximumScreenSpaceError', flightMode ? this.flightTileSSE : this.placementTileSSE);
+        setIfPresent('cullRequestsWhileMoving', true);
+        setIfPresent('cullRequestsWhileMovingMultiplier', flightMode ? 90 : 60);
+        setIfPresent('preloadWhenHidden', false);
+        setIfPresent('preloadFlightDestinations', false);
+        setIfPresent('foveatedScreenSpaceError', true);
+        setIfPresent('foveatedConeSize', flightMode ? 0.2 : 0.28);
+        setIfPresent('foveatedMinimumScreenSpaceErrorRelaxation', flightMode ? 4 : 2);
+        setIfPresent('foveatedTimeDelay', flightMode ? 0.08 : 0.15);
+        setIfPresent('dynamicScreenSpaceError', true);
+        setIfPresent('dynamicScreenSpaceErrorDensity', flightMode ? 0.0035 : 0.0025);
+        setIfPresent('dynamicScreenSpaceErrorFactor', flightMode ? 12 : 8);
+        setIfPresent('loadSiblings', false);
+        setIfPresent('skipLevelOfDetail', true);
+        setIfPresent('baseScreenSpaceError', flightMode ? 1536 : 1024);
+        setIfPresent('skipScreenSpaceErrorFactor', flightMode ? 18 : 12);
+        setIfPresent('skipLevels', flightMode ? 2 : 1);
+        setIfPresent('immediatelyLoadDesiredLevelOfDetail', false);
+        setIfPresent('preferLeaves', false);
 
         if ('maximumMemoryUsage' in tileset) {
-            tileset.maximumMemoryUsage = Math.max(tileset.maximumMemoryUsage || 0, 3072);
+            tileset.maximumMemoryUsage = Math.max(tileset.maximumMemoryUsage || 0, this.tileCacheMb);
         }
         if ('cacheBytes' in tileset) {
-            tileset.cacheBytes = Math.max(tileset.cacheBytes || 0, 3072 * 1024 * 1024);
+            tileset.cacheBytes = Math.max(tileset.cacheBytes || 0, this.tileCacheMb * 1024 * 1024);
         }
         if ('maximumCacheOverflowBytes' in tileset) {
-            tileset.maximumCacheOverflowBytes = Math.max(tileset.maximumCacheOverflowBytes || 0, 1536 * 1024 * 1024);
+            const overflowMb = Math.min(768, Math.max(256, Math.round(this.tileCacheMb * 0.35)));
+            tileset.maximumCacheOverflowBytes = Math.max(
+                tileset.maximumCacheOverflowBytes || 0,
+                overflowMb * 1024 * 1024
+            );
         }
+    }
+
+    setFlightPerformanceMode(enabled) {
+        const flightMode = !!enabled;
+        if (this._flightPerformanceMode === flightMode) return;
+        this._flightPerformanceMode = flightMode;
+        this._configureScenePerformance(flightMode);
+        this._configureTilesetStreaming(flightMode);
+        this.viewer?.scene?.requestRender();
     }
 
     getTileLoadStatus() {
@@ -593,6 +678,7 @@ export class CesiumWorld {
         this.viewer = null;
         this.tileset = null;
         this.ready = false;
+        this._heightSampleCache.clear();
     }
 
     setOrigin(cartographic) {
@@ -807,6 +893,13 @@ export class CesiumWorld {
         const Cesium = this.Cesium;
         const scene = this.viewer.scene;
         if (typeof scene.sampleHeight !== 'function') return null;
+        const now = performance.now();
+        const grid = Math.max(0.75, width * 1.5);
+        const key = `${Math.round(x / grid)}:${Math.round(z / grid)}:${Math.round(width * 10)}`;
+        const cached = this._heightSampleCache.get(key);
+        if (cached && now - cached.time <= HEIGHT_CACHE_TTL_MS) {
+            return cached.value;
+        }
 
         const carto = this.localToCartographic({ x, y: 0, z });
         let sampledHeight;
@@ -819,14 +912,26 @@ export class CesiumWorld {
                 return null;
             }
         }
-        if (!Number.isFinite(sampledHeight)) return null;
+        if (!Number.isFinite(sampledHeight)) {
+            this._rememberHeightSample(key, null, now);
+            return null;
+        }
 
         const surfaceCartesian = Cesium.Cartesian3.fromRadians(
             carto.longitude,
             carto.latitude,
             sampledHeight
         );
-        return this.cartesianToLocal(surfaceCartesian).y;
+        const localY = this.cartesianToLocal(surfaceCartesian).y;
+        this._rememberHeightSample(key, localY, now);
+        return localY;
+    }
+
+    _rememberHeightSample(key, value, time) {
+        this._heightSampleCache.set(key, { value, time });
+        if (this._heightSampleCache.size <= HEIGHT_CACHE_LIMIT) return;
+        const firstKey = this._heightSampleCache.keys().next().value;
+        if (firstKey !== undefined) this._heightSampleCache.delete(firstKey);
     }
 
     pickLocalRay(originLocal, directionLocal, maxDistance) {

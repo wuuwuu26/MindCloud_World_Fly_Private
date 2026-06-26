@@ -69,6 +69,14 @@ const SPAWN_ALTITUDE_SLIDER_DEFAULT_MAX = 1000;
 const SPAWN_PRELOAD_RADIUS_METERS = 200;
 const MAX_PHYSICS_FRAME_DT = 0.25;
 const PHYSICS_SUBSTEP_DT = 0.05;
+const MAX_PHYSICS_SUBSTEPS = 3;
+const SETTINGS_READ_INTERVAL_MS = 100;
+
+let lastSettingsReadTime = 0;
+let lastKeyGuideState = '';
+let lastDisplaySettingsState = '';
+let lastHFovReadTime = 0;
+let cachedHFov = 120;
 
 function normalizeViewMode(value, fallback = 'first') {
     return value === 'third' || value === '3rd' ? 'third' : fallback;
@@ -201,6 +209,7 @@ async function enterPlacementMode(autoPick = false) {
     if (!world) return;
     mode = 'placement';
 
+    world.setFlightPerformanceMode(false);
     world.setNativeCameraControls(true);
     world.showAircraft(false);
     thirdPersonPointer.active = false;
@@ -305,6 +314,9 @@ function startFlight(viewMode = 'first') {
     cameraMode = normalizeViewMode(viewMode, 'first');
 
     mode = 'flight';
+    drone.readSettings();
+    lastSettingsReadTime = performance.now();
+    world.setFlightPerformanceMode(true);
     document.getElementById('view-choice-overlay')?.classList.remove('visible');
     document.getElementById('game-logo')?.classList.add('visible');
     hud?.show();
@@ -368,10 +380,13 @@ function moveSpawn(dt) {
     updateSpawnUI();
 }
 
-function getCameraHFov() {
+function getCameraHFov(now = performance.now()) {
+    if (now - lastHFovReadTime < 250) return cachedHFov;
+    lastHFovReadTime = now;
     const el = document.getElementById('cam-hfov');
     const v = el ? parseFloat(el.value) : 120;
-    return Number.isFinite(v) ? v : 120;
+    cachedHFov = Number.isFinite(v) ? v : 120;
+    return cachedHFov;
 }
 
 function gameLoop(now) {
@@ -396,8 +411,16 @@ function gameLoop(now) {
 function updateFlight(dt) {
     if (!drone || !controller || !world) return;
 
-    drone.readSettings();
+    const now = performance.now();
     const input = controller.update();
+    const modeSelect = document.getElementById('flight-mode-select');
+    if (
+        now - lastSettingsReadTime >= SETTINGS_READ_INTERVAL_MS ||
+        (modeSelect && modeSelect.value !== drone.flightMode)
+    ) {
+        drone.readSettings();
+        lastSettingsReadTime = now;
+    }
     if (input.resetTriggered) {
         drone.reset();
         controller.armed = true;
@@ -412,9 +435,9 @@ function updateFlight(dt) {
         }
     }
 
-    let remainingDt = Math.max(0, dt);
+    let remainingDt = Math.max(0, Math.min(dt, PHYSICS_SUBSTEP_DT * MAX_PHYSICS_SUBSTEPS));
     let substeps = 0;
-    while (remainingDt > 1e-6 && substeps < 8) {
+    while (remainingDt > 1e-6 && substeps < MAX_PHYSICS_SUBSTEPS) {
         const stepDt = Math.min(PHYSICS_SUBSTEP_DT, remainingDt);
         drone.update(stepDt, input, collisionProvider);
         remainingDt -= stepDt;
@@ -430,10 +453,9 @@ function updateFlight(dt) {
         world.setThirdPersonCamera(bodyTransform, thirdPersonCamera);
     } else {
         world.showAircraft(false);
-        world.setCameraFromDroneTransform(cameraTransform, getCameraHFov());
+        world.setCameraFromDroneTransform(cameraTransform, getCameraHFov(now));
     }
 
-    hud?.show();
     hud?.update(drone, controller, null);
     applyDisplaySettings();
     osd?.update(drone, controller);
@@ -444,8 +466,13 @@ function applyDisplaySettings() {
     const cleanToggle = document.getElementById('clean-mode-toggle');
     const cleanMode = cleanToggle ? cleanToggle.checked : false;
     const osdToggle = document.getElementById('osd-toggle');
+    const osdEnabled = !cleanMode && (osdToggle ? osdToggle.checked : true) && mode === 'flight' && cameraMode === 'first';
+    const state = `${mode}|${cameraMode}|${cleanMode ? 1 : 0}|${osdEnabled ? 1 : 0}`;
+    if (state === lastDisplaySettingsState) return;
+    lastDisplaySettingsState = state;
+
     if (osd) {
-        osd.setEnabled(!cleanMode && (osdToggle ? osdToggle.checked : true) && mode === 'flight' && cameraMode === 'first');
+        osd.setEnabled(osdEnabled);
     }
 
     const logo = document.getElementById('game-logo');
@@ -506,6 +533,11 @@ function setupSpawnAltitudeControls() {
 function updateKeyGuide() {
     const el = document.getElementById('key-guide');
     if (!el) return;
+    const cleanMode = document.getElementById('clean-mode-toggle')?.checked ? 1 : 0;
+    const guideState = `${mode}|${cameraMode}|${drone ? drone.flightMode : ''}|${cleanMode}`;
+    if (guideState === lastKeyGuideState) return;
+    lastKeyGuideState = guideState;
+
     if (mode !== 'flight') {
         el.classList.remove('visible');
         return;
@@ -541,8 +573,9 @@ function updateKeyGuide() {
             '<kbd>Middle</kbd> Pan / height',
         );
     }
-    el.innerHTML = `<div class="guide-title">${title}</div>\n${rows.join('\n')}`;
-    if (!document.getElementById('clean-mode-toggle')?.checked) {
+    const html = `<div class="guide-title">${title}</div>\n${rows.join('\n')}`;
+    if (el.innerHTML !== html) el.innerHTML = html;
+    if (!cleanMode) {
         el.classList.add('visible');
     }
 }

@@ -52,7 +52,13 @@ export class TilesCollisionProvider {
         this.heightProbeWidth = Number.isFinite(options.heightProbeWidth) ? options.heightProbeWidth : 0.35;
         this.minPenetration = Number.isFinite(options.minPenetration) ? options.minPenetration : 0.015;
         this.minRayDistance = Number.isFinite(options.minRayDistance) ? options.minRayDistance : 0.04;
+        this.queryIntervalMs = Number.isFinite(options.queryIntervalMs) ? options.queryIntervalMs : 58;
+        this.maxNeighborhoodRays = Math.max(3, Math.round(
+            Number.isFinite(options.maxNeighborhoodRays) ? options.maxNeighborhoodRays : 6
+        ));
         this.lastDebug = null;
+        this._lastNoHit = null;
+        this._rayCursor = 0;
 
         this._rayDirs = [
             { x: 1, y: 0, z: 0 },
@@ -69,19 +75,31 @@ export class TilesCollisionProvider {
     queryCollisionResponse(x, y, z, radius, state = {}) {
         if (!this.enabled || !this.world || !this.world.ready) return null;
 
+        const now = performance.now();
         const hits = [];
         const r = Math.max(0.05, radius || 0.3);
         const center = { x, y, z };
+        const velocity = state && state.velocity ? state.velocity : null;
+        const speed = velocity
+            ? Math.hypot(velocity.x || 0, velocity.y || 0, velocity.z || 0)
+            : 0;
 
-        this._queryHeight(center, r, hits);
-        this._querySweptMotion(center, r, state, hits);
-        this._queryNeighborhood(center, r, hits);
-
-        if (!hits.length) {
-            this.lastDebug = { colliding: false };
+        if (this._canReuseNoHit(center, r, speed, now)) {
+            this.lastDebug = { colliding: false, skipped: true };
             return null;
         }
 
+        this._queryHeight(center, r, hits);
+        this._querySweptMotion(center, r, state, hits);
+        this._queryNeighborhood(center, r, hits, state);
+
+        if (!hits.length) {
+            this.lastDebug = { colliding: false };
+            this._lastNoHit = { x, y, z, radius: r, speed, time: now };
+            return null;
+        }
+
+        this._lastNoHit = null;
         hits.sort((a, b) => b.penetration - a.penetration);
         const hit = hits[0];
         this.lastDebug = {
@@ -139,13 +157,14 @@ export class TilesCollisionProvider {
         });
     }
 
-    _queryNeighborhood(center, radius, hits) {
+    _queryNeighborhood(center, radius, hits, state = {}) {
         const maxDistance = radius + this.rayExtra;
-        const verticalOffsets = [0, radius * 0.45, -radius * 0.45];
+        const verticalOffsets = [0];
+        const dirs = this._selectRayDirs(state);
 
         for (const dy of verticalOffsets) {
             const origin = { x: center.x, y: center.y + dy, z: center.z };
-            for (const dir of this._rayDirs) {
+            for (const dir of dirs) {
                 const hit = this.world.pickLocalRay(origin, dir, maxDistance);
                 if (!this._validRayHit(origin, hit, maxDistance)) continue;
 
@@ -166,6 +185,43 @@ export class TilesCollisionProvider {
                 });
             }
         }
+    }
+
+    _canReuseNoHit(center, radius, speed, now) {
+        const last = this._lastNoHit;
+        if (!last) return false;
+
+        const elapsed = now - last.time;
+        const interval = speed > 28
+            ? Math.min(this.queryIntervalMs, 34)
+            : speed > 10
+                ? this.queryIntervalMs
+                : Math.max(this.queryIntervalMs, 84);
+        if (elapsed > interval) return false;
+
+        const moved = Math.hypot(center.x - last.x, center.y - last.y, center.z - last.z);
+        const allowedMove = Math.max(radius * 1.35, Math.min(1.2, 0.28 + speed * 0.012));
+        return moved <= allowedMove && Math.abs(radius - last.radius) < 0.02;
+    }
+
+    _selectRayDirs(state = {}) {
+        const dirs = [];
+        const velocity = state && state.velocity ? state.velocity : null;
+        const speedH = velocity ? Math.hypot(velocity.x || 0, velocity.z || 0) : 0;
+
+        if (speedH > 0.15) {
+            const fwd = normalize({ x: velocity.x, y: 0, z: velocity.z }, { x: 0, y: 0, z: -1 });
+            dirs.push(fwd);
+            dirs.push(normalize({ x: fwd.x * 0.866 - fwd.z * 0.5, y: 0, z: fwd.x * 0.5 + fwd.z * 0.866 }, fwd));
+            dirs.push(normalize({ x: fwd.x * 0.866 + fwd.z * 0.5, y: 0, z: -fwd.x * 0.5 + fwd.z * 0.866 }, fwd));
+        }
+
+        while (dirs.length < this.maxNeighborhoodRays) {
+            dirs.push(this._rayDirs[this._rayCursor % this._rayDirs.length]);
+            this._rayCursor++;
+        }
+
+        return dirs.slice(0, this.maxNeighborhoodRays);
     }
 
     _validRayHit(origin, hit, maxDistance) {
