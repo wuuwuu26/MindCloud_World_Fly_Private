@@ -35,6 +35,7 @@ const DEFAULT_VIEW = {
     latitude: 22.3246282,
     height: 1800,
 };
+const CESIUM_DRONE_MODEL_URI = 'asset/models/CesiumDrone.glb';
 
 function urlNumber(name, fallback) {
     try {
@@ -87,6 +88,54 @@ function normalize3(v) {
     return { x: v.x / len, y: v.y / len, z: v.z / len };
 }
 
+function negate3(v) {
+    return { x: -v.x, y: -v.y, z: -v.z };
+}
+
+function getTransformBasisLocal(transform) {
+    if (!transform || !transform.orientation) {
+        const right = { x: 1, y: 0, z: 0 };
+        const up = { x: 0, y: 1, z: 0 };
+        const back = { x: 0, y: 0, z: 1 };
+        return {
+            right,
+            left: negate3(right),
+            up,
+            down: negate3(up),
+            back,
+            forward: negate3(back),
+        };
+    }
+
+    const q = transform.orientation;
+    const right = normalize3(rotateVectorByQuat(q, { x: 1, y: 0, z: 0 }));
+    const up = normalize3(rotateVectorByQuat(q, { x: 0, y: 1, z: 0 }));
+    const back = normalize3(rotateVectorByQuat(q, { x: 0, y: 0, z: 1 }));
+    return {
+        right,
+        left: negate3(right),
+        up,
+        down: negate3(up),
+        back,
+        forward: negate3(back),
+    };
+}
+
+function clampNumber(value, min, max, fallback) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, n));
+}
+
+function rotateXZ(v, radians) {
+    const c = Math.cos(radians);
+    const s = Math.sin(radians);
+    return {
+        x: v.x * c - v.z * s,
+        z: v.x * s + v.z * c,
+    };
+}
+
 export class CesiumWorld {
     constructor(containerId, options = {}) {
         this.containerId = containerId;
@@ -108,16 +157,11 @@ export class CesiumWorld {
         this.fixedToEnu = null;
         this.spawnMarker = null;
         this.aircraftEntities = [];
-        this._aircraftLines = {
-            body: [],
-            armA: [],
-            armB: [],
-            rotorFL: [],
-            rotorFR: [],
-            rotorRL: [],
-            rotorRR: [],
-            heading: [],
-        };
+        this.aircraftModelEntity = null;
+        this._aircraftModelPosition = null;
+        this._aircraftModelOrientation = null;
+        this._tileLoadPending = null;
+        this._tileLoadProcessing = null;
         this._lastPickWarning = 0;
     }
 
@@ -125,6 +169,13 @@ export class CesiumWorld {
         const Cesium = requireCesium();
         this.Cesium = Cesium;
         Cesium.Ion.defaultAccessToken = this.token;
+
+        if (Cesium.RequestScheduler && 'maximumRequestsPerServer' in Cesium.RequestScheduler) {
+            Cesium.RequestScheduler.maximumRequestsPerServer = Math.max(
+                Cesium.RequestScheduler.maximumRequestsPerServer || 0,
+                18
+            );
+        }
 
         if (progressCb) progressCb('Creating Cesium viewer...');
         this.viewer = new Cesium.Viewer(this.containerId, {
@@ -236,6 +287,12 @@ export class CesiumWorld {
         if (this.tileset.errorEvent && typeof this.tileset.errorEvent.addEventListener === 'function') {
             this.tileset.errorEvent.addEventListener(onFailure);
         }
+        if (this.tileset.loadProgress && typeof this.tileset.loadProgress.addEventListener === 'function') {
+            this.tileset.loadProgress.addEventListener((pending, processing) => {
+                this._tileLoadPending = Math.max(0, Number(pending) || 0);
+                this._tileLoadProcessing = Math.max(0, Number(processing) || 0);
+            });
+        }
     }
 
     _configureTilesetStreaming() {
@@ -246,52 +303,66 @@ export class CesiumWorld {
             if (key in tileset) tileset[key] = value;
         };
 
-        setIfPresent('maximumScreenSpaceError', 12);
+        setIfPresent('maximumScreenSpaceError', 6);
         setIfPresent('cullRequestsWhileMoving', false);
         setIfPresent('preloadWhenHidden', true);
         setIfPresent('preloadFlightDestinations', true);
         setIfPresent('foveatedScreenSpaceError', false);
+        setIfPresent('dynamicScreenSpaceError', false);
         setIfPresent('loadSiblings', true);
         setIfPresent('skipLevelOfDetail', false);
+        setIfPresent('immediatelyLoadDesiredLevelOfDetail', true);
+        setIfPresent('preferLeaves', true);
 
         if ('maximumMemoryUsage' in tileset) {
-            tileset.maximumMemoryUsage = Math.max(tileset.maximumMemoryUsage || 0, 1024);
+            tileset.maximumMemoryUsage = Math.max(tileset.maximumMemoryUsage || 0, 3072);
         }
         if ('cacheBytes' in tileset) {
-            tileset.cacheBytes = Math.max(tileset.cacheBytes || 0, 768 * 1024 * 1024);
+            tileset.cacheBytes = Math.max(tileset.cacheBytes || 0, 3072 * 1024 * 1024);
         }
         if ('maximumCacheOverflowBytes' in tileset) {
-            tileset.maximumCacheOverflowBytes = Math.max(tileset.maximumCacheOverflowBytes || 0, 384 * 1024 * 1024);
+            tileset.maximumCacheOverflowBytes = Math.max(tileset.maximumCacheOverflowBytes || 0, 1536 * 1024 * 1024);
         }
     }
 
+    getTileLoadStatus() {
+        return {
+            pending: this._tileLoadPending,
+            processing: this._tileLoadProcessing,
+            tilesLoaded: !!(this.tileset && this.tileset.tilesLoaded === true),
+        };
+    }
+
     waitForTilesIdle(timeoutMs = 1600, quietMs = 180) {
-        if (!this.tileset) return Promise.resolve();
+        if (!this.tileset) return Promise.resolve(true);
 
         return new Promise((resolve) => {
             const started = performance.now();
             let idleSince = null;
             let done = false;
 
-            const finish = () => {
+            const finish = (idle) => {
                 if (done) return;
                 done = true;
-                resolve();
+                resolve(!!idle);
             };
 
             const tick = () => {
                 if (done) return;
                 const now = performance.now();
-                const loaded = this.tileset.tilesLoaded === true;
+                const queueKnown = this._tileLoadPending !== null || this._tileLoadProcessing !== null;
+                const queueIdle = !queueKnown ||
+                    ((this._tileLoadPending || 0) <= 0 && (this._tileLoadProcessing || 0) <= 0);
+                const loaded = this.tileset.tilesLoaded === true && queueIdle;
 
                 if (loaded) {
                     if (idleSince == null) idleSince = now;
-                    if (now - idleSince >= quietMs) return finish();
+                    if (now - idleSince >= quietMs) return finish(true);
                 } else {
                     idleSince = null;
                 }
 
-                if (now - started >= timeoutMs) return finish();
+                if (now - started >= timeoutMs) return finish(false);
                 window.setTimeout(tick, 80);
             };
 
@@ -299,8 +370,119 @@ export class CesiumWorld {
         });
     }
 
+    _buildPreloadTargets(radius, spacing, maxTargets = 36) {
+        const targets = [{ x: 0, z: 0 }];
+        const steps = Math.max(1, Math.ceil(radius / spacing));
+
+        for (let iz = -steps; iz <= steps; iz++) {
+            for (let ix = -steps; ix <= steps; ix++) {
+                const x = ix * spacing;
+                const z = iz * spacing;
+                const d = Math.hypot(x, z);
+                if (d < 1 || d > radius) continue;
+                targets.push({ x, z, d });
+            }
+        }
+
+        targets.sort((a, b) => (a.d || 0) - (b.d || 0));
+        return targets.slice(0, Math.max(1, maxTargets));
+    }
+
+    _makePreloadView(centerLocal, offset, index, lift, viewDistance) {
+        const dist = Math.hypot(offset.x, offset.z);
+        const cardinals = [
+            { x: 0, z: -1 },
+            { x: 1, z: 0 },
+            { x: 0, z: 1 },
+            { x: -1, z: 0 },
+        ];
+        const baseDir = dist > 1
+            ? { x: -offset.x / dist, z: -offset.z / dist }
+            : cardinals[index % cardinals.length];
+        const dir = rotateXZ(baseDir, ((index % 3) - 1) * 0.38);
+        const target = {
+            x: centerLocal.x + offset.x,
+            y: centerLocal.y + 8,
+            z: centerLocal.z + offset.z,
+        };
+        return {
+            eye: {
+                x: target.x - dir.x * viewDistance,
+                y: centerLocal.y + lift,
+                z: target.z - dir.z * viewDistance,
+            },
+            target,
+        };
+    }
+
+    _buildLocalAreaPreloadViews(centerLocal, radius, lift, viewDistance, gridSpacing, maxTargets) {
+        const views = [];
+        const overviewLift = Math.max(lift * 1.35, 240);
+        const overviewDistance = Math.max(viewDistance, Math.min(radius * 0.45, 420));
+        const overviewTarget = { x: centerLocal.x, y: centerLocal.y + 20, z: centerLocal.z };
+        const overviewDirs = [
+            { x: 0, z: 1 },
+            { x: 1, z: 0 },
+            { x: -1, z: 0 },
+            { x: 0, z: -1 },
+        ];
+
+        views.push({
+            eye: { x: centerLocal.x, y: centerLocal.y + Math.max(overviewLift, radius * 0.35), z: centerLocal.z + Math.min(radius * 0.15, 160) },
+            target: overviewTarget,
+        });
+        for (const dir of overviewDirs) {
+            views.push({
+                eye: {
+                    x: centerLocal.x + dir.x * overviewDistance,
+                    y: centerLocal.y + overviewLift,
+                    z: centerLocal.z + dir.z * overviewDistance,
+                },
+                target: overviewTarget,
+            });
+        }
+        for (const dir of overviewDirs) {
+            views.push({
+                eye: { x: centerLocal.x, y: centerLocal.y + 4, z: centerLocal.z },
+                target: {
+                    x: centerLocal.x + dir.x * Math.min(radius, 500),
+                    y: centerLocal.y + 3,
+                    z: centerLocal.z + dir.z * Math.min(radius, 500),
+                },
+            });
+        }
+
+        const targets = this._buildPreloadTargets(radius, gridSpacing, maxTargets);
+        for (let i = 0; i < targets.length; i++) {
+            views.push(this._makePreloadView(centerLocal, targets[i], i, lift, viewDistance));
+        }
+        return views;
+    }
+
+    _sampleLoadedCoverage(centerLocal, radius, spacing) {
+        const samples = this._buildPreloadTargets(radius, spacing, 80);
+        let loaded = 0;
+        const missing = [];
+
+        for (const sample of samples) {
+            const y = this.sampleHeightAtLocal(centerLocal.x + sample.x, centerLocal.z + sample.z, 1.0);
+            if (Number.isFinite(y)) {
+                loaded++;
+            } else {
+                missing.push(sample);
+            }
+        }
+
+        return {
+            loaded,
+            total: samples.length,
+            ratio: samples.length ? loaded / samples.length : 1,
+            missing,
+        };
+    }
+
     async preloadLocalArea(centerLocal, options = {}) {
-        if (!this.viewer || !this.ready || !centerLocal) return;
+        if (!this.viewer || !this.ready || !centerLocal) return null;
         const Cesium = this.Cesium;
         const camera = this.viewer.camera;
         const saved = {
@@ -309,43 +491,46 @@ export class CesiumWorld {
             up: Cesium.Cartesian3.clone(camera.upWC),
         };
 
-        const radius = Math.max(30, Number.isFinite(options.radius) ? options.radius : 120);
-        const lift = Math.max(35, Number.isFinite(options.lift) ? options.lift : 85);
-        const dwellMs = Math.max(40, Number.isFinite(options.dwellMs) ? options.dwellMs : 120);
-        const perViewTimeoutMs = Math.max(250, Number.isFinite(options.perViewTimeoutMs) ? options.perViewTimeoutMs : 850);
+        const radius = Math.max(60, Number.isFinite(options.radius) ? options.radius : 220);
+        const lift = Math.max(80, Number.isFinite(options.lift) ? options.lift : (radius >= 800 ? 260 : 150));
+        const gridSpacing = clampNumber(options.gridSpacing, 180, 600, radius >= 800 ? 330 : Math.max(180, radius * 0.75));
+        const viewDistance = clampNumber(options.viewDistance, 140, 420, radius >= 800 ? 260 : Math.max(160, radius * 0.75));
+        const maxTargets = Math.round(clampNumber(options.maxTargets, 4, 60, radius >= 800 ? 34 : 12));
+        const dwellMs = Math.max(80, Number.isFinite(options.dwellMs) ? options.dwellMs : 180);
+        const perViewTimeoutMs = Math.max(450, Number.isFinite(options.perViewTimeoutMs) ? options.perViewTimeoutMs : 1600);
+        const finalIdleTimeoutMs = Math.max(perViewTimeoutMs, Number.isFinite(options.finalIdleTimeoutMs) ? options.finalIdleTimeoutMs : 5000);
+        const verifyCoverage = options.verifyCoverage !== false && radius >= 350;
+        const coverageSpacing = clampNumber(options.coverageSpacing, 180, 600, Math.max(240, gridSpacing));
+        const minCoverageRatio = clampNumber(options.minCoverageRatio, 0, 1, 0.72);
+        const repairPasses = Math.round(clampNumber(options.repairPasses, 0, 3, verifyCoverage ? 1 : 0));
+        const repairTargets = Math.round(clampNumber(options.repairTargets, 4, 32, 16));
         const progressCb = typeof options.progressCb === 'function' ? options.progressCb : null;
-        const target = {
-            x: centerLocal.x,
-            y: centerLocal.y + 8,
-            z: centerLocal.z,
+        const label = radius >= 1000 ? `${(radius / 1000).toFixed(1)} km` : `${Math.round(radius)} m`;
+        const delay = (ms) => new Promise(resolve => window.setTimeout(resolve, ms));
+        const report = {
+            radius,
+            views: 0,
+            timedOutViews: 0,
+            coverage: null,
         };
 
-        const views = [
-            { x: 0, y: lift * 1.15, z: radius * 0.25 },
-            { x: 0, y: lift * 0.85, z: radius },
-            { x: radius, y: lift * 0.8, z: 0 },
-            { x: -radius, y: lift * 0.8, z: 0 },
-            { x: 0, y: lift * 0.8, z: -radius },
-        ];
-
-        const delay = (ms) => new Promise(resolve => window.setTimeout(resolve, ms));
-
-        try {
+        const runViews = async (views, passLabel) => {
             for (let i = 0; i < views.length; i++) {
                 const v = views[i];
-                if (progressCb) progressCb(`Preloading nearby Google tiles (${i + 1}/${views.length})...`);
-                const eye = {
-                    x: centerLocal.x + v.x,
-                    y: centerLocal.y + v.y,
-                    z: centerLocal.z + v.z,
-                };
+                const status = this.getTileLoadStatus();
+                const queue = status.pending !== null || status.processing !== null
+                    ? `; queue ${status.pending || 0}/${status.processing || 0}`
+                    : '';
+                if (progressCb) progressCb(`Preloading ${label} collision tiles ${passLabel} (${i + 1}/${views.length}${queue})...`);
+
+                const eye = { x: v.eye.x, y: v.eye.y, z: v.eye.z };
                 const surfaceY = this.sampleHeightAtLocal(eye.x, eye.z, 1.0);
                 if (Number.isFinite(surfaceY)) eye.y = Math.max(eye.y, surfaceY + 18);
 
                 const directionLocal = normalize3({
-                    x: target.x - eye.x,
-                    y: target.y - eye.y,
-                    z: target.z - eye.z,
+                    x: v.target.x - eye.x,
+                    y: v.target.y - eye.y,
+                    z: v.target.z - eye.z,
                 });
                 camera.setView({
                     destination: this.localToCartesian(eye),
@@ -356,7 +541,36 @@ export class CesiumWorld {
                 });
                 this.viewer.scene.requestRender();
                 await delay(dwellMs);
-                await this.waitForTilesIdle(perViewTimeoutMs);
+                const idle = await this.waitForTilesIdle(perViewTimeoutMs);
+                if (!idle) report.timedOutViews++;
+                report.views++;
+            }
+        };
+
+        try {
+            const initialViews = this._buildLocalAreaPreloadViews(
+                centerLocal,
+                radius,
+                lift,
+                viewDistance,
+                gridSpacing,
+                maxTargets
+            );
+            await runViews(initialViews, 'scan');
+            await this.waitForTilesIdle(finalIdleTimeoutMs, 350);
+
+            for (let pass = 0; verifyCoverage && pass <= repairPasses; pass++) {
+                if (progressCb) progressCb(`Verifying ${label} collision tile coverage...`);
+                report.coverage = this._sampleLoadedCoverage(centerLocal, radius, coverageSpacing);
+                const pct = Math.round(report.coverage.ratio * 100);
+                if (progressCb) progressCb(`Collision preload coverage ${report.coverage.loaded}/${report.coverage.total} (${pct}%).`);
+                if (report.coverage.ratio >= minCoverageRatio || pass === repairPasses || !report.coverage.missing.length) break;
+
+                const repairViews = report.coverage.missing
+                    .slice(0, repairTargets)
+                    .map((offset, i) => this._makePreloadView(centerLocal, offset, i + pass * repairTargets, lift, viewDistance));
+                await runViews(repairViews, `repair ${pass + 1}`);
+                await this.waitForTilesIdle(finalIdleTimeoutMs, 350);
             }
         } finally {
             camera.setView({
@@ -368,6 +582,8 @@ export class CesiumWorld {
             });
             this.viewer.scene.requestRender();
         }
+
+        return report;
     }
 
     destroy() {
@@ -537,25 +753,28 @@ export class CesiumWorld {
     _ensureAircraft() {
         if (this.aircraftEntities.length || !this.viewer) return;
         const Cesium = this.Cesium;
-        const makeLine = (key, color, width = 4) => this.viewer.entities.add({
-            name: `drone-${key}`,
-            polyline: {
-                positions: new Cesium.CallbackProperty(() => this._aircraftLines[key], false),
-                width,
-                material: color,
-                depthFailMaterial: Cesium.Color.fromAlpha(color, 0.35),
+        this.aircraftModelEntity = this.viewer.entities.add({
+            name: 'cesium-drone-model',
+            position: new Cesium.CallbackProperty(() => (
+                this._aircraftModelPosition || Cesium.Cartesian3.ZERO
+            ), false),
+            orientation: new Cesium.CallbackProperty(() => (
+                this._aircraftModelOrientation || new Cesium.Quaternion(0, 0, 0, 1)
+            ), false),
+            model: {
+                uri: CESIUM_DRONE_MODEL_URI,
+                scale: 1.35,
+                minimumPixelSize: 44,
+                maximumScale: 18,
+                runAnimations: true,
+                incrementallyLoadTextures: false,
+                shadows: Cesium.ShadowMode.DISABLED,
+                silhouetteColor: Cesium.Color.fromAlpha(Cesium.Color.CYAN, 0.8),
+                silhouetteSize: 1.0,
             },
             show: false,
         });
-
-        this.aircraftEntities.push(makeLine('body', Cesium.Color.CYAN, 5));
-        this.aircraftEntities.push(makeLine('armA', Cesium.Color.WHITE, 4));
-        this.aircraftEntities.push(makeLine('armB', Cesium.Color.WHITE, 4));
-        this.aircraftEntities.push(makeLine('rotorFL', Cesium.Color.fromAlpha(Cesium.Color.CYAN, 0.9), 2));
-        this.aircraftEntities.push(makeLine('rotorFR', Cesium.Color.fromAlpha(Cesium.Color.CYAN, 0.9), 2));
-        this.aircraftEntities.push(makeLine('rotorRL', Cesium.Color.fromAlpha(Cesium.Color.ORANGE, 0.9), 2));
-        this.aircraftEntities.push(makeLine('rotorRR', Cesium.Color.fromAlpha(Cesium.Color.ORANGE, 0.9), 2));
-        this.aircraftEntities.push(makeLine('heading', Cesium.Color.LIME, 3));
+        this.aircraftEntities.push(this.aircraftModelEntity);
     }
 
     showAircraft(show) {
@@ -563,60 +782,24 @@ export class CesiumWorld {
         for (const e of this.aircraftEntities) e.show = !!show;
     }
 
-    _aircraftPoint(transform, offset) {
-        const rotated = rotateVectorByQuat(transform.orientation, offset);
-        return this.localToCartesian({
-            x: transform.position.x + rotated.x,
-            y: transform.position.y + rotated.y,
-            z: transform.position.z + rotated.z,
-        });
-    }
-
-    _aircraftRotor(transform, center, radius = 0.22, segments = 20) {
-        const points = [];
-        for (let i = 0; i <= segments; i++) {
-            const a = (i / segments) * Math.PI * 2;
-            points.push(this._aircraftPoint(transform, {
-                x: center.x + Math.cos(a) * radius,
-                y: center.y,
-                z: center.z + Math.sin(a) * radius,
-            }));
-        }
-        return points;
-    }
-
     updateAircraftFromDroneTransform(transform) {
         if (!this.viewer || !transform || !transform.orientation) return;
         this._ensureAircraft();
+        const Cesium = this.Cesium;
+        this._aircraftModelPosition = this.localToCartesian(transform.position);
 
-        const frontLeft = { x: -0.68, y: 0.02, z: -0.68 };
-        const frontRight = { x: 0.68, y: 0.02, z: -0.68 };
-        const rearLeft = { x: -0.68, y: 0.02, z: 0.68 };
-        const rearRight = { x: 0.68, y: 0.02, z: 0.68 };
-
-        this._aircraftLines.body = [
-            this._aircraftPoint(transform, { x: 0, y: 0.10, z: -0.24 }),
-            this._aircraftPoint(transform, { x: 0.24, y: 0.06, z: 0 }),
-            this._aircraftPoint(transform, { x: 0, y: 0.10, z: 0.24 }),
-            this._aircraftPoint(transform, { x: -0.24, y: 0.06, z: 0 }),
-            this._aircraftPoint(transform, { x: 0, y: 0.10, z: -0.24 }),
-        ];
-        this._aircraftLines.armA = [
-            this._aircraftPoint(transform, frontLeft),
-            this._aircraftPoint(transform, rearRight),
-        ];
-        this._aircraftLines.armB = [
-            this._aircraftPoint(transform, frontRight),
-            this._aircraftPoint(transform, rearLeft),
-        ];
-        this._aircraftLines.rotorFL = this._aircraftRotor(transform, frontLeft);
-        this._aircraftLines.rotorFR = this._aircraftRotor(transform, frontRight);
-        this._aircraftLines.rotorRL = this._aircraftRotor(transform, rearLeft);
-        this._aircraftLines.rotorRR = this._aircraftRotor(transform, rearRight);
-        this._aircraftLines.heading = [
-            this._aircraftPoint(transform, { x: 0, y: 0.18, z: -0.18 }),
-            this._aircraftPoint(transform, { x: 0, y: 0.18, z: -1.08 }),
-        ];
+        const basis = this.getTransformBasisFixed(transform);
+        // Cesium axis-corrects glTF 2.0 models from Y-up/Z-forward into its
+        // runtime model frame: +X forward, +Y left, +Z up.
+        const xAxis = basis.forward;
+        const yAxis = basis.right;
+        const zAxis = basis.up;
+        const rotation = Cesium.Matrix3.fromColumnMajorArray([
+            xAxis.x, xAxis.y, xAxis.z,
+            yAxis.x, yAxis.y, yAxis.z,
+            zAxis.x, zAxis.y, zAxis.z,
+        ], new Cesium.Matrix3());
+        this._aircraftModelOrientation = Cesium.Quaternion.fromRotationMatrix(rotation, new Cesium.Quaternion());
     }
 
     sampleHeightAtLocal(x, z, width = 0.4) {
@@ -696,13 +879,11 @@ export class CesiumWorld {
             this.viewer.camera.frustum.far = 15000000;
         }
 
-        const q = transform.orientation;
-        const forwardLocal = rotateVectorByQuat(q, { x: 0, y: 0, z: -1 });
-        const upLocal = rotateVectorByQuat(q, { x: 0, y: 1, z: 0 });
+        const basis = this.getTransformBasisFixed(transform);
 
         const destination = this.localToCartesian(transform.position);
-        const direction = this.localDirectionToFixed(forwardLocal);
-        const up = this.localDirectionToFixed(upLocal);
+        const direction = basis.forward;
+        const up = basis.up;
 
         this.viewer.camera.setView({
             destination,
@@ -710,9 +891,21 @@ export class CesiumWorld {
         });
     }
 
+    getTransformBasisFixed(transform) {
+        const basis = getTransformBasisLocal(transform);
+        return {
+            right: this.localDirectionToFixed(basis.right),
+            left: this.localDirectionToFixed(basis.left),
+            up: this.localDirectionToFixed(basis.up),
+            down: this.localDirectionToFixed(basis.down),
+            back: this.localDirectionToFixed(basis.back),
+            forward: this.localDirectionToFixed(basis.forward),
+        };
+    }
+
     getForwardLocal(transform) {
         if (!transform || !transform.orientation) return { x: 0, y: 0, z: -1 };
-        return normalize3(rotateVectorByQuat(transform.orientation, { x: 0, y: 0, z: -1 }));
+        return getTransformBasisLocal(transform).forward;
     }
 
     setThirdPersonCamera(transform, state = {}) {

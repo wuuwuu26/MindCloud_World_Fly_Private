@@ -45,8 +45,10 @@ let sceneLoaded = false;
 let loopStarted = false;
 let lastFrameTime = 0;
 let placementKeysDown = new Set();
+let placementInitClickUntil = 0;
 let screenHandler = null;
 let spawnConfirmInProgress = false;
+let startTilesModeInProgress = false;
 let thirdPersonPointer = {
     active: false,
     button: -1,
@@ -64,6 +66,9 @@ let thirdPersonCamera = {
 const SPAWN_ALTITUDE_MIN = 0;
 const SPAWN_ALTITUDE_MAX = 20000;
 const SPAWN_ALTITUDE_SLIDER_DEFAULT_MAX = 1000;
+const SPAWN_PRELOAD_RADIUS_METERS = 200;
+const MAX_PHYSICS_FRAME_DT = 0.25;
+const PHYSICS_SUBSTEP_DT = 0.05;
 
 function normalizeViewMode(value, fallback = 'first') {
     return value === 'third' || value === '3rd' ? 'third' : fallback;
@@ -127,7 +132,9 @@ function initSubsystems() {
     setupDisplaySettingsListeners();
 }
 
-async function startTilesMode() {
+export async function startTilesMode() {
+    if (startTilesModeInProgress) return;
+    startTilesModeInProgress = true;
     try {
         initSubsystems();
         document.getElementById('drop-zone')?.classList.add('hidden');
@@ -156,15 +163,31 @@ async function startTilesMode() {
         }
     } catch (e) {
         showError(e);
+    } finally {
+        startTilesModeInProgress = false;
     }
 }
 
 function setupCesiumPlacementHandler() {
     if (!world || !world.viewer || screenHandler) return;
     const Cesium = world.Cesium;
+    const canvas = world.viewer.scene.canvas;
+
+    const rememberInitClick = () => {
+        if (mode !== 'placement' || !placementKeysDown.has('KeyI')) return;
+        placementInitClickUntil = performance.now() + 1500;
+    };
+    canvas.addEventListener('pointerdown', rememberInitClick, true);
+    canvas.addEventListener('click', rememberInitClick, true);
+
     screenHandler = new Cesium.ScreenSpaceEventHandler(world.viewer.scene.canvas);
     screenHandler.setInputAction(async (movement) => {
         if (mode !== 'placement') return;
+        const initClickActive =
+            placementKeysDown.has('KeyI') ||
+            performance.now() <= placementInitClickUntil;
+        if (!initClickActive) return;
+
         const picked = await world.pickSpawn(movement.position, spawnAltitudeMeters);
         if (picked) {
             spawnPoint = picked;
@@ -235,14 +258,28 @@ async function confirmSpawnAndFly() {
         mode = 'loading';
         applyDisplaySettings();
         document.getElementById('loading-overlay')?.classList.add('visible');
+        setProgress('Preloading 200 m collision area before FPV...');
         try {
-            await world.preloadLocalArea(spawnPoint, {
-                radius: 130,
-                lift: 95,
+            const preload = await world.preloadLocalArea(spawnPoint, {
+                radius: SPAWN_PRELOAD_RADIUS_METERS,
+                lift: 150,
+                gridSpacing: 180,
+                viewDistance: 160,
+                maxTargets: 8,
+                dwellMs: 120,
+                perViewTimeoutMs: 1200,
+                finalIdleTimeoutMs: 2500,
+                verifyCoverage: false,
                 progressCb: setProgress,
             });
+            if (preload && preload.coverage && preload.coverage.ratio < 0.72) {
+                const pct = Math.round(preload.coverage.ratio * 100);
+                console.warn(`[TilesFlight] low preload coverage around spawn: ${pct}%`, preload);
+            }
         } catch (e) {
-            console.warn('[TilesFlight] tile preload failed; continuing:', e);
+            console.error('[TilesFlight] required tile preload failed:', e);
+            const msg = e && e.message ? e.message : String(e);
+            throw new Error(`Required 200 m tile preload failed: ${msg}`);
         }
 
         mode = 'view-select';
@@ -338,17 +375,17 @@ function getCameraHFov() {
 }
 
 function gameLoop(now) {
-    const dt = Math.min(0.05, Math.max(0.001, (now - lastFrameTime) / 1000));
+    const frameDt = Math.min(MAX_PHYSICS_FRAME_DT, Math.max(0.001, (now - lastFrameTime) / 1000));
     lastFrameTime = now;
 
     try {
         if (mode === 'placement') {
-            moveSpawn(dt);
+            moveSpawn(Math.min(PHYSICS_SUBSTEP_DT, frameDt));
             updateKeyGuide();
         } else if (mode === 'view-select') {
             updateKeyGuide();
         } else if (mode === 'flight') {
-            updateFlight(dt);
+            updateFlight(frameDt);
         }
     } catch (e) {
         console.error('[gameLoop]', e);
@@ -375,7 +412,14 @@ function updateFlight(dt) {
         }
     }
 
-    drone.update(dt, input, collisionProvider);
+    let remainingDt = Math.max(0, dt);
+    let substeps = 0;
+    while (remainingDt > 1e-6 && substeps < 8) {
+        const stepDt = Math.min(PHYSICS_SUBSTEP_DT, remainingDt);
+        drone.update(stepDt, input, collisionProvider);
+        remainingDt -= stepDt;
+        substeps++;
+    }
 
     // Camera mode only selects visualization; controller and physics stay shared.
     const cameraTransform = drone.getCameraTransform();
@@ -473,6 +517,7 @@ function updateKeyGuide() {
         '<kbd>← →</kbd>  Roll Left / Right',
         '<kbd>W S</kbd>  Motor Thrust',
         '<kbd>A D</kbd>  Yaw Left / Right',
+        '<span style="color:#8cff8c">Nose down builds forward speed</span>',
     ] : [
         '<kbd>↑ ↓</kbd>  Forward / Back',
         '<kbd>← →</kbd>  Strafe Left / Right',
@@ -487,7 +532,7 @@ function updateKeyGuide() {
         `<kbd>V</kbd>    View (${cameraMode === 'third' ? 'Third' : 'First'})`,
         '<kbd>M</kbd>    Flight Mode (FPV/Easy)',
         '<kbd>P</kbd>    Placement mode',
-        '<kbd>Tab</kbd>  Settings',
+        `<kbd>Tab</kbd>  ${isFPV ? 'Settings' : 'Settings / Easy Max Speed'}`,
     );
     if (cameraMode === 'third') {
         rows.push(
@@ -512,11 +557,16 @@ function isThirdPersonObserverActive() {
         !(controller && controller.isSettingsOpen && controller.isSettingsOpen());
 }
 
+function isTextEntryTarget(target) {
+    if (!target || !target.closest) return false;
+    return !!target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]');
+}
+
 function setupThirdPersonPointerControls() {
     if (!world || !world.viewer) return;
     const canvas = world.viewer.scene.canvas;
-    if (!canvas || canvas._mcwfThirdPersonBound) return;
-    canvas._mcwfThirdPersonBound = true;
+    if (!canvas || canvas._flightThirdPersonBound) return;
+    canvas._flightThirdPersonBound = true;
 
     canvas.addEventListener('contextmenu', (e) => {
         if (isThirdPersonObserverActive()) e.preventDefault();
@@ -572,18 +622,18 @@ function setupThirdPersonPointerControls() {
 function setupKeyboard() {
     window.addEventListener('keydown', (e) => {
         if (controller && controller.isSettingsOpen && controller.isSettingsOpen()) return;
-        if (e.target && e.target.closest && e.target.closest('#spawn-altitude-panel')) return;
+        if (isTextEntryTarget(e.target)) return;
 
         if (mode === 'placement') {
             placementKeysDown.add(e.code);
-            if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Enter'].includes(e.code)) {
+            if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyI', 'KeyO'].includes(e.code)) {
                 e.preventDefault();
             }
-            if (e.code === 'Enter' && spawnPoint) {
+            if (e.code === 'KeyO' && spawnPoint) {
                 confirmSpawnAndFly();
             }
         } else if (mode === 'view-select') {
-            if (['Digit1', 'Numpad1', 'Enter'].includes(e.code)) {
+            if (['Digit1', 'Numpad1', 'KeyO'].includes(e.code)) {
                 e.preventDefault();
                 startFlight('first');
             } else if (['Digit2', 'Numpad2'].includes(e.code)) {
@@ -621,7 +671,8 @@ function setupKeyboard() {
 function setupStartUI() {
     const startBtn = document.getElementById('file-picker-btn');
     const dropZone = document.getElementById('drop-zone');
-    if (startBtn) {
+    if (startBtn && !startBtn._flightStartBound) {
+        startBtn._flightStartBound = true;
         startBtn.textContent = 'Start Google 3D Tiles Flight';
         startBtn.addEventListener('click', () => startTilesMode());
     }
@@ -639,15 +690,22 @@ function setupStartUI() {
     }
 
     for (const btn of document.querySelectorAll('[data-view-choice]')) {
-        if (btn._mcwfViewChoiceBound) continue;
-        btn._mcwfViewChoiceBound = true;
+        if (btn._flightViewChoiceBound) continue;
+        btn._flightViewChoiceBound = true;
         btn.addEventListener('click', () => startFlight(btn.getAttribute('data-view-choice')));
     }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+function initializeAppShell() {
     setupStartUI();
     setupKeyboard();
     setupSpawnAltitudeControls();
     setProgress('');
-});
+    window.googleTilesFlightStart = startTilesMode;
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeAppShell, { once: true });
+} else {
+    initializeAppShell();
+}

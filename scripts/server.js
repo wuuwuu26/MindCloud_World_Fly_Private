@@ -1,5 +1,5 @@
 /*
- * Static server for MindCloud World Fly inside the 3DCityDB/Cesium image.
+ * Static server for the Google 3D Tiles flight app inside the 3DCityDB/Cesium image.
  *
  * Serves:
  *   /                         -> this project
@@ -115,7 +115,7 @@ app.use(express.static(APP_ROOT, {
 app.use(express.static(WEB_ROOT));
 
 const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`MindCloud World Fly running at http://localhost:${PORT}`);
+    console.log(`Google 3D Tiles Flight container server listening on 0.0.0.0:${PORT}`);
     console.log(`Project root: ${APP_ROOT}`);
     console.log(`Cesium root: ${path.join(WEB_ROOT, 'ThirdParty', 'Cesium')}`);
 });

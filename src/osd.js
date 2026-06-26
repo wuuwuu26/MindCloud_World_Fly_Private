@@ -62,12 +62,16 @@ export class OSD {
         ctx.font = '12px "Courier New", monospace';
         ctx.textBaseline = 'middle';
 
-        this._drawHorizon(ctx, w, h, drone.bodyPitch, drone.bodyRoll);
-        this._drawSpeedTape(ctx, w, h, drone.speed);
+        const bodyPitch = Number.isFinite(drone.bodyPitch) ? drone.bodyPitch : 0;
+        const bodyRoll = Number.isFinite(drone.bodyRoll) ? drone.bodyRoll : 0;
+        const groundSpeed = Number.isFinite(drone.groundSpeed) ? drone.groundSpeed : drone.speed;
+
+        this._drawHorizon(ctx, w, h, bodyPitch, bodyRoll);
+        this._drawSpeedTape(ctx, w, h, groundSpeed);
         this._drawAltTape(ctx, w, h, drone.y);
         this._drawHeading(ctx, w, h, drone.yaw);
         this._drawVSI(ctx, w, h, drone.verticalSpeed);
-        this._drawFlightInfo(ctx, w, h, drone.flightMode, controller.armed);
+        this._drawFlightInfo(ctx, w, h, drone, controller);
     }
 
     // ---- Artificial Horizon + Pitch Ladder ----
@@ -208,7 +212,8 @@ export class OSD {
         // Label
         ctx.fillStyle = this.dimColor;
         ctx.font = '10px "Courier New", monospace';
-        ctx.fillText('SPD', tapeX, cy - tapeH / 2 - 10);
+        ctx.fillText('GSPD', tapeX, cy - tapeH / 2 - 13);
+        ctx.fillText('m/s', tapeX, cy - tapeH / 2 - 2);
     }
 
     // ---- Altitude Tape (right side) ----
@@ -391,7 +396,9 @@ export class OSD {
     }
 
     // ---- Flight Info (bottom) ----
-    _drawFlightInfo(ctx, w, h, mode, armed) {
+    _drawFlightInfo(ctx, w, h, drone, controller) {
+        const mode = drone && drone.flightMode ? drone.flightMode : 'drone';
+        const armed = !!(controller && controller.armed);
         const y = h * 0.92;
         ctx.font = '12px "Courier New", monospace';
         ctx.textBaseline = 'middle';
@@ -405,5 +412,32 @@ export class OSD {
         ctx.textAlign = 'right';
         ctx.fillStyle = armed ? this.color : this.warnColor;
         ctx.fillText(armed ? 'ARMED' : 'DISARMED', w * 0.85, y);
+
+        const groundSpeed = Number.isFinite(drone.groundSpeed) ? drone.groundSpeed : drone.speed;
+        const airSpeed = Number.isFinite(drone.airSpeed) ? drone.airSpeed : groundSpeed;
+        const commandedSpeed = Number.isFinite(drone.commandedGroundSpeed) ? drone.commandedGroundSpeed : 0;
+        const maxSpeed = Number.isFinite(drone.effectiveMaxSpeed) ? drone.effectiveMaxSpeed : 0;
+        const throttlePct = Number.isFinite(drone.throttlePercent) ? Math.round(drone.throttlePercent * 100) : 0;
+
+        let cue;
+        if (mode === 'drone') {
+            if (commandedSpeed < 0.5 && groundSpeed < 1.0) {
+                cue = 'EASY: UP/DOWN or pitch stick = forward speed | Shift = Boost | W/S = altitude';
+            } else {
+                cue = `GSPD ${groundSpeed.toFixed(1)}  CMD ${commandedSpeed.toFixed(1)}  MAX ${maxSpeed.toFixed(0)}${drone.boostActive ? ' BOOST' : ''}`;
+            }
+        } else if (groundSpeed < 2.0 && throttlePct > 65) {
+            cue = 'FPV: pitch nose down to convert motor thrust into forward speed';
+        } else {
+            cue = `GSPD ${groundSpeed.toFixed(1)}  AIR ${airSpeed.toFixed(1)}  THR ${throttlePct}%${drone.boostActive ? ' BOOST' : ''}`;
+        }
+
+        ctx.textAlign = 'center';
+        ctx.fillStyle = this.dimColor;
+        ctx.font = '11px "Courier New", monospace';
+        if (ctx.measureText(cue).width > w * 0.64) {
+            ctx.font = '10px "Courier New", monospace';
+        }
+        ctx.fillText(cue, w * 0.5, h * 0.86);
     }
 }

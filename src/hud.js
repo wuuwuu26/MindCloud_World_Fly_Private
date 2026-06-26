@@ -57,6 +57,9 @@ export class HUD {
         this.altitudeEl = document.getElementById('hud-altitude');
         this.vspeedEl = document.getElementById('hud-vspeed');
         this.gspeedEl = document.getElementById('hud-gspeed');
+        this.speedCommandEl = document.getElementById('hud-speed-command');
+        this.speedCommandLabelEl = document.getElementById('hud-speed-command-label');
+        this.speedHintEl = document.getElementById('hud-speed-hint');
         this.fpsEl = document.getElementById('hud-fps');
         this.controllerEl = document.getElementById('hud-controller');
         this.collisionWarnEl = document.getElementById('hud-collision-warn');
@@ -114,7 +117,42 @@ export class HUD {
             this.vspeedEl.textContent = drone.verticalSpeed.toFixed(1);
             this.vspeedEl.style.color = drone.verticalSpeed < -2 ? '#f80' : '#0f0';
         }
-        if (this.gspeedEl) this.gspeedEl.textContent = drone.speed.toFixed(1);
+        const groundSpeed = Number.isFinite(drone.groundSpeed) ? drone.groundSpeed : drone.speed;
+        const airSpeed = Number.isFinite(drone.airSpeed) ? drone.airSpeed : groundSpeed;
+        const commandedSpeed = Number.isFinite(drone.commandedGroundSpeed) ? drone.commandedGroundSpeed : 0;
+        const effectiveMaxSpeed = Number.isFinite(drone.effectiveMaxSpeed) ? drone.effectiveMaxSpeed : 0;
+
+        if (this.gspeedEl) {
+            this.gspeedEl.innerHTML = `${groundSpeed.toFixed(1)}<br><span class="hud-kmh">${Math.round(groundSpeed * 3.6)} km/h</span>`;
+        }
+        if (this.speedCommandEl) {
+            if (drone.flightMode === 'drone') {
+                this.speedCommandEl.innerHTML =
+                    `${commandedSpeed.toFixed(1)} / ${effectiveMaxSpeed.toFixed(1)}<br>` +
+                    `<span class="hud-kmh">${Math.round(commandedSpeed * 3.6)} / ${Math.round(effectiveMaxSpeed * 3.6)} km/h</span>`;
+            } else {
+                const throttlePct = Number.isFinite(drone.throttlePercent) ? Math.round(drone.throttlePercent * 100) : 0;
+                this.speedCommandEl.textContent = `${airSpeed.toFixed(1)} AIR / ${throttlePct}% THR`;
+            }
+        }
+        if (this.speedCommandLabelEl) {
+            this.speedCommandLabelEl.textContent = drone.flightMode === 'drone' ? 'CMD / MAX (m/s)' : 'AIR SPD / THR';
+        }
+        if (this.speedHintEl) {
+            let hint = '';
+            if (drone.flightMode === 'drone') {
+                if (commandedSpeed < 0.5 && groundSpeed < 1.0) {
+                    hint = 'Easy forward uses ↑/↓ or pitch stick. Hold Shift for Boost.';
+                } else if (effectiveMaxSpeed < 83 && groundSpeed > effectiveMaxSpeed * 0.7) {
+                    hint = 'Raise Tab > Easy Max Speed for faster Easy flight.';
+                } else if (drone.boostActive) {
+                    hint = effectiveMaxSpeed >= 83 ? 'Boost active; speed is capped at 300 km/h.' : 'Boost active';
+                }
+            } else if (groundSpeed < 2.0 && (drone.throttlePercent || 0) > 0.65) {
+                hint = 'FPV needs nose-down pitch to turn thrust into forward speed.';
+            }
+            this.speedHintEl.textContent = hint;
+        }
         if (this.fpsEl) this.fpsEl.textContent = fps;
 
         // Controller status

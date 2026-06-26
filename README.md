@@ -1,4 +1,4 @@
-# MindCloud World Fly 用户手册
+# Google 3D Tiles Flight 用户手册
 
 浏览器中的 Google Photorealistic 3D Tiles 穿越机驾驶器。启动本地服务后，在 Chrome / Chromium 里选择城市、放置出生点，然后用键盘、手柄或 RC 遥控器飞行。
 
@@ -20,7 +20,7 @@
 启动后打开：
 
 ```text
-http://localhost:8080
+http://127.0.0.1:8080
 ```
 
 如果脚本没有执行权限，先运行：
@@ -42,7 +42,7 @@ PORT=18081 ./launch.sh
 ./launch.sh --detach
 
 # 停止后台容器
-docker rm -f mcwf-google-tiles
+docker rm -f google-tiles-flight
 
 # 本地开发模式，不走 Docker
 ./launch.sh --local
@@ -53,20 +53,20 @@ docker rm -f mcwf-google-tiles
 1. 点 **Start Google 3D Tiles Flight**。
 2. 等页面进入 **PLACEMENT MODE**。
 3. 用 Cesium 搜索框搜索城市或地点，也可以用鼠标浏览场景。
-4. 左键点击建筑、道路或地面设置出生点。
+4. 按住 `Ctrl` 并点击建筑、道路或地面设置出生点；普通点击 / 拖拽只用于移动视角。
 5. 用 `W/A/S/D` 微调位置，按住 `Shift` 可以加快微调。
 6. 在 **SPAWN ALTITUDE (m)** 设置出生高度。
-7. 按 `Enter` 确认出生点。
+7. 按 `O` 确认出生点。
 8. 选择 **First Person** 或 **Third Person** 开始飞行。
 
 需要固定初始视角或更换 Cesium Ion 资源时，可以在 URL 中加入参数：
 
 ```text
 # 初始视角
-http://localhost:8080/?lon=114.1690321&lat=22.3246282&height=1800
+http://127.0.0.1:8080/?lon=114.1690321&lat=22.3246282&height=1800
 
 # 自定义 Cesium Ion token / asset
-http://localhost:8080/?ionToken=<your_token>&assetId=2275207
+http://127.0.0.1:8080/?ionToken=<your_token>&assetId=2275207
 ```
 
 ## 输入设备
@@ -143,7 +143,7 @@ W / S        电机推力
 A / D        左 / 右偏航
 ```
 
-设置面板里的 **Easy Max Speed** 控制 Easy 模式水平速度，**Easy W/S Vertical** 控制 Easy 模式升降速度。FPV 模式的 `W/S` 是电机推力，想往前飞需要同时压低机头；FPV 相机固定俯仰角在设置面板的 **FPV Cam Angle** 调整，不使用 `Q/E` 实时调节。
+设置面板里的 **Easy Max Speed** 控制 Easy 模式水平速度，默认 18 m/s；按住 `Shift` 会临时加倍。**Easy W/S Vertical** 控制 Easy 模式升降速度。FPV 模式的 `W/S` 是电机推力，想往前飞需要同时压低机头；FPV 相机固定俯仰角在设置面板的 **FPV Cam Angle** 调整，不使用 `Q/E` 实时调节。
 
 第三人称观察相机：
 
@@ -172,15 +172,15 @@ curl -I http://127.0.0.1:8080/ThirdParty/Cesium/Cesium.js
 清掉容器和镜像后重建：
 
 ```bash
-docker rm -f mcwf-google-tiles 2>/dev/null || true
-docker rmi mindcloud-world-fly:google-tiles 2>/dev/null || true
+docker rm -f google-tiles-flight 2>/dev/null || true
+docker rmi google-tiles-flight:latest 2>/dev/null || true
 ./launch.sh
 ```
 
 常见问题：
 
 - 页面一直加载 Google tiles：确认浏览器可以访问 Cesium Ion 和 Google 3D Tiles，并检查 `ionToken` / `assetId` 是否有效。
-- 页面空白或 WebGL 报错：用 Chrome / Chromium 打开 `http://localhost:8080`，不要用 `file://` 打开 `index.html`。
+- 页面空白、按钮无反应或 WebGL 报错：用 Chrome / Chromium 打开 `http://127.0.0.1:8080`，不要用 `file://` 打开 `index.html`。浏览器会把 `localhost` 和 `127.0.0.1` 当作不同站点，历史缓存或权限状态可能不同。
 - 端口冲突：用 `PORT=18081 ./launch.sh` 或 `./launch.sh --port 18081`。
 - Chrome 看不到 HID：运行 `./launch.sh --setup-input` 后重新插拔设备。
 - 碰撞偶尔穿墙：这是当前 Cesium 查询代理的限制。

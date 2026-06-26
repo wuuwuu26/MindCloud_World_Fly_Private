@@ -2,14 +2,15 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMAGE="${IMAGE:-mindcloud-world-fly:google-tiles}"
-NAME="${NAME:-mcwf-google-tiles}"
+IMAGE="${IMAGE:-google-tiles-flight:latest}"
+NAME="${NAME:-google-tiles-flight}"
 PORT="${PORT:-8080}"
 DETACH="${DETACH:-0}"
 MODE="docker"
 OPEN_BROWSER=1
+LOOPBACK_HOST="127.0.0.1"
 
-RULE_FILE="/etc/udev/rules.d/99-mindcloud-world-fly-input.rules"
+RULE_FILE="/etc/udev/rules.d/99-google-tiles-flight-input.rules"
 LOCAL_PID=""
 LOG_PID=""
 CONTAINER_STARTED=0
@@ -52,6 +53,165 @@ truthy() {
         1|true|TRUE|yes|YES|y|Y) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+find_port_listeners() {
+    local port="$1"
+
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnp "sport = :$port" 2>/dev/null | awk 'NR > 1 { print }'
+        return 0
+    fi
+
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 { print }'
+        return 0
+    fi
+
+    return 0
+}
+
+find_repo_local_server_pids() {
+    local port="${1:-}"
+    local pid arg cwd has_serve has_port
+    local serve_path="$SCRIPT_DIR/scripts/serve.py"
+
+    while IFS= read -r pid; do
+        [[ -n "$pid" && "$pid" != "$$" ]] || continue
+        [[ -r "/proc/$pid/cmdline" ]] || continue
+
+        has_serve=0
+        if [[ -n "$port" ]]; then
+            has_port=0
+        else
+            has_port=1
+        fi
+        cwd=""
+
+        while IFS= read -r -d '' arg; do
+            if [[ "$arg" == "$serve_path" ]]; then
+                has_serve=1
+            elif [[ "$arg" == "scripts/serve.py" || "$arg" == "./scripts/serve.py" ]]; then
+                [[ -n "$cwd" ]] || cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+                [[ "$cwd" == "$SCRIPT_DIR" ]] && has_serve=1
+            fi
+
+            if [[ -n "$port" && "$arg" == "$port" ]]; then
+                has_port=1
+            fi
+        done < "/proc/$pid/cmdline"
+
+        if [[ "$has_serve" == "1" && "$has_port" == "1" ]]; then
+            printf '%s\n' "$pid"
+        fi
+    done < <(pgrep -f 'serve.py' 2>/dev/null || true)
+}
+
+stop_repo_local_servers() {
+    local port="${1:-}"
+    local -a pids=()
+    local -a survivors=()
+    local pid
+
+    mapfile -t pids < <(find_repo_local_server_pids "$port")
+    ((${#pids[@]} > 0)) || return 1
+
+    echo "Stopping previous local server..."
+    kill -TERM "${pids[@]}" 2>/dev/null || true
+    sleep 0.3
+
+    for pid in "${pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            survivors+=("$pid")
+        fi
+    done
+
+    if ((${#survivors[@]} > 0)); then
+        kill -KILL "${survivors[@]}" 2>/dev/null || true
+    fi
+}
+
+port_is_listening() {
+    local port="$1"
+
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn "sport = :$port" 2>/dev/null | awk 'NR > 1 { found = 1 } END { exit found ? 0 : 1 }'
+        return $?
+    fi
+
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+        return $?
+    fi
+
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$port" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.settimeout(0.2)
+try:
+    sys.exit(0 if sock.connect_ex(("127.0.0.1", port)) == 0 else 1)
+finally:
+    sock.close()
+PY
+}
+
+suggest_free_port() {
+    local start="$1"
+    local port="$start"
+    local limit=$((start + 30))
+
+    while ((port <= limit)); do
+        if ! port_is_listening "$port"; then
+            echo "$port"
+            return 0
+        fi
+        port=$((port + 1))
+    done
+
+    echo "$((start + 1))"
+}
+
+print_port_conflict_help() {
+    local port="$1"
+    local free_port
+    free_port="$(suggest_free_port "$((port + 1))")"
+
+    echo
+    echo "Port $port is already in use, so the simulator cannot bind http://$LOOPBACK_HOST:$port."
+    echo
+    echo "What is using it:"
+    local listeners
+    listeners="$(find_port_listeners "$port" || true)"
+    if [[ -n "$listeners" ]]; then
+        echo "$listeners" | sed 's/^/  /'
+    else
+        echo "  Could not identify the listener. Try: ss -ltnp 'sport = :$port'"
+    fi
+    echo
+    echo "Fix options:"
+    echo "  1. Stop an old simulator container:"
+    echo "     docker rm -f $NAME"
+    echo "  2. Stop a local dev server from this repo:"
+    echo "     pkill -f 'scripts/serve.py[[:space:]]+$port'"
+    echo "  3. See the process using the port:"
+    echo "     ss -ltnp 'sport = :$port'"
+    echo "     sudo ss -ltnp 'sport = :$port'   # if the process name/PID is hidden"
+    echo "  4. Start on another port:"
+    echo "     PORT=$free_port ./launch.sh"
+    echo "     ./launch.sh --port $free_port"
+    echo
+}
+
+ensure_port_available() {
+    local port="$1"
+    if port_is_listening "$port"; then
+        print_port_conflict_help "$port" >&2
+        exit 1
+    fi
 }
 
 cleanup() {
@@ -165,7 +325,7 @@ setup_input_rules() {
     local tmp
     tmp="$(mktemp)"
     cat > "$tmp" <<'EOF'
-# MindCloud World Fly input access.
+# Google 3D Tiles Flight input access.
 # Allows Chrome Gamepad API and WebHID to read common RC transmitter devices.
 ACTION=="add|change", SUBSYSTEM=="input", ENV{ID_INPUT_JOYSTICK}=="1", TAG+="uaccess", MODE="0660"
 
@@ -256,24 +416,35 @@ run_docker() {
 
     trap cleanup INT TERM EXIT
 
+    docker rm -f "$NAME" >/dev/null 2>&1 || true
+    stop_repo_local_servers "$PORT" || true
+    ensure_port_available "$PORT"
+
     echo "Building Docker image: $IMAGE"
     docker build -t "$IMAGE" "$SCRIPT_DIR"
 
-    docker rm -f "$NAME" >/dev/null 2>&1 || true
+    local url="http://$LOOPBACK_HOST:$PORT"
 
-    echo "Starting Docker container $NAME at http://localhost:$PORT"
-    docker run --rm -d --init \
+    echo "Starting Docker container $NAME at $url"
+    local docker_output
+    if ! docker_output="$(docker run --rm -d --init \
         --name "$NAME" \
         -p "$PORT:8000" \
-        -v "$SCRIPT_DIR/asset/gate-paths:/var/www/mindcloud/asset/gate-paths" \
-        "$IMAGE" >/dev/null
+        -v "$SCRIPT_DIR/asset/gate-paths:/var/www/google-tiles-flight/asset/gate-paths" \
+        "$IMAGE" 2>&1)"; then
+        echo "$docker_output" >&2
+        if [[ "$docker_output" == *"address already in use"* || "$docker_output" == *"port is already allocated"* || "$docker_output" == *"failed to bind"* ]]; then
+            print_port_conflict_help "$PORT" >&2
+        fi
+        exit 1
+    fi
     CONTAINER_STARTED=1
 
-    open_browser "http://localhost:$PORT"
+    open_browser "$url"
 
     cat <<EOF
 
-Simulator: http://localhost:$PORT
+Simulator: $url
 Stop:      Ctrl+C
 Input:     keyboard works; gamepad/WebHID is optional.
 EOF
@@ -294,23 +465,23 @@ run_local() {
 
     trap cleanup INT TERM EXIT
 
-    if pgrep -f "$SCRIPT_DIR/scripts/serve.py" >/dev/null 2>&1; then
-        echo "Stopping previous local server..."
-        pkill -f "$SCRIPT_DIR/scripts/serve.py" || true
-        sleep 0.3
-    fi
+    stop_repo_local_servers "$PORT" || true
 
-    echo "Starting local server at http://localhost:$PORT"
+    ensure_port_available "$PORT"
+
+    local url="http://$LOOPBACK_HOST:$PORT"
+
+    echo "Starting local server at $url"
     python3 "$SCRIPT_DIR/scripts/serve.py" "$PORT" &
     LOCAL_PID=$!
     sleep 0.4
     kill -0 "$LOCAL_PID" 2>/dev/null || die "Local server failed to start."
 
-    open_browser "http://localhost:$PORT"
+    open_browser "$url"
 
     cat <<EOF
 
-Simulator: http://localhost:$PORT
+Simulator: $url
 Stop:      Ctrl+C
 Input:     keyboard works; gamepad/WebHID is optional.
 EOF

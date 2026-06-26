@@ -39,6 +39,15 @@ const SETTINGS_IDS = [
     'clean-mode-toggle', 'osd-toggle',
 ];
 
+const CONFIG_VERSION = 3;
+const DEFAULT_EASY_MAX_SPEED = '83.333';
+const DEFAULT_EASY_MAX_VSPEED = '8';
+const DEFAULT_DRAG_AREA = '0.0015';
+const LEGACY_EASY_MAX_SPEED = 9;
+const PREVIOUS_EASY_MAX_SPEED = 18;
+const LEGACY_EASY_MAX_VSPEED = 6;
+const PREVIOUS_DRAG_AREA = 0.01;
+
 // Settings that are stored separately per flight mode (drone vs fpv)
 const PER_MODE_SETTINGS_IDS = [
     'ctrl-pos-kp', 'ctrl-pos-ki', 'ctrl-pos-kd',
@@ -798,6 +807,7 @@ export class Controller {
         this._modePidSettings[this._currentMode] = this._snapshotPidSettings();
 
         return {
+            configVersion: CONFIG_VERSION,
             mapping: JSON.parse(JSON.stringify(this.mapping)),
             buttonMapping: JSON.parse(JSON.stringify(this.buttonMapping)),
             hidCalibration: JSON.parse(JSON.stringify(this._hidCalibration)),
@@ -810,6 +820,7 @@ export class Controller {
     }
 
     loadConfig(config) {
+        config = this._migrateConfig(config);
         if (config.mapping) this.mapping = config.mapping;
         if (config.buttonMapping) this.buttonMapping = config.buttonMapping;
         if (config.hidCalibration) this._hidCalibration = config.hidCalibration;
@@ -2060,11 +2071,38 @@ export class Controller {
         } catch (e) { /* ignore */ }
     }
 
+    _migrateConfig(config) {
+        if (!config || typeof config !== 'object') return {};
+        const version = Number(config.configVersion || 1);
+        if (version < 2 && config.settings && typeof config.settings === 'object') {
+            const settings = config.settings;
+            if (Number(settings['drone-max-speed']) === LEGACY_EASY_MAX_SPEED) {
+                settings['drone-max-speed'] = DEFAULT_EASY_MAX_SPEED;
+            }
+            if (Number(settings['drone-max-vspeed']) === LEGACY_EASY_MAX_VSPEED) {
+                settings['drone-max-vspeed'] = DEFAULT_EASY_MAX_VSPEED;
+            }
+        }
+        if (version < 3 && config.settings && typeof config.settings === 'object') {
+            const settings = config.settings;
+            const savedMaxSpeed = Number(settings['drone-max-speed']);
+            if (!Number.isFinite(savedMaxSpeed) || savedMaxSpeed <= PREVIOUS_EASY_MAX_SPEED) {
+                settings['drone-max-speed'] = DEFAULT_EASY_MAX_SPEED;
+            }
+            const savedDragArea = Number(settings['phys-drag-area']);
+            if (!Number.isFinite(savedDragArea) || savedDragArea === PREVIOUS_DRAG_AREA) {
+                settings['phys-drag-area'] = DEFAULT_DRAG_AREA;
+            }
+        }
+        config.configVersion = CONFIG_VERSION;
+        return config;
+    }
+
     _loadConfig() {
         try {
             const saved = localStorage.getItem('drone_sim_controller_config');
             if (saved) {
-                const config = JSON.parse(saved);
+                const config = this._migrateConfig(JSON.parse(saved));
                 if (config.mapping) {
                     for (const action of ACTIONS) {
                         if (config.mapping[action]) {

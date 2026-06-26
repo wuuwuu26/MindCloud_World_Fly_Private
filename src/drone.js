@@ -37,6 +37,9 @@ const DEG2RAD = Math.PI / 180;
 const RAD2DEG = 180 / Math.PI;
 const G = 9.81;              // gravitational acceleration (m/s²)
 const AIR_DENSITY = 1.225;   // kg/m³ at sea level
+const DRONE_BOOST_MULTIPLIER = 2.0;
+const FPV_BOOST_MULTIPLIER = 1.7;
+const DRONE_MAX_SUPPORTED_SPEED = 300 / 3.6; // 300 km/h in m/s
 
 // Reusable PlayCanvas math objects (avoid per-frame allocation)
 const _quat  = new pc.Quat();
@@ -75,17 +78,17 @@ export class Drone {
         this.mass        = 500;    // grams
         this.maxThrust   = 1000;   // grams-force
         this.dragCd      = 1.0;    // drag coefficient (dimensionless)
-        this.dragArea     = 0.01;  // frontal area (m²)
+        this.dragArea     = 0.0015; // frontal area (m²), tuned for high-speed quad flight
 
         this.maxPitchRate = 220;
         this.maxRollRate  = 220;
         this.maxYawRate   = 120;
         this.droneMaxYawRate = 60;  // Drone mode yaw rate limit (deg/s)
 
-        this.droneMaxAngle   = 30;
-        this.droneAngleRate  = 150;
-        this.droneMaxVSpeed  = 6.0;
-        this.droneMaxSpeed   = 9.0;
+        this.droneMaxAngle   = 42;
+        this.droneAngleRate  = 220;
+        this.droneMaxVSpeed  = 8.0;
+        this.droneMaxSpeed   = DRONE_MAX_SUPPORTED_SPEED;
 
         // Cascaded PID gains
         this.dronePosKp  = 2.0;
@@ -129,8 +132,15 @@ export class Drone {
         this.isColliding      = false;
         this.collisionIntensity = 0;
         this.speed            = 0;
+        this.groundSpeed      = 0;
+        this.airSpeed         = 0;
         this.verticalSpeed    = 0;
         this.thrustOutput     = 0;
+        this.throttlePercent  = 0;
+        this.commandedGroundSpeed = 0;
+        this.effectiveMaxSpeed = this.droneMaxSpeed;
+        this.boostActive      = false;
+        this.boostMultiplier  = 1.0;
 
         // Camera mount angle (degrees, positive = tilted up)
         // FPV mode: fixed during flight, set via settings (0..60)
@@ -158,6 +168,15 @@ export class Drone {
         this.isColliding = false;
         this.collisionIntensity = 0;
         this.thrustOutput = 0;
+        this.throttlePercent = 0;
+        this.speed = 0;
+        this.groundSpeed = 0;
+        this.airSpeed = 0;
+        this.verticalSpeed = 0;
+        this.commandedGroundSpeed = 0;
+        this.effectiveMaxSpeed = this.droneMaxSpeed;
+        this.boostActive = false;
+        this.boostMultiplier = 1.0;
         this._targetX = this._spawnX; this._targetY = this._spawnY; this._targetZ = this._spawnZ;
         this._posIntX = 0; this._posIntY = 0; this._posIntZ = 0;
         this._velIntX = 0; this._velIntY = 0; this._velIntZ = 0;
@@ -193,7 +212,9 @@ export class Drone {
         if (areaVal !== null)   this.dragArea = areaVal;
         if (radiusVal !== null) this.collisionRadius = radiusVal;
         if (sizeVal !== null)   this.droneSize = sizeVal;
-        if (droneMaxSpeedVal !== null)  this.droneMaxSpeed = droneMaxSpeedVal;
+        if (droneMaxSpeedVal !== null) {
+            this.droneMaxSpeed = Math.max(1, Math.min(DRONE_MAX_SUPPORTED_SPEED, droneMaxSpeedVal));
+        }
         if (droneMaxVSpeedVal !== null) this.droneMaxVSpeed = droneMaxVSpeedVal;
         if (modeEl) this.flightMode = modeEl.value;
         const mountAngle = v('cam-mount-angle');
@@ -283,7 +304,9 @@ export class Drone {
 
         // 6. Derive euler angles for HUD
         this._updateEulerFromQuat();
-        this.speed = Math.sqrt(this.vx * this.vx + this.vz * this.vz);
+        this.groundSpeed = Math.sqrt(this.vx * this.vx + this.vz * this.vz);
+        this.airSpeed = Math.sqrt(this.vx * this.vx + this.vy * this.vy + this.vz * this.vz);
+        this.speed = this.groundSpeed;
         this.verticalSpeed = this.vy;
     }
 
@@ -435,6 +458,11 @@ export class Drone {
 
     _updateDisarmed(dt) {
         this.thrustOutput = 0;
+        this.throttlePercent = 0;
+        this.commandedGroundSpeed = 0;
+        this.effectiveMaxSpeed = this.flightMode === 'drone' ? this.droneMaxSpeed : null;
+        this.boostActive = false;
+        this.boostMultiplier = 1.0;
         // Damp angular rates
         const damp = Math.exp(-this.angularDrag * dt);
         this.pitchRate *= damp;
@@ -456,8 +484,12 @@ export class Drone {
     }
 
     _controlFPV(dt, input) {
-        const boost = input.boost ? 1.5 : 1.0;
+        const boost = input.boost ? FPV_BOOST_MULTIPLIER : 1.0;
         const rates = input.rates || { roll: 1, pitch: 1, yaw: 1 };
+        this.boostActive = !!input.boost;
+        this.boostMultiplier = boost;
+        this.commandedGroundSpeed = 0;
+        this.effectiveMaxSpeed = null;
 
         // Sticks → target angular rates (body frame), scaled by rate
         const tPR = input.pitch * this.maxPitchRate * rates.pitch * boost;
@@ -483,11 +515,16 @@ export class Drone {
 
         // Throttle → thrust (in grams-force)
         this.thrustOutput = ((input.throttle + 1) * 0.5) * this.maxThrust * boost;
+        this.throttlePercent = this.maxThrust > 0
+            ? Math.max(0, Math.min(1, this.thrustOutput / (this.maxThrust * boost)))
+            : 0;
     }
 
     _controlDrone(dt, input) {
-        const boost = input.boost ? 1.5 : 1.0;
+        const boost = input.boost ? DRONE_BOOST_MULTIPLIER : 1.0;
         const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+        this.boostActive = !!input.boost;
+        this.boostMultiplier = boost;
 
         // ---- 1. Determine stick state and compute desired velocity ----
         // Get body-frame forward (-Z) and right (+X) in world XZ plane
@@ -498,7 +535,8 @@ export class Drone {
         const rightX = _v3.x, rightZ = _v3.z;
 
         const rates = input.rates || { roll: 1, pitch: 1, yaw: 1 };
-        const maxSpd = this.droneMaxSpeed * boost;
+        const maxSpd = Math.min(DRONE_MAX_SUPPORTED_SPEED, this.droneMaxSpeed * boost);
+        this.effectiveMaxSpeed = maxSpd;
 
         const horizActive = Math.abs(input.pitch) > 0.05 || Math.abs(input.roll) > 0.05;
         const vertActive  = Math.abs(input.throttle) > 0.05;
@@ -573,6 +611,7 @@ export class Drone {
             vDesX *= s; vDesZ *= s;
         }
         vDesY = clamp(vDesY, -this.droneMaxVSpeed * boost, this.droneMaxVSpeed * boost);
+        this.commandedGroundSpeed = Math.sqrt(vDesX * vDesX + vDesZ * vDesZ);
 
         // ---- 2. Inner loop: Velocity PID → desired tilt angles ----
         const maxAngle = this.droneMaxAngle;
@@ -662,6 +701,9 @@ export class Drone {
         cmdGf /= cosT;
 
         this.thrustOutput = clamp(cmdGf, 0, this.maxThrust * boost);
+        this.throttlePercent = this.maxThrust > 0
+            ? Math.max(0, Math.min(1, this.thrustOutput / (this.maxThrust * boost)))
+            : 0;
     }
 
     // ---- Collision ----

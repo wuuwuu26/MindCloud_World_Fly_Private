@@ -19,7 +19,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-	    <title>MindCloud World Fly</title>
+	    <title>Google 3D Tiles Flight</title>
 	    <link id="cesium-widgets-css" href="/ThirdParty/Cesium/Widgets/widgets.css" rel="stylesheet"
 	          onerror="this.onerror=null;this.href='https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Widgets/widgets.css';">
 	    <script>
@@ -97,7 +97,7 @@
 	        }
 	        #app-canvas { width: 100%; height: 100%; display: none; }
 
-        /* Logo (flight mode — bottom center) */
+        /* Lab logo (flight mode — bottom center) */
         #game-logo {
             position: absolute; bottom: 48px; left: 50%; transform: translateX(-50%);
             height: 5vh; z-index: 200; pointer-events: none;
@@ -155,11 +155,14 @@
         }
         #hud.hidden { display: none; }
         #hud-top-left { position: absolute; top: 16px; left: 16px; }
-        #hud-top-right { position: absolute; top: 16px; right: 16px; text-align: right; }
+        #hud-top-right { position: absolute; top: 54px; right: 16px; text-align: right; }
         #hud-bottom-center { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); text-align: center; }
         #hud-bottom-left { position: absolute; bottom: 16px; left: 16px; }
         .hud-label { color: #0a0; font-size: 11px; }
         .hud-value { color: #0f0; font-size: 16px; font-weight: bold; }
+        .hud-subvalue { color: #0f0; font-size: 13px; font-weight: bold; }
+        .hud-kmh { color: #8cff8c; font-size: 11px; font-weight: 600; }
+        .hud-hint { color: #8cff8c; font-size: 11px; margin-top: 6px; max-width: 260px; line-height: 1.35; }
         .hud-warn { color: #f44; }
 
         /* Race timing panel (F1 timing-tower style, left-middle). */
@@ -187,20 +190,15 @@
             border-bottom: 1px solid rgba(255, 255, 255, 0.10);
             margin-bottom: 6px;
         }
-        /* Logo is a 13259×7620 PNG (aspect ~1.74). The blue circle mark
-           occupies roughly x=[0.299..0.701] y=[0..0.701] of that canvas,
-           with incidental branding content filling the rest of the
-           frame. To prevent squishing (which an <img width=h=22> forced)
-           we render the logo as a background-image scaled and cropped
-           to the circle region only. */
         .hrp-logo {
             display: block;
             width: 34px; height: 34px;
             flex-shrink: 0;
-            background-image: url('asset/display/logo.png');
+            background-image: url('asset/display/zju-fast-lab-logo.jpg');
             background-repeat: no-repeat;
-            background-size: 212% 122%;
-            background-position: center 3px;
+            background-size: cover;
+            background-position: center;
+            border-radius: 3px;
             filter: drop-shadow(0 0 4px rgba(66, 114, 245, 0.55));
         }
         .hrp-header-text {
@@ -480,23 +478,23 @@
 	    <div id="cesium-container"></div>
 	    <canvas id="app-canvas"></canvas>
 
-    <!-- Logo -->
-    <img id="game-logo" src="asset/display/logo.png" alt="MindCloud World Fly">
+    <!-- Lab logo -->
+    <img id="game-logo" src="asset/display/zju-fast-lab-logo.jpg" alt="ZJU FAST Lab">
 
 	    <!-- Start overlay -->
 	    <div id="drop-zone">
-	        <img src="asset/display/logo.png" alt="MindCloud World Fly" style="height:15vh;margin-bottom:16px;background:transparent;">
+	        <img src="asset/display/zju-fast-lab-logo.jpg" alt="ZJU FAST Lab" style="height:15vh;margin-bottom:16px;background:transparent;">
 	        <p>Fly inside Google Photorealistic 3D Tiles with the existing FPV controller stack</p>
 	        <button id="file-picker-btn">Start Google 3D Tiles Flight</button>
 	        <p style="margin-top: 2em; font-size: 0.85em; color: #666;">
-	            Placement: search a city, click a 2D location, set altitude, press Enter. Flight: keyboard, gamepad, or RC transmitter.
+	            Placement: search a city, hold I and click a 2D location, set altitude, press O. Flight: keyboard, gamepad, or RC transmitter.
 	        </p>
 	    </div>
 
     <!-- Loading overlay -->
     <div id="loading-overlay">
         <div style="display:flex;flex-direction:column;align-items:center;">
-	            <img src="asset/display/logo.png" alt="MindCloud World Fly" style="height:15vh;margin-bottom:20px;background:transparent;">
+	            <img src="asset/display/zju-fast-lab-logo.jpg" alt="ZJU FAST Lab" style="height:15vh;margin-bottom:20px;background:transparent;">
 	            <div style="text-align:center; margin-bottom: 12px;">Loading Google 3D Tiles world...</div>
 	            <div id="loading-progress" style="color: #4272F5;"></div>
 	        </div>
@@ -521,8 +519,8 @@
                 <div id="spawn-altitude-hint">Scroll up or drag right = higher (+up). Scroll down or left = lower. Altitude cannot be negative.</div>
             </div>
 	        <div id="placement-instructions">
-	            Search top-right, then <b>left-click</b> tiles to set 2D lon/lat &nbsp;|&nbsp; <kbd>WASD</kbd> nudge horizontally<br>
-	            <kbd>Enter</kbd> confirm &amp; fly &nbsp;|&nbsp; <kbd>Shift</kbd> faster nudge
+	            Search top-right, then hold <kbd>I</kbd> + click tiles to set 2D lon/lat &nbsp;|&nbsp; <kbd>WASD</kbd> nudge horizontally<br>
+	            <kbd>O</kbd> confirm &amp; fly &nbsp;|&nbsp; <kbd>Shift</kbd> faster nudge
 	        </div>
 	    </div>
 
@@ -533,7 +531,7 @@
                 <button class="primary-action" data-view-choice="first">First Person</button>
                 <button class="primary-action" data-view-choice="third">Third Person</button>
             </div>
-            <div id="view-choice-hint">1 / Enter: First Person &nbsp;|&nbsp; 2: Third Person</div>
+            <div id="view-choice-hint">1 / O: First Person &nbsp;|&nbsp; 2: Third Person<br>Easy speed: ↑/↓ forward/back, Shift boost, Tab &gt; Easy Max Speed</div>
         </div>
     </div>
 
@@ -548,6 +546,9 @@
         <div id="hud-top-right">
             <div class="hud-label">GND SPD (m/s)</div>
             <div class="hud-value" id="hud-gspeed">0.0</div>
+            <div class="hud-label" style="margin-top:8px;" id="hud-speed-command-label">CMD / MAX (m/s)</div>
+            <div class="hud-subvalue" id="hud-speed-command">0.0 / 18.0</div>
+            <div class="hud-hint" id="hud-speed-hint"></div>
             <div class="hud-label" style="margin-top:8px;">FPS</div>
             <div class="hud-value" id="hud-fps">0</div>
         </div>
@@ -641,20 +642,20 @@
             </div>
         </div>
         <div style="font-size:12px;color:#8aa;margin:-2px 0 8px;line-height:1.4;">
-            Drone (Easy): W/S climbs or descends; ↑/↓ moves forward/back. FPV (Manual): W/S is motor thrust, so forward flight needs pitch.
+            Drone (Easy): ↑/↓ controls forward/back speed, W/S climbs or descends, Shift boosts lower speed settings up to the 300 km/h cap. FPV (Manual): W/S is motor thrust, so forward flight needs pitch.
         </div>
         <div class="setting-row">
-            <label>Easy Max Speed (m/s)</label>
+            <label>Easy Max Speed (m/s; 83.3 = 300 km/h)</label>
             <div class="controls">
-                <input type="range" id="drone-max-speed" min="1" max="25" value="9" step="0.5">
-                <input type="number" id="drone-max-speed-num" min="1" max="25" step="0.5" value="9" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+                <input type="range" id="drone-max-speed" min="1" max="83.333" value="83.333" step="0.1">
+                <input type="number" id="drone-max-speed-num" min="1" max="83.333" step="0.1" value="83.333" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
             </div>
         </div>
         <div class="setting-row">
             <label>Easy W/S Vertical (m/s)</label>
             <div class="controls">
-                <input type="range" id="drone-max-vspeed" min="1" max="15" value="6" step="0.5">
-                <input type="number" id="drone-max-vspeed-num" min="1" max="15" step="0.5" value="6" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+                <input type="range" id="drone-max-vspeed" min="1" max="25" value="8" step="0.5">
+                <input type="number" id="drone-max-vspeed-num" min="1" max="25" step="0.5" value="8" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
             </div>
         </div>
         <div class="setting-row">
@@ -765,8 +766,8 @@
         <div class="setting-row">
             <label>Frontal Area (m²)</label>
             <div class="controls">
-                <input type="range" id="phys-drag-area" min="0.001" max="0.1" value="0.01" step="0.001">
-                <input type="number" id="phys-drag-area-num" min="0.001" max="0.1" step="0.001" value="0.01" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+                <input type="range" id="phys-drag-area" min="0.001" max="0.1" value="0.0015" step="0.0005">
+                <input type="number" id="phys-drag-area-num" min="0.001" max="0.1" step="0.0005" value="0.0015" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
             </div>
         </div>
         <div class="setting-row">
@@ -792,6 +793,40 @@
         </div>
     </div>
 
-    <script type="module" src="src/main.js"></script>
+    <script>
+        (function () {
+            function showStartupError(error) {
+                var overlay = document.getElementById('loading-overlay');
+                var progress = document.getElementById('loading-progress');
+                var message = error && error.message ? error.message : String(error || 'unknown startup error');
+                if (overlay) overlay.classList.add('visible');
+                if (progress) {
+                    progress.textContent = 'Startup failed: ' + message;
+                    progress.style.color = '#f44';
+                }
+                console.error('[GoogleTilesFlight] startup failed:', error);
+            }
+
+            document.addEventListener('DOMContentLoaded', function () {
+                var btn = document.getElementById('file-picker-btn');
+                if (!btn || btn._flightFallbackBound) return;
+                btn._flightFallbackBound = true;
+                btn.addEventListener('click', function () {
+                    if (window.googleTilesFlightStart) {
+                        window.googleTilesFlightStart();
+                        return;
+                    }
+                    import('./src/main.js?v=20260626-startfix')
+                        .then(function (mod) {
+                            var start = window.googleTilesFlightStart || mod.startTilesMode;
+                            if (typeof start === 'function') start();
+                            else throw new Error('main module loaded without a start handler');
+                        })
+                        .catch(showStartupError);
+                }, true);
+            });
+        }());
+    </script>
+    <script type="module" src="src/main.js?v=20260626-startfix"></script>
 </body>
 </html>

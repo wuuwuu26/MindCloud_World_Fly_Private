@@ -16,7 +16,7 @@
 # limitations under the License.
 #
 
-"""Simple HTTP server for MindCloud World Fly.
+"""Simple HTTP server for the Google 3D Tiles flight app.
 
 Serves static files under the project root (same as `python -m http.server`)
 plus a small persistence API for per-scene gate-course paths, see the
@@ -210,7 +210,7 @@ if __name__ == '__main__':
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     os.makedirs(PATHS_DIR, exist_ok=True)
     with ReusableTCPServer(("", port), Handler) as httpd:
-        print(f"MindCloud World Fly running at http://localhost:{port}")
+        print(f"Google 3D Tiles Flight running at http://127.0.0.1:{port}")
         print(f"Gate-path persistence: {PATHS_DIR}")
         print("Press Ctrl+C to stop")
         try:
