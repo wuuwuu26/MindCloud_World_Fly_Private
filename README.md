@@ -5,9 +5,11 @@
 ## 环境要求
 
 - Docker Engine
+- Git
 - Chrome / Chromium
 - 浏览器可以访问 Cesium Ion 和 Google 3D Tiles
 - 本地开发模式需要 Python 3
+- 全景 RGB / DA360 深度需要 NVIDIA GPU、NVIDIA Container Toolkit、Python 3 + pip，以及可访问 Google Drive 的网络；默认下载 DA360 small 模型，large 模型约 1.3 GB
 
 ## 开始飞行
 
@@ -26,7 +28,7 @@ http://127.0.0.1:8080
 如果脚本没有执行权限，先运行：
 
 ```bash
-chmod +x launch.sh
+chmod +x launch.sh scripts/*.sh
 ```
 
 常用启动方式：
@@ -48,12 +50,72 @@ docker rm -f google-tiles-flight
 ./launch.sh --local
 ```
 
+## 全景 RGB / DA360 深度
+
+第一次使用 DA360 前，先安装模型下载工具：
+
+```bash
+python3 -m pip install --user gdown
+```
+
+先启动 DA360 GPU 推理服务：
+
+```bash
+./scripts/download_da360_model.sh
+DA360_DETACH=1 ./scripts/start_da360_api.sh
+curl http://127.0.0.1:5688/health
+```
+
+默认使用 `DA360_small`，实时性优先。需要更高精度时可以切换模型：
+
+```bash
+DA360_MODEL=large ./scripts/download_da360_model.sh
+DA360_MODEL=large DA360_DETACH=1 ./scripts/start_da360_api.sh
+```
+
+再启动飞行页面：
+
+```bash
+./launch.sh
+```
+
+进入飞行后，右下角会显示机头全景 RGB 和 DA360 深度。推理服务不在本机时：
+
+```text
+http://127.0.0.1:8080/?da360Url=http://<host>:5688/depth
+```
+
+右下角传感器默认用低分辨率隐藏渲染器采集全景，避免主飞行视角闪烁。需要调试频率和分辨率时：
+
+```text
+http://127.0.0.1:8080/?panoMs=1000&depthMs=1200&panoWidth=512&panoFace=128
+```
+
+停止 DA360 推理服务：
+
+```bash
+docker rm -f mindcloud-da360-api
+```
+
+从零重跑或模拟新用户 clone 后的首次运行：
+
+```bash
+docker rm -f google-tiles-flight mindcloud-da360-api 2>/dev/null || true
+rm -rf third_party/DA360
+./scripts/download_da360_model.sh
+DA360_DETACH=1 ./scripts/start_da360_api.sh
+curl http://127.0.0.1:5688/health
+./launch.sh --no-open --detach
+curl -I http://127.0.0.1:8080/
+curl -I http://127.0.0.1:8080/ThirdParty/Cesium/Cesium.js
+```
+
 进入页面后的飞行流程：
 
 1. 点 **Start Google 3D Tiles Flight**。
 2. 等页面进入 **PLACEMENT MODE**。
 3. 用 Cesium 搜索框搜索城市或地点，也可以用鼠标浏览场景。
-4. 按住 `Ctrl` 并点击建筑、道路或地面设置出生点；普通点击 / 拖拽只用于移动视角。
+4. 按住 `I` 并点击建筑、道路或地面设置出生点；普通点击 / 拖拽只用于移动视角。
 5. 用 `W/A/S/D` 微调位置，按住 `Shift` 可以加快微调。
 6. 在 **SPAWN ALTITUDE (m)** 设置出生高度。
 7. 按 `O` 确认出生点。

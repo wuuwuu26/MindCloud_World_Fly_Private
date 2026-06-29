@@ -165,6 +165,59 @@
         .hud-hint { color: #8cff8c; font-size: 11px; margin-top: 6px; max-width: 260px; line-height: 1.35; }
         .hud-warn { color: #f44; }
 
+        #panorama-sensor-panel {
+            position: absolute;
+            right: 16px;
+            bottom: 64px;
+            width: min(380px, calc(100vw - 32px));
+            z-index: 18;
+            display: none;
+            gap: 6px;
+            pointer-events: none;
+            font-family: 'Courier New', monospace;
+            color: #dbeafe;
+            filter: drop-shadow(0 10px 22px rgba(0, 0, 0, 0.55));
+        }
+        #panorama-sensor-panel.visible { display: grid; }
+        .panorama-pane {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 2 / 1;
+            overflow: hidden;
+            background: rgba(3, 7, 18, 0.92);
+            border: 1px solid rgba(125, 211, 252, 0.42);
+            border-radius: 6px;
+        }
+        .panorama-pane canvas,
+        .panorama-pane img {
+            width: 100%;
+            height: 100%;
+            display: block;
+            object-fit: cover;
+        }
+        .panorama-pane-header {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 5px 8px;
+            background: linear-gradient(180deg, rgba(0, 0, 0, 0.68), rgba(0, 0, 0, 0));
+            color: #f8fafc;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+            text-shadow: 0 1px 2px #000;
+        }
+        .panorama-status {
+            color: #7dd3fc;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0;
+        }
+
         /* Race timing panel (F1 timing-tower style, left-middle). */
         #hud-race-panel {
             position: absolute;
@@ -579,6 +632,23 @@
         <canvas id="osd-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
     </div>
 
+    <div id="panorama-sensor-panel" aria-label="Nose panorama sensing window">
+        <div class="panorama-pane">
+            <div class="panorama-pane-header">
+                <span>RGB PANORAMA</span>
+                <span class="panorama-status" id="panorama-rgb-status">idle</span>
+            </div>
+            <canvas id="panorama-rgb-canvas"></canvas>
+        </div>
+        <div class="panorama-pane">
+            <div class="panorama-pane-header">
+                <span>DA360 DEPTH</span>
+                <span class="panorama-status" id="panorama-depth-status">offline</span>
+            </div>
+            <img id="panorama-depth-image" alt="DA360 panoramic depth">
+        </div>
+    </div>
+
     <!-- Gear button -->
     <button id="gear-btn" title="Settings (Tab)">&#9881;</button>
 
@@ -598,6 +668,12 @@
             <label for="osd-toggle">FPV OSD Overlay</label>
             <div class="controls">
                 <input type="checkbox" id="osd-toggle" checked>
+            </div>
+        </div>
+        <div class="setting-row">
+            <label for="panorama-toggle">Nose Panorama Sensor</label>
+            <div class="controls">
+                <input type="checkbox" id="panorama-toggle" checked>
             </div>
         </div>
 
@@ -816,7 +892,7 @@
                         window.googleTilesFlightStart();
                         return;
                     }
-                    import('./src/main.js?v=20260626-startfix')
+                    import('./src/main.js?v=20260627-panorama')
                         .then(function (mod) {
                             var start = window.googleTilesFlightStart || mod.startTilesMode;
                             if (typeof start === 'function') start();
@@ -827,6 +903,6 @@
             });
         }());
     </script>
-    <script type="module" src="src/main.js?v=20260626-startfix"></script>
+    <script type="module" src="src/main.js?v=20260627-panorama"></script>
 </body>
 </html>

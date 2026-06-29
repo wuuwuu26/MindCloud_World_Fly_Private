@@ -421,7 +421,7 @@ run_docker() {
     ensure_port_available "$PORT"
 
     echo "Building Docker image: $IMAGE"
-    docker build -t "$IMAGE" "$SCRIPT_DIR"
+    docker build -f "$SCRIPT_DIR/Dockerfile.cesium" -t "$IMAGE" "$SCRIPT_DIR"
 
     local url="http://$LOOPBACK_HOST:$PORT"
 

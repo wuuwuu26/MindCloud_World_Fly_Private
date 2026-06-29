@@ -38,6 +38,14 @@ const DEFAULT_VIEW = {
 const CESIUM_DRONE_MODEL_URI = 'asset/models/CesiumDrone.glb';
 const HEIGHT_CACHE_TTL_MS = 140;
 const HEIGHT_CACHE_LIMIT = 256;
+const PANORAMA_FACE_DEFS = [
+    { name: 'front', dir: { x: 0, y: 0, z: -1 }, up: { x: 0, y: 1, z: 0 } },
+    { name: 'right', dir: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 } },
+    { name: 'back', dir: { x: 0, y: 0, z: 1 }, up: { x: 0, y: 1, z: 0 } },
+    { name: 'left', dir: { x: -1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 } },
+    { name: 'up', dir: { x: 0, y: 1, z: 0 }, up: { x: 0, y: 0, z: 1 } },
+    { name: 'down', dir: { x: 0, y: -1, z: 0 }, up: { x: 0, y: 0, z: -1 } },
+];
 
 function urlNumber(name, fallback) {
     try {
@@ -90,8 +98,33 @@ function normalize3(v) {
     return { x: v.x / len, y: v.y / len, z: v.z / len };
 }
 
+function cross3(a, b) {
+    return {
+        x: a.y * b.z - a.z * b.y,
+        y: a.z * b.x - a.x * b.z,
+        z: a.x * b.y - a.y * b.x,
+    };
+}
+
+function dot3(a, b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
 function negate3(v) {
     return { x: -v.x, y: -v.y, z: -v.z };
+}
+
+function clampPixel(value, maxExclusive) {
+    return Math.max(0, Math.min(maxExclusive - 1, value | 0));
+}
+
+function choosePanoramaFace(direction) {
+    const ax = Math.abs(direction.x);
+    const ay = Math.abs(direction.y);
+    const az = Math.abs(direction.z);
+    if (ay >= ax && ay >= az) return direction.y >= 0 ? 'up' : 'down';
+    if (ax >= az) return direction.x >= 0 ? 'right' : 'left';
+    return direction.z >= 0 ? 'back' : 'front';
 }
 
 function getTransformBasisLocal(transform) {
@@ -178,11 +211,22 @@ export class CesiumWorld {
             8192,
             2048
         ));
+        this.panoramaTileSSE = clampNumber(
+            urlNumber('panoramaTileSse', options.panoramaTileSSE ?? 56),
+            16,
+            128,
+            56
+        );
 
         this.Cesium = null;
         this.viewer = null;
         this.tileset = null;
         this.ready = false;
+        this._panoramaViewer = null;
+        this._panoramaTileset = null;
+        this._panoramaContainer = null;
+        this._panoramaInitPromise = null;
+        this._panoramaFaceSize = 0;
 
         this.originCartographic = null;
         this.enuToFixed = null;
@@ -235,6 +279,7 @@ export class CesiumWorld {
                 webgl: {
                     alpha: false,
                     antialias: false,
+                    preserveDrawingBuffer: true,
                     powerPreference: 'high-performance',
                     failIfMajorPerformanceCaveat: false,
                 },
@@ -672,6 +717,7 @@ export class CesiumWorld {
     }
 
     destroy() {
+        this._destroyPanoramaCaptureViewer();
         if (this.viewer && !this.viewer.isDestroyed()) {
             this.viewer.destroy();
         }
@@ -1061,6 +1107,367 @@ export class CesiumWorld {
             orientation: { direction, up },
         });
         this.viewer.scene.requestRender();
+    }
+
+    _componentDirectionToFixed(basis, component) {
+        const Cesium = this.Cesium;
+        const out = new Cesium.Cartesian3();
+        const tmp = new Cesium.Cartesian3();
+
+        Cesium.Cartesian3.multiplyByScalar(basis.right, component.x, out);
+        Cesium.Cartesian3.multiplyByScalar(basis.up, component.y, tmp);
+        Cesium.Cartesian3.add(out, tmp, out);
+        Cesium.Cartesian3.multiplyByScalar(basis.back, component.z, tmp);
+        Cesium.Cartesian3.add(out, tmp, out);
+        return Cesium.Cartesian3.normalize(out, out);
+    }
+
+    _renderViewerNow(viewer = this.viewer) {
+        if (!viewer || !viewer.scene) return;
+        try {
+            if (typeof viewer.render === 'function') {
+                viewer.render();
+                return;
+            }
+        } catch (_) {}
+        try {
+            if (typeof viewer.scene.render === 'function') {
+                viewer.scene.render(viewer.clock ? viewer.clock.currentTime : undefined);
+            }
+        } catch (_) {
+            viewer.scene.requestRender();
+        }
+    }
+
+    _renderNow() {
+        this._renderViewerNow(this.viewer);
+    }
+
+    _captureCanvasToFace(source, faceCanvas) {
+        if (!source || !source.width || !source.height) {
+            throw new Error('Cesium canvas is not ready for panorama capture.');
+        }
+        const faceSize = faceCanvas.width;
+        const side = Math.max(1, Math.min(source.width, source.height));
+        const sx = Math.max(0, (source.width - side) * 0.5);
+        const sy = Math.max(0, (source.height - side) * 0.5);
+        const ctx = faceCanvas.getContext('2d', { willReadFrequently: true });
+        ctx.clearRect(0, 0, faceSize, faceSize);
+        ctx.drawImage(source, sx, sy, side, side, 0, 0, faceSize, faceSize);
+        return ctx.getImageData(0, 0, faceSize, faceSize);
+    }
+
+    _captureCurrentCanvasToFace(faceCanvas) {
+        return this._captureCanvasToFace(this.viewer?.scene?.canvas, faceCanvas);
+    }
+
+    _stitchPanoramaFaces(faceData, width, height, faceSize) {
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const out = ctx.createImageData(width, height);
+        const outData = out.data;
+
+        for (let py = 0; py < height; py++) {
+            const phi = (0.5 - (py + 0.5) / height) * Math.PI;
+            const cosPhi = Math.cos(phi);
+            const sinPhi = Math.sin(phi);
+
+            for (let px = 0; px < width; px++) {
+                const theta = ((px + 0.5) / width - 0.5) * Math.PI * 2;
+                const dir = {
+                    x: Math.sin(theta) * cosPhi,
+                    y: sinPhi,
+                    z: -Math.cos(theta) * cosPhi,
+                };
+                const face = faceData.get(choosePanoramaFace(dir));
+                const denom = Math.max(1e-6, dot3(dir, face.dir));
+                const u = dot3(dir, face.right) / denom;
+                const v = dot3(dir, face.up) / denom;
+                const sx = clampPixel((u * 0.5 + 0.5) * faceSize, faceSize);
+                const sy = clampPixel((0.5 - v * 0.5) * faceSize, faceSize);
+                const srcIdx = (sy * faceSize + sx) * 4;
+                const dstIdx = (py * width + px) * 4;
+                outData[dstIdx] = face.image.data[srcIdx];
+                outData[dstIdx + 1] = face.image.data[srcIdx + 1];
+                outData[dstIdx + 2] = face.image.data[srcIdx + 2];
+                outData[dstIdx + 3] = 255;
+            }
+        }
+
+        ctx.putImageData(out, 0, 0);
+        return canvas;
+    }
+
+    _configurePanoramaTileset(tileset) {
+        if (!tileset) return;
+
+        const setIfPresent = (key, value) => {
+            if (key in tileset) tileset[key] = value;
+        };
+
+        setIfPresent('maximumScreenSpaceError', this.panoramaTileSSE);
+        setIfPresent('cullRequestsWhileMoving', true);
+        setIfPresent('cullRequestsWhileMovingMultiplier', 120);
+        setIfPresent('preloadWhenHidden', false);
+        setIfPresent('preloadFlightDestinations', false);
+        setIfPresent('foveatedScreenSpaceError', true);
+        setIfPresent('foveatedConeSize', 0.12);
+        setIfPresent('foveatedMinimumScreenSpaceErrorRelaxation', 8);
+        setIfPresent('foveatedTimeDelay', 0.02);
+        setIfPresent('dynamicScreenSpaceError', true);
+        setIfPresent('dynamicScreenSpaceErrorDensity', 0.0045);
+        setIfPresent('dynamicScreenSpaceErrorFactor', 16);
+        setIfPresent('loadSiblings', false);
+        setIfPresent('skipLevelOfDetail', true);
+        setIfPresent('baseScreenSpaceError', 2048);
+        setIfPresent('skipScreenSpaceErrorFactor', 24);
+        setIfPresent('skipLevels', 2);
+        setIfPresent('immediatelyLoadDesiredLevelOfDetail', false);
+        setIfPresent('preferLeaves', false);
+
+        if ('maximumMemoryUsage' in tileset) tileset.maximumMemoryUsage = 384;
+        if ('cacheBytes' in tileset) tileset.cacheBytes = 384 * 1024 * 1024;
+        if ('maximumCacheOverflowBytes' in tileset) tileset.maximumCacheOverflowBytes = 128 * 1024 * 1024;
+    }
+
+    _destroyPanoramaCaptureViewer() {
+        if (this._panoramaViewer && !this._panoramaViewer.isDestroyed()) {
+            this._panoramaViewer.destroy();
+        }
+        if (this._panoramaContainer && this._panoramaContainer.parentNode) {
+            this._panoramaContainer.parentNode.removeChild(this._panoramaContainer);
+        }
+        this._panoramaViewer = null;
+        this._panoramaTileset = null;
+        this._panoramaContainer = null;
+        this._panoramaInitPromise = null;
+        this._panoramaFaceSize = 0;
+    }
+
+    async _createPanoramaCaptureViewer(faceSize) {
+        const Cesium = this.Cesium || requireCesium();
+        this._destroyPanoramaCaptureViewer();
+
+        const container = document.createElement('div');
+        container.className = 'cesium-panorama-capture';
+        Object.assign(container.style, {
+            position: 'fixed',
+            left: '-10000px',
+            top: '0',
+            width: `${faceSize}px`,
+            height: `${faceSize}px`,
+            overflow: 'hidden',
+            pointerEvents: 'none',
+        });
+        document.body.appendChild(container);
+
+        const viewer = new Cesium.Viewer(container, {
+            animation: false,
+            timeline: false,
+            baseLayerPicker: false,
+            geocoder: false,
+            homeButton: false,
+            infoBox: false,
+            navigationHelpButton: false,
+            sceneModePicker: false,
+            selectionIndicator: false,
+            fullscreenButton: false,
+            scene3DOnly: true,
+            shouldAnimate: false,
+            globe: false,
+            skyAtmosphere: new Cesium.SkyAtmosphere(),
+            requestRenderMode: true,
+            useDefaultRenderLoop: false,
+            useBrowserRecommendedResolution: false,
+            orderIndependentTranslucency: false,
+            contextOptions: {
+                webgl: {
+                    alpha: false,
+                    antialias: false,
+                    preserveDrawingBuffer: true,
+                    powerPreference: 'high-performance',
+                    failIfMajorPerformanceCaveat: false,
+                },
+            },
+        });
+
+        viewer.scene.fog.enabled = false;
+        viewer.scene.highDynamicRange = false;
+        if ('resolutionScale' in viewer) viewer.resolutionScale = 1;
+        if ('msaaSamples' in viewer.scene) viewer.scene.msaaSamples = 1;
+        if (viewer.scene.postProcessStages && viewer.scene.postProcessStages.fxaa) {
+            viewer.scene.postProcessStages.fxaa.enabled = false;
+        }
+
+        const tileset = await this._createGoogleTileset(null);
+        this._configurePanoramaTileset(tileset);
+        viewer.scene.primitives.add(tileset);
+        viewer.resize();
+
+        this._panoramaViewer = viewer;
+        this._panoramaTileset = tileset;
+        this._panoramaContainer = container;
+        this._panoramaFaceSize = faceSize;
+        return viewer;
+    }
+
+    async _ensurePanoramaCaptureViewer(faceSize) {
+        if (
+            this._panoramaViewer &&
+            !this._panoramaViewer.isDestroyed() &&
+            this._panoramaFaceSize === faceSize
+        ) {
+            return this._panoramaViewer;
+        }
+
+        if (!this._panoramaInitPromise) {
+            this._panoramaInitPromise = this._createPanoramaCaptureViewer(faceSize)
+                .finally(() => {
+                    this._panoramaInitPromise = null;
+                });
+        }
+
+        return this._panoramaInitPromise;
+    }
+
+    _capturePanoramaWithViewer(viewer, transform, width, height, faceSize) {
+        const camera = viewer.camera;
+        const frustum = camera.frustum;
+        const saved = {
+            fov: frustum && 'fov' in frustum ? frustum.fov : undefined,
+            near: frustum && 'near' in frustum ? frustum.near : undefined,
+            far: frustum && 'far' in frustum ? frustum.far : undefined,
+        };
+        const faceData = new Map();
+        const basis = this.getTransformBasisFixed(transform);
+        const destination = this.localToCartesian(transform.position);
+
+        try {
+            if (frustum) {
+                if ('fov' in frustum) frustum.fov = Math.PI / 2;
+                if ('near' in frustum) frustum.near = 0.03;
+                if ('far' in frustum) frustum.far = 15000000;
+            }
+
+            for (const faceDef of PANORAMA_FACE_DEFS) {
+                camera.setView({
+                    destination,
+                    orientation: {
+                        direction: this._componentDirectionToFixed(basis, faceDef.dir),
+                        up: this._componentDirectionToFixed(basis, faceDef.up),
+                    },
+                });
+                viewer.scene.requestRender();
+                this._renderViewerNow(viewer);
+
+                const faceCanvas = document.createElement('canvas');
+                faceCanvas.width = faceSize;
+                faceCanvas.height = faceSize;
+                faceData.set(faceDef.name, {
+                    dir: faceDef.dir,
+                    up: faceDef.up,
+                    right: normalize3(cross3(faceDef.dir, faceDef.up)),
+                    image: this._captureCanvasToFace(viewer.scene.canvas, faceCanvas),
+                });
+            }
+
+            return this._stitchPanoramaFaces(faceData, width, height, faceSize);
+        } finally {
+            if (frustum) {
+                if (saved.fov !== undefined && 'fov' in frustum) frustum.fov = saved.fov;
+                if (saved.near !== undefined && 'near' in frustum) frustum.near = saved.near;
+                if (saved.far !== undefined && 'far' in frustum) frustum.far = saved.far;
+            }
+        }
+    }
+
+    async capturePanoramaAsync(transform, options = {}) {
+        if (!this.viewer || !this.ready || !transform || !transform.position || !transform.orientation) {
+            return null;
+        }
+
+        const width = Math.max(256, Math.round(options.width || 512));
+        const height = Math.max(128, Math.round(options.height || Math.round(width / 2)));
+        const faceSize = Math.max(96, Math.round(options.faceSize || 128));
+        const viewer = await this._ensurePanoramaCaptureViewer(faceSize);
+        return this._capturePanoramaWithViewer(viewer, transform, width, height, faceSize);
+    }
+
+    capturePanorama(transform, options = {}) {
+        if (!this.viewer || !this.ready || !transform || !transform.position || !transform.orientation) {
+            return null;
+        }
+
+        const Cesium = this.Cesium;
+        const width = Math.max(256, Math.round(options.width || 768));
+        const height = Math.max(128, Math.round(options.height || Math.round(width / 2)));
+        const faceSize = Math.max(96, Math.round(options.faceSize || 256));
+        const camera = this.viewer.camera;
+        const frustum = camera.frustum;
+        const saved = {
+            position: Cesium.Cartesian3.clone(camera.positionWC),
+            direction: Cesium.Cartesian3.clone(camera.directionWC),
+            up: Cesium.Cartesian3.clone(camera.upWC),
+            fov: frustum && 'fov' in frustum ? frustum.fov : undefined,
+            near: frustum && 'near' in frustum ? frustum.near : undefined,
+            far: frustum && 'far' in frustum ? frustum.far : undefined,
+            aircraftShows: this.aircraftEntities.map(entity => entity.show),
+        };
+        const faceData = new Map();
+        const basis = this.getTransformBasisFixed(transform);
+        const destination = this.localToCartesian(transform.position);
+
+        try {
+            for (const entity of this.aircraftEntities) entity.show = false;
+            if (frustum) {
+                if ('fov' in frustum) frustum.fov = Math.PI / 2;
+                if ('near' in frustum) frustum.near = 0.03;
+                if ('far' in frustum) frustum.far = 15000000;
+            }
+
+            for (const faceDef of PANORAMA_FACE_DEFS) {
+                camera.setView({
+                    destination,
+                    orientation: {
+                        direction: this._componentDirectionToFixed(basis, faceDef.dir),
+                        up: this._componentDirectionToFixed(basis, faceDef.up),
+                    },
+                });
+                this.viewer.scene.requestRender();
+                this._renderNow();
+
+                const faceCanvas = document.createElement('canvas');
+                faceCanvas.width = faceSize;
+                faceCanvas.height = faceSize;
+                faceData.set(faceDef.name, {
+                    dir: faceDef.dir,
+                    up: faceDef.up,
+                    right: normalize3(cross3(faceDef.dir, faceDef.up)),
+                    image: this._captureCurrentCanvasToFace(faceCanvas),
+                });
+            }
+
+            return this._stitchPanoramaFaces(faceData, width, height, faceSize);
+        } finally {
+            camera.setView({
+                destination: saved.position,
+                orientation: {
+                    direction: saved.direction,
+                    up: saved.up,
+                },
+            });
+            if (frustum) {
+                if (saved.fov !== undefined && 'fov' in frustum) frustum.fov = saved.fov;
+                if (saved.near !== undefined && 'near' in frustum) frustum.near = saved.near;
+                if (saved.far !== undefined && 'far' in frustum) frustum.far = saved.far;
+            }
+            this.aircraftEntities.forEach((entity, i) => {
+                entity.show = !!saved.aircraftShows[i];
+            });
+            this.viewer.scene.requestRender();
+        }
     }
 
     describeLocal(local) {

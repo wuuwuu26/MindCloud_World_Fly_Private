@@ -29,6 +29,7 @@ import { Controller } from './controller.js';
 import { Drone } from './drone.js';
 import { HUD } from './hud.js';
 import { OSD } from './osd.js';
+import { PanoramaSensor } from './panorama-sensor.js';
 
 let world = null;
 let collisionProvider = null;
@@ -36,6 +37,7 @@ let drone = null;
 let controller = null;
 let hud = null;
 let osd = null;
+let panoramaSensor = null;
 
 let mode = 'loading'; // loading | placement | view-select | flight
 let cameraMode = 'first'; // first | third
@@ -126,7 +128,7 @@ function showError(error) {
 }
 
 function initSubsystems() {
-    if (controller && drone && hud && osd) return;
+    if (controller && drone && hud && osd && panoramaSensor) return;
 
     if (!window.pc) {
         throw new Error('PlayCanvas math library is not loaded. Check network access to cdn.jsdelivr.net.');
@@ -136,6 +138,7 @@ function initSubsystems() {
     drone = new Drone();
     hud = new HUD();
     osd = new OSD('osd-canvas');
+    panoramaSensor = new PanoramaSensor();
 
     setupDisplaySettingsListeners();
 }
@@ -213,6 +216,7 @@ async function enterPlacementMode(autoPick = false) {
     world.setNativeCameraControls(true);
     world.showAircraft(false);
     thirdPersonPointer.active = false;
+    panoramaSensor?.setActive(false);
     hud?.hide();
     document.getElementById('game-logo')?.classList.remove('visible');
     document.getElementById('key-guide')?.classList.remove('visible');
@@ -320,6 +324,8 @@ function startFlight(viewMode = 'first') {
     document.getElementById('view-choice-overlay')?.classList.remove('visible');
     document.getElementById('game-logo')?.classList.add('visible');
     hud?.show();
+    panoramaSensor?.reset();
+    panoramaSensor?.setActive(true);
 
     const transform = drone.getBodyTransform ? drone.getBodyTransform() : drone.getCameraTransform();
     if (cameraMode === 'third') {
@@ -456,6 +462,7 @@ function updateFlight(dt) {
         world.setCameraFromDroneTransform(cameraTransform, getCameraHFov(now));
     }
 
+    panoramaSensor?.update(world, cameraTransform, now);
     hud?.update(drone, controller, null);
     applyDisplaySettings();
     osd?.update(drone, controller);
@@ -467,13 +474,16 @@ function applyDisplaySettings() {
     const cleanMode = cleanToggle ? cleanToggle.checked : false;
     const osdToggle = document.getElementById('osd-toggle');
     const osdEnabled = !cleanMode && (osdToggle ? osdToggle.checked : true) && mode === 'flight' && cameraMode === 'first';
-    const state = `${mode}|${cameraMode}|${cleanMode ? 1 : 0}|${osdEnabled ? 1 : 0}`;
+    const panoToggle = document.getElementById('panorama-toggle');
+    const panoEnabled = panoToggle ? panoToggle.checked : true;
+    const state = `${mode}|${cameraMode}|${cleanMode ? 1 : 0}|${osdEnabled ? 1 : 0}|${panoEnabled ? 1 : 0}`;
     if (state === lastDisplaySettingsState) return;
     lastDisplaySettingsState = state;
 
     if (osd) {
         osd.setEnabled(osdEnabled);
     }
+    panoramaSensor?.setActive(mode === 'flight');
 
     const logo = document.getElementById('game-logo');
     const keyGuide = document.getElementById('key-guide');
@@ -492,7 +502,7 @@ function applyDisplaySettings() {
 }
 
 function setupDisplaySettingsListeners() {
-    for (const id of ['clean-mode-toggle', 'osd-toggle']) {
+    for (const id of ['clean-mode-toggle', 'osd-toggle', 'panorama-toggle']) {
         const el = document.getElementById(id);
         if (!el || el._tilesDisplayBound) continue;
         el._tilesDisplayBound = true;
