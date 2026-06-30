@@ -632,7 +632,7 @@
         <canvas id="osd-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
     </div>
 
-    <div id="panorama-sensor-panel" aria-label="Nose panorama sensing window">
+    <div id="panorama-sensor-panel" aria-label="Nose 360 panorama sensing window">
         <div class="panorama-pane">
             <div class="panorama-pane-header">
                 <span>RGB PANORAMA</span>
@@ -671,7 +671,7 @@
             </div>
         </div>
         <div class="setting-row">
-            <label for="panorama-toggle">Nose Panorama Sensor</label>
+            <label for="panorama-toggle">Nose 360 Panorama Sensor</label>
             <div class="controls">
                 <input type="checkbox" id="panorama-toggle" checked>
             </div>
@@ -892,7 +892,7 @@
                         window.googleTilesFlightStart();
                         return;
                     }
-                    import('./src/main.js?v=20260627-panorama')
+                    import('./src/main.js?v=20260630-yopo360-realtime-fix2')
                         .then(function (mod) {
                             var start = window.googleTilesFlightStart || mod.startTilesMode;
                             if (typeof start === 'function') start();
@@ -903,6 +903,6 @@
             });
         }());
     </script>
-    <script type="module" src="src/main.js?v=20260627-panorama"></script>
+    <script type="module" src="src/main.js?v=20260630-yopo360-realtime-fix2"></script>
 </body>
 </html>

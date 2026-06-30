@@ -1,4 +1,7 @@
-FROM pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime
+ARG DA360_BASE_IMAGE=pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime
+FROM ${DA360_BASE_IMAGE}
+ARG DA360_SERVER_SHA=unknown
+LABEL mindcloud.da360.server_sha="${DA360_SERVER_SHA}"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \

@@ -462,7 +462,8 @@ function updateFlight(dt) {
         world.setCameraFromDroneTransform(cameraTransform, getCameraHFov(now));
     }
 
-    panoramaSensor?.update(world, cameraTransform, now);
+    const panoramaTransform = drone.getPanoramaTransform ? drone.getPanoramaTransform() : bodyTransform;
+    panoramaSensor?.update(world, panoramaTransform, now);
     hud?.update(drone, controller, null);
     applyDisplaySettings();
     osd?.update(drone, controller);

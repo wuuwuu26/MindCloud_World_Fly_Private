@@ -338,6 +338,28 @@ export class Drone {
         };
     }
 
+    getPanoramaTransform() {
+        _mat4.setTRS(pc.Vec3.ZERO, this.orientation, pc.Vec3.ONE);
+        _mat4.getZ(_v3);
+        _v3.mulScalar(-1);
+        const noseOffset = this.droneSize * 0.5;
+
+        return {
+            position: {
+                x: this.x + _v3.x * noseOffset,
+                y: this.y + _v3.y * noseOffset,
+                z: this.z + _v3.z * noseOffset
+            },
+            rotation: { x: this.pitch, y: this.yaw, z: this.roll },
+            orientation: {
+                x: this.orientation.x,
+                y: this.orientation.y,
+                z: this.orientation.z,
+                w: this.orientation.w
+            }
+        };
+    }
+
     getBodyTransform() {
         return {
             position: { x: this.x, y: this.y, z: this.z },

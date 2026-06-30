@@ -1,6 +1,7 @@
 function urlNumber(name, fallback, min, max) {
     try {
         const value = new URLSearchParams(window.location.search).get(name);
+        if (value == null || value === '') return fallback;
         const n = Number(value);
         if (!Number.isFinite(n)) return fallback;
         return Math.max(min, Math.min(max, n));
@@ -9,12 +10,38 @@ function urlNumber(name, fallback, min, max) {
     }
 }
 
-const CAPTURE_INTERVAL_MS = urlNumber('panoMs', 1000, 250, 10000);
-const DEPTH_INTERVAL_MS = urlNumber('depthMs', 1200, 250, 10000);
-const DA360_TIMEOUT_MS = 30000;
-const PANORAMA_WIDTH = Math.round(urlNumber('panoWidth', 512, 256, 1536));
-const PANORAMA_HEIGHT = Math.round(urlNumber('panoHeight', Math.round(PANORAMA_WIDTH / 2), 128, 768));
-const PANORAMA_FACE_SIZE = Math.round(urlNumber('panoFace', 128, 96, 512));
+function evenNumber(value) {
+    const n = Math.max(2, Math.round(value));
+    return n % 2 === 0 ? n : n + 1;
+}
+
+function urlString(name, fallback) {
+    try {
+        const value = new URLSearchParams(window.location.search).get(name);
+        return value == null || value === '' ? fallback : value;
+    } catch (_) {
+        return fallback;
+    }
+}
+
+const CAPTURE_INTERVAL_MS = urlNumber('panoMs', 30, 16, 10000);
+const DEPTH_INTERVAL_MS = urlNumber('depthMs', 600, 150, 10000);
+const DA360_TIMEOUT_MS = urlNumber('da360TimeoutMs', 12000, 1000, 60000);
+const PANORAMA_WIDTH = evenNumber(urlNumber('panoWidth', 672, 280, 5760));
+const PANORAMA_HEIGHT = evenNumber(urlNumber('panoHeight', Math.round(PANORAMA_WIDTH / 2), 140, 2880));
+const PANORAMA_FACE_SIZE = Math.round(urlNumber('panoFace', 256, 128, 2048));
+const PANORAMA_VERTICAL_FOV = urlNumber('panoVfov', 180, 30, 180);
+const PANORAMA_SETTLE_MS = urlNumber('panoSettleMs', 0, 0, 5200);
+const PANORAMA_JPEG_QUALITY = urlNumber('panoJpeg', 0.74, 0.35, 0.95);
+const projectionParam = urlString('panoProjection', 'hybrid');
+const PANORAMA_PROJECTION = (
+    projectionParam === 'cube' || projectionParam === 'side'
+) ? projectionParam : 'hybrid';
+const PANORAMA_FACE_FOV = urlNumber('panoFaceFov', 130, 90, 170);
+const PANORAMA_FACES_PER_STEP = Math.round(urlNumber('panoFacesPerStep', 1, 1, 6));
+const PANORAMA_REQUIRE_TILES = urlNumber('panoRequireTiles', 1, 0, 1) >= 0.5;
+const PANORAMA_TILE_QUIET_MS = urlNumber('panoTileQuietMs', 180, 0, 1500);
+const PANORAMA_TILE_MIN_SETTLE_MS = urlNumber('panoTileMinSettleMs', 80, 0, 1000);
 
 function getDA360Endpoint() {
     const params = new URLSearchParams(window.location.search);
@@ -31,6 +58,25 @@ function shortError(error) {
     return message.length > 52 ? `${message.slice(0, 49)}...` : message;
 }
 
+function isDrawableImageSource(value) {
+    if (!value || !Number.isFinite(value.width) || !Number.isFinite(value.height)) return false;
+    if (value.width <= 0 || value.height <= 0) return false;
+    if (typeof HTMLCanvasElement !== 'undefined' && value instanceof HTMLCanvasElement) return true;
+    if (typeof OffscreenCanvas !== 'undefined' && value instanceof OffscreenCanvas) return true;
+    if (typeof ImageBitmap !== 'undefined' && value instanceof ImageBitmap) return true;
+    if (typeof HTMLImageElement !== 'undefined' && value instanceof HTMLImageElement) return true;
+    if (typeof HTMLVideoElement !== 'undefined' && value instanceof HTMLVideoElement) return true;
+    return false;
+}
+
+function captureProgressStatus(result, hasRgb) {
+    const faceIndex = result && Number.isFinite(result.faceIndex) ? result.faceIndex : 0;
+    const faceCount = result && Number.isFinite(result.faces) ? result.faces : 6;
+    if (result && result.loadingTiles) return `tiles ${faceIndex + 1}/${faceCount}`;
+    if (hasRgb) return 'ready';
+    return `scanning ${faceIndex}/${faceCount}`;
+}
+
 export class PanoramaSensor {
     constructor() {
         this.panel = document.getElementById('panorama-sensor-panel');
@@ -42,9 +88,10 @@ export class PanoramaSensor {
         this.active = false;
         this.capturing = false;
         this.depthPending = false;
+        this.lastCaptureStartTime = 0;
         this.lastCaptureTime = 0;
         this.lastDepthTime = 0;
-        this.lastRgbDataUrl = null;
+        this.hasRgb = false;
         this.hasDepth = false;
 
         if (this.rgbCanvas) {
@@ -64,9 +111,10 @@ export class PanoramaSensor {
     reset() {
         this.capturing = false;
         this.depthPending = false;
+        this.lastCaptureStartTime = 0;
         this.lastCaptureTime = 0;
         this.lastDepthTime = 0;
-        this.lastRgbDataUrl = null;
+        this.hasRgb = false;
         this.hasDepth = false;
         if (this.rgbCanvas) this._drawPlaceholder(this.rgbCanvas, 'RGB PANORAMA');
         this._setDepthPlaceholder('DA360 offline');
@@ -77,7 +125,7 @@ export class PanoramaSensor {
         if (!this.panel || !this.rgbCanvas || !world || !transform) return;
         this._applyVisibility();
         if (!this._shouldRun()) return;
-        if (this.capturing || now - this.lastCaptureTime < CAPTURE_INTERVAL_MS) return;
+        if (this.capturing || now - this.lastCaptureStartTime < CAPTURE_INTERVAL_MS) return;
         this._capture(world, transform);
     }
 
@@ -143,28 +191,55 @@ export class PanoramaSensor {
 
     async _capture(world, transform) {
         this.capturing = true;
-        this._setStatus('capturing', this.depthPending ? 'inferring' : (this.lastRgbDataUrl ? 'ready' : 'offline'));
+        this.lastCaptureStartTime = performance.now();
+        this._setStatus('capturing', this.depthPending ? 'inferring' : (this.hasRgb ? 'ready' : 'offline'));
 
         try {
-            const capture = typeof world.capturePanoramaAsync === 'function'
+            const capture = typeof world.capturePanoramaIncrementalAsync === 'function'
+                ? world.capturePanoramaIncrementalAsync.bind(world)
+                : typeof world.capturePanoramaAsync === 'function'
                 ? world.capturePanoramaAsync.bind(world)
                 : world.capturePanorama.bind(world);
-            const panoCanvas = await capture(transform, {
+            const result = await capture(transform, {
                 width: PANORAMA_WIDTH,
                 height: PANORAMA_HEIGHT,
                 faceSize: PANORAMA_FACE_SIZE,
+                verticalFovDeg: PANORAMA_VERTICAL_FOV,
+                settleMs: PANORAMA_SETTLE_MS,
+                useGpuProjector: true,
+                projectionMode: PANORAMA_PROJECTION,
+                faceFovDeg: PANORAMA_FACE_FOV,
+                facesPerStep: PANORAMA_FACES_PER_STEP,
+                requireTiles: PANORAMA_REQUIRE_TILES,
+                tileQuietMs: PANORAMA_TILE_QUIET_MS,
+                tileMinSettleMs: PANORAMA_TILE_MIN_SETTLE_MS,
             });
-            if (!panoCanvas) throw new Error('panorama capture returned empty frame');
+            const structuredResult = result && typeof result === 'object' && 'complete' in result;
+            const panoCanvas = structuredResult ? result.canvas : result;
+            const complete = structuredResult ? result.complete !== false : true;
+            if (!isDrawableImageSource(panoCanvas)) {
+                if (!complete || structuredResult) {
+                    const rgbStatus = captureProgressStatus(result, this.hasRgb);
+                    this._setStatus(rgbStatus, this.depthPending ? 'inferring' : (this.hasDepth ? 'ready' : 'offline'));
+                    return;
+                }
+                throw new Error('panorama capture returned non-drawable frame');
+            }
+            if (!complete) {
+                const rgbStatus = captureProgressStatus(result, this.hasRgb);
+                this._setStatus(rgbStatus, this.depthPending ? 'inferring' : (this.hasDepth ? 'ready' : 'offline'));
+                return;
+            }
 
             const ctx = this.rgbCanvas.getContext('2d');
             ctx.clearRect(0, 0, this.rgbCanvas.width, this.rgbCanvas.height);
             ctx.drawImage(panoCanvas, 0, 0, this.rgbCanvas.width, this.rgbCanvas.height);
             this.lastCaptureTime = performance.now();
-            this.lastRgbDataUrl = this.rgbCanvas.toDataURL('image/jpeg', 0.82);
+            this.hasRgb = true;
             this._setStatus('ready', this.depthPending ? 'inferring' : (this.hasDepth ? 'ready' : 'offline'));
 
             if (!this.depthPending && this.lastCaptureTime - this.lastDepthTime >= DEPTH_INTERVAL_MS) {
-                this._requestDepth(this.lastRgbDataUrl);
+                this._requestDepth(this.rgbCanvas);
             }
         } catch (error) {
             console.warn('[PanoramaSensor] capture failed:', error);
@@ -174,7 +249,17 @@ export class PanoramaSensor {
         }
     }
 
-    async _requestDepth(imageDataUrl) {
+    _canvasToJpegBlob(canvas) {
+        return new Promise(resolve => {
+            if (!canvas || typeof canvas.toBlob !== 'function') {
+                resolve(null);
+                return;
+            }
+            canvas.toBlob(resolve, 'image/jpeg', PANORAMA_JPEG_QUALITY);
+        });
+    }
+
+    async _requestDepth(canvas) {
         this.depthPending = true;
         this._setStatus('ready', 'inferring');
         const controller = new AbortController();
@@ -182,10 +267,20 @@ export class PanoramaSensor {
         const started = performance.now();
 
         try {
+            const blob = await this._canvasToJpegBlob(canvas);
+            const headers = {};
+            let body;
+            if (blob) {
+                headers['Content-Type'] = blob.type || 'image/jpeg';
+                body = blob;
+            } else {
+                headers['Content-Type'] = 'application/json';
+                body = JSON.stringify({ image: canvas.toDataURL('image/jpeg', PANORAMA_JPEG_QUALITY) });
+            }
             const response = await fetch(this.endpoint, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ image: imageDataUrl }),
+                headers,
+                body,
                 signal: controller.signal,
             });
             if (!response.ok) {
