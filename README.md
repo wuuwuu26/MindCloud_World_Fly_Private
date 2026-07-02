@@ -85,11 +85,11 @@ DA360_MODEL=large DA360_DETACH=1 ./scripts/start_da360_api.sh
 http://127.0.0.1:8080/?da360Url=http://<host>:5688/depth
 ```
 
-右下角传感器默认从机头前置 360 相机位置采集实时 ERP 全景：前端按 `672x336` 输出、`256px` face 分帧扫描、WebGL `hybrid-ring` 投影；中间区域使用水平 ring 避免 cubemap 天顶/地底 face 在画面中间形成块状痕迹，上下极区再平滑切到 cap face 避免边缘像素拉长。每个 face 默认切相机后先等 `panoTileMinSettleMs=80`，再等隐藏 Cesium tileset 队列空并持续稳定 `panoTileQuietMs=180` 后才写入全景缓存；DA360 服务默认按 `DA360_INPUT_SCALE=0.65` 使用 `672x336` 输入推理，并且只在完整一轮 360 face 都稳定更新后触发。需要更高质量时把 scale 和分辨率调回官方 `1036x518`：
+右下角传感器默认从机头前置 360 相机位置采集实时 ERP 全景：前端按 `672x336` 输出、`256px` 采样视图、`32` 个水平 yaw 方向加上下 cap 做连续 sweep 拼接；ERP 像素射线采用 YOPO_360 同款 `yaw = pi - (u+0.5)/W*2pi`、`pitch = vfov/2 - (v+0.5)/H*vfov` 映射，并且每个像素只取最接近该射线的一个采样视图，避免多视图平均造成残影。YOPO body 的 forward/left/up 映射到本项目 body 分量为 `-Z/+X/+Y`；本项目 local 到 Cesium ENU 是 `x/z/y`，因此采样视图的屏幕右轴按 `up x dir` 处理。每个采样视图默认切相机后先等 `panoTileMinSettleMs=80`，再等隐藏 Cesium tileset 队列空并持续稳定 `panoTileQuietMs=180` 后才写入全景缓存；DA360 服务默认按 `DA360_INPUT_SCALE=0.65` 使用 `672x336` 输入推理，并且只在完整 360 sweep 稳定更新后触发。需要更高质量时把 scale 和分辨率调回官方 `1036x518`：
 
 ```text
 DA360_INPUT_SCALE=1.0 DA360_DETACH=1 ./scripts/start_da360_api.sh
-http://127.0.0.1:8080/?panoMs=1000&depthMs=1200&panoWidth=1036&panoFace=768&panoFaceFov=130&panoSettleMs=600
+http://127.0.0.1:8080/?panoMs=1000&depthMs=1200&panoWidth=1036&panoFace=768&panoSettleMs=600
 ```
 
 如果 Docker Hub 拉取 PyTorch 基础镜像时 TLS 超时，脚本会自动重试 `DA360_BUILD_RETRIES=3` 次。已有本地镜像包含当前 `scripts/da360_server.py` 时会直接复用；否则会停止，避免继续运行旧镜像。网络恢复后重跑即可，或用 `DA360_BASE_IMAGE=<本地或镜像源中的pytorch镜像>` 指定替代基础镜像。只有确认旧镜像可兼容但 SHA 检查无法通过时，才使用 `DA360_ALLOW_STALE_IMAGE=1`。

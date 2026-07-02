@@ -157,6 +157,11 @@ function writeBilinearPixel(image, sx, sy, outData, dstIdx) {
     outData[dstIdx + 3] = 255;
 }
 
+function smoothstep(edge0, edge1, x) {
+    const t = Math.max(0, Math.min(1, (x - edge0) / Math.max(1e-9, edge1 - edge0)));
+    return t * t * (3 - 2 * t);
+}
+
 function imageBlackRatio(image) {
     const data = image.data;
     const pixels = Math.max(1, image.width * image.height);
@@ -165,6 +170,43 @@ function imageBlackRatio(image) {
         if (data[i] < 10 && data[i + 1] < 10 && data[i + 2] < 10) black++;
     }
     return black / pixels;
+}
+
+function normalizeAngleRadians(angle) {
+    let a = angle;
+    while (a <= -Math.PI) a += Math.PI * 2;
+    while (a > Math.PI) a -= Math.PI * 2;
+    return a;
+}
+
+function buildPanoramaSweepFaceDefs(sideCount = 32) {
+    const count = Math.max(8, Math.min(64, Math.round(sideCount || 32)));
+    const faces = [];
+    for (let i = 0; i < count; i++) {
+        const yaw = normalizeAngleRadians((i / count) * Math.PI * 2);
+        faces.push({
+            name: `yaw${i}`,
+            kind: 'side',
+            yaw,
+            dir: {
+                x: Math.sin(yaw),
+                y: 0,
+                z: -Math.cos(yaw),
+            },
+            up: { x: 0, y: 1, z: 0 },
+        });
+    }
+    faces.push(
+        { name: 'up', kind: 'cap', dir: { x: 0, y: 1, z: 0 }, up: { x: 0, y: 0, z: 1 } },
+        { name: 'down', kind: 'cap', dir: { x: 0, y: -1, z: 0 }, up: { x: 0, y: 0, z: -1 } }
+    );
+    return faces;
+}
+
+function panoramaFaceRight(faceDef) {
+    // App-local x/y/z map to Cesium ENU as x/z/y, so the captured screen-right
+    // axis is up x direction in app component space.
+    return normalize3(cross3(faceDef.up, faceDef.dir));
 }
 
 function clonePanoramaTransform(transform) {
@@ -252,32 +294,47 @@ class PanoramaEquirectProjector {
             const float PI = 3.141592653589793;
             const float TWO_PI = 6.283185307179586;
 
-            vec2 faceUv(vec3 dir, vec3 faceDir, vec3 faceRight, vec3 faceUp) {
+            vec2 faceCoord(vec3 dir, vec3 faceDir, vec3 faceRight, vec3 faceUp) {
                 float denom = max(dot(dir, faceDir), 0.000001);
                 float u = dot(dir, faceRight) / (denom * u_tan_half_face_fov);
                 float v = dot(dir, faceUp) / (denom * u_tan_half_face_fov);
-                return clamp(vec2(u * 0.5 + 0.5, 0.5 - v * 0.5), 0.001, 0.999);
+                return vec2(u, v);
+            }
+
+            vec2 coordUv(vec2 coord) {
+                return clamp(vec2(coord.x * 0.5 + 0.5, 0.5 - coord.y * 0.5), 0.001, 0.999);
+            }
+
+            vec2 faceUv(vec3 dir, vec3 faceDir, vec3 faceRight, vec3 faceUp) {
+                return coordUv(faceCoord(dir, faceDir, faceRight, faceUp));
+            }
+
+            float faceBlendWeight(vec2 coord, float facing) {
+                if (facing <= 0.0) return 0.0;
+                float edge = max(abs(coord.x), abs(coord.y));
+                if (edge >= 1.0) return 0.0;
+                return 1.0 - smoothstep(0.72, 1.0, edge);
             }
 
             vec4 sampleXFace(vec3 dir) {
                 if (dir.x >= 0.0) {
-                    return texture2D(u_right, faceUv(dir, vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0)));
+                    return texture2D(u_right, faceUv(dir, vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, -1.0), vec3(0.0, 1.0, 0.0)));
                 }
-                return texture2D(u_left, faceUv(dir, vec3(-1.0, 0.0, 0.0), vec3(0.0, 0.0, -1.0), vec3(0.0, 1.0, 0.0)));
+                return texture2D(u_left, faceUv(dir, vec3(-1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0)));
             }
 
             vec4 sampleYFace(vec3 dir) {
                 if (dir.y >= 0.0) {
-                    return texture2D(u_up, faceUv(dir, vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0)));
+                    return texture2D(u_up, faceUv(dir, vec3(0.0, 1.0, 0.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0)));
                 }
-                return texture2D(u_down, faceUv(dir, vec3(0.0, -1.0, 0.0), vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, -1.0)));
+                return texture2D(u_down, faceUv(dir, vec3(0.0, -1.0, 0.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 0.0, -1.0)));
             }
 
             vec4 sampleZFace(vec3 dir) {
                 if (dir.z >= 0.0) {
-                    return texture2D(u_back, faceUv(dir, vec3(0.0, 0.0, 1.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0)));
+                    return texture2D(u_back, faceUv(dir, vec3(0.0, 0.0, 1.0), vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0)));
                 }
-                return texture2D(u_front, faceUv(dir, vec3(0.0, 0.0, -1.0), vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0)));
+                return texture2D(u_front, faceUv(dir, vec3(0.0, 0.0, -1.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0)));
             }
 
             vec4 sampleSideRing(vec3 dir) {
@@ -296,6 +353,75 @@ class PanoramaEquirectProjector {
                 return mix(side, cap, capBlend);
             }
 
+            vec4 sampleBlendedCube(vec3 dir) {
+                vec4 color = vec4(0.0);
+                float total = 0.0;
+                vec2 coord;
+                float facing;
+                float weight;
+
+                facing = dot(dir, vec3(0.0, 0.0, -1.0));
+                coord = faceCoord(dir, vec3(0.0, 0.0, -1.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0));
+                weight = faceBlendWeight(coord, facing);
+                if (weight > 0.0) {
+                    color += texture2D(u_front, coordUv(coord)) * weight;
+                    total += weight;
+                }
+
+                facing = dot(dir, vec3(1.0, 0.0, 0.0));
+                coord = faceCoord(dir, vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, -1.0), vec3(0.0, 1.0, 0.0));
+                weight = faceBlendWeight(coord, facing);
+                if (weight > 0.0) {
+                    color += texture2D(u_right, coordUv(coord)) * weight;
+                    total += weight;
+                }
+
+                facing = dot(dir, vec3(0.0, 0.0, 1.0));
+                coord = faceCoord(dir, vec3(0.0, 0.0, 1.0), vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0));
+                weight = faceBlendWeight(coord, facing);
+                if (weight > 0.0) {
+                    color += texture2D(u_back, coordUv(coord)) * weight;
+                    total += weight;
+                }
+
+                facing = dot(dir, vec3(-1.0, 0.0, 0.0));
+                coord = faceCoord(dir, vec3(-1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0));
+                weight = faceBlendWeight(coord, facing);
+                if (weight > 0.0) {
+                    color += texture2D(u_left, coordUv(coord)) * weight;
+                    total += weight;
+                }
+
+                facing = dot(dir, vec3(0.0, 1.0, 0.0));
+                coord = faceCoord(dir, vec3(0.0, 1.0, 0.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0));
+                weight = faceBlendWeight(coord, facing);
+                if (weight > 0.0) {
+                    color += texture2D(u_up, coordUv(coord)) * weight;
+                    total += weight;
+                }
+
+                facing = dot(dir, vec3(0.0, -1.0, 0.0));
+                coord = faceCoord(dir, vec3(0.0, -1.0, 0.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 0.0, -1.0));
+                weight = faceBlendWeight(coord, facing);
+                if (weight > 0.0) {
+                    color += texture2D(u_down, coordUv(coord)) * weight;
+                    total += weight;
+                }
+
+                if (total > 0.0001) {
+                    return color / total;
+                }
+
+                vec3 a = abs(dir);
+                if (a.y >= a.x && a.y >= a.z) {
+                    return sampleYFace(dir);
+                }
+                if (a.x >= a.z) {
+                    return sampleXFace(dir);
+                }
+                return sampleZFace(dir);
+            }
+
             vec4 sampleFace(vec3 dir) {
                 if (u_projection_mode == 1) {
                     return sampleSideRing(dir);
@@ -304,49 +430,7 @@ class PanoramaEquirectProjector {
                     return sampleHybridRing(dir);
                 }
 
-                vec3 a = abs(dir);
-                vec4 cx = sampleXFace(dir);
-                vec4 cy = sampleYFace(dir);
-                vec4 cz = sampleZFace(dir);
-                vec4 primary;
-                vec4 secondary;
-                float primaryAxis;
-                float secondaryAxis;
-
-                if (a.y >= a.x && a.y >= a.z) {
-                    primary = cy;
-                    primaryAxis = a.y;
-                    if (a.x >= a.z) {
-                        secondary = cx;
-                        secondaryAxis = a.x;
-                    } else {
-                        secondary = cz;
-                        secondaryAxis = a.z;
-                    }
-                } else if (a.x >= a.z) {
-                    primary = cx;
-                    primaryAxis = a.x;
-                    if (a.y >= a.z) {
-                        secondary = cy;
-                        secondaryAxis = a.y;
-                    } else {
-                        secondary = cz;
-                        secondaryAxis = a.z;
-                    }
-                } else {
-                    primary = cz;
-                    primaryAxis = a.z;
-                    if (a.y >= a.x) {
-                        secondary = cy;
-                        secondaryAxis = a.y;
-                    } else {
-                        secondary = cx;
-                        secondaryAxis = a.x;
-                    }
-                }
-
-                float seam = 1.0 - smoothstep(0.0, 0.08, primaryAxis - secondaryAxis);
-                return mix(primary, secondary, seam * 0.35);
+                return sampleBlendedCube(dir);
             }
 
             void main() {
@@ -355,7 +439,7 @@ class PanoramaEquirectProjector {
                 float cosPitch = cos(pitch);
                 float forward = cosPitch * cos(yaw);
                 float left = cosPitch * sin(yaw);
-                vec3 dir = normalize(vec3(-left, sin(pitch), -forward));
+                vec3 dir = normalize(vec3(left, sin(pitch), -forward));
                 gl_FragColor = sampleFace(dir);
             }
         `);
@@ -514,10 +598,10 @@ export class CesiumWorld {
             2048
         ));
         this.panoramaTileSSE = clampNumber(
-            urlNumber('panoramaTileSse', options.panoramaTileSSE ?? 48),
+            urlNumber('panoramaTileSse', options.panoramaTileSSE ?? 18),
             4,
             128,
-            48
+            18
         );
         this.panoramaSettleMs = clampNumber(
             urlNumber('panoSettleMs', options.panoramaSettleMs ?? 0),
@@ -1505,7 +1589,7 @@ export class CesiumWorld {
                 const forward = cosPitch * Math.cos(yaw);
                 const left = cosPitch * Math.sin(yaw);
                 const up = sinPitch;
-                const dirX = -left;
+                const dirX = left;
                 const dirY = up;
                 const dirZ = -forward;
                 const face = faceData.get(choosePanoramaFaceComponents(dirX, dirY, dirZ));
@@ -1516,6 +1600,94 @@ export class CesiumWorld {
                 const sy = (0.5 - v * 0.5) * (faceSize - 1);
                 const dstIdx = (py * width + px) * 4;
                 writeBilinearPixel(face.image, sx, sy, outData, dstIdx);
+            }
+        }
+
+        ctx.putImageData(out, 0, 0);
+        return canvas;
+    }
+
+    _stitchPanoramaSweepFaces(faceData, width, height, verticalFovDeg = 180, faceFovDeg = 100) {
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const out = ctx.createImageData(width, height);
+        const outData = out.data;
+        const verticalFov = Math.max(1, Math.min(180, verticalFovDeg || 180)) * Math.PI / 180;
+        const tanHalfFaceFov = Math.tan(Math.max(45, Math.min(130, faceFovDeg || 100)) * Math.PI / 360);
+        const faces = Array.from(faceData.values());
+
+        for (let py = 0; py < height; py++) {
+            const pitch = 0.5 * verticalFov - ((py + 0.5) / height) * verticalFov;
+            const cosPitch = Math.cos(pitch);
+            const sinPitch = Math.sin(pitch);
+
+            for (let px = 0; px < width; px++) {
+                const yaw = Math.PI - ((px + 0.5) / width) * Math.PI * 2;
+                const forward = cosPitch * Math.cos(yaw);
+                const left = cosPitch * Math.sin(yaw);
+                const dirX = left;
+                const dirY = sinPitch;
+                const dirZ = -forward;
+
+                let bestFace = null;
+                let bestScore = -Infinity;
+                let bestU = 0;
+                let bestV = 0;
+
+                for (const face of faces) {
+                    const denom = dirX * face.dir.x + dirY * face.dir.y + dirZ * face.dir.z;
+                    if (denom <= 1e-6) continue;
+
+                    const u = (dirX * face.right.x + dirY * face.right.y + dirZ * face.right.z) / (denom * tanHalfFaceFov);
+                    const v = (dirX * face.up.x + dirY * face.up.y + dirZ * face.up.z) / (denom * tanHalfFaceFov);
+                    const edge = Math.max(Math.abs(u), Math.abs(v));
+                    if (edge >= 1) continue;
+
+                    let score = 1 - edge;
+                    if (face.kind === 'side') {
+                        score *= 1 - smoothstep(0.82, 0.96, Math.abs(dirY));
+                    } else {
+                        score *= smoothstep(0.45, 0.82, Math.abs(dirY));
+                    }
+                    if (score <= bestScore) continue;
+                    bestScore = score;
+                    bestFace = face;
+                    bestU = u;
+                    bestV = v;
+                }
+
+                const dstIdx = (py * width + px) * 4;
+                if (bestFace) {
+                    const sx = (bestU * 0.5 + 0.5) * (bestFace.image.width - 1);
+                    const sy = (0.5 - bestV * 0.5) * (bestFace.image.height - 1);
+                    writeBilinearPixel(bestFace.image, sx, sy, outData, dstIdx);
+                    continue;
+                }
+
+                let fallback = null;
+                let fallbackDot = -Infinity;
+                for (const face of faces) {
+                    const d = dirX * face.dir.x + dirY * face.dir.y + dirZ * face.dir.z;
+                    if (d > fallbackDot) {
+                        fallbackDot = d;
+                        fallback = face;
+                    }
+                }
+                if (fallback) {
+                    const denom = Math.max(1e-6, dirX * fallback.dir.x + dirY * fallback.dir.y + dirZ * fallback.dir.z);
+                    const u = (dirX * fallback.right.x + dirY * fallback.right.y + dirZ * fallback.right.z) / (denom * tanHalfFaceFov);
+                    const v = (dirX * fallback.up.x + dirY * fallback.up.y + dirZ * fallback.up.z) / (denom * tanHalfFaceFov);
+                    const sx = (u * 0.5 + 0.5) * (fallback.image.width - 1);
+                    const sy = (0.5 - v * 0.5) * (fallback.image.height - 1);
+                    writeBilinearPixel(fallback.image, sx, sy, outData, dstIdx);
+                } else {
+                    outData[dstIdx] = 0;
+                    outData[dstIdx + 1] = 0;
+                    outData[dstIdx + 2] = 0;
+                    outData[dstIdx + 3] = 255;
+                }
             }
         }
 
@@ -1538,13 +1710,13 @@ export class CesiumWorld {
         setIfPresent('dynamicScreenSpaceError', true);
         setIfPresent('dynamicScreenSpaceErrorDensity', 0.004);
         setIfPresent('dynamicScreenSpaceErrorFactor', 12);
-        setIfPresent('loadSiblings', false);
-        setIfPresent('skipLevelOfDetail', true);
+        setIfPresent('loadSiblings', true);
+        setIfPresent('skipLevelOfDetail', false);
         setIfPresent('baseScreenSpaceError', 1024);
         setIfPresent('skipScreenSpaceErrorFactor', 12);
         setIfPresent('skipLevels', 1);
-        setIfPresent('immediatelyLoadDesiredLevelOfDetail', false);
-        setIfPresent('preferLeaves', false);
+        setIfPresent('immediatelyLoadDesiredLevelOfDetail', true);
+        setIfPresent('preferLeaves', true);
 
         if ('maximumMemoryUsage' in tileset) tileset.maximumMemoryUsage = 768;
         if ('cacheBytes' in tileset) tileset.cacheBytes = 768 * 1024 * 1024;
@@ -1751,6 +1923,211 @@ export class CesiumWorld {
         return image || this._captureCanvasToFace(viewer.scene.canvas, faceCanvas);
     }
 
+    async _capturePanoramaSweepWithViewerAsync(viewer, transform, width, height, faceSize, verticalFovDeg = 180, options = {}) {
+        const camera = viewer.camera;
+        const frustum = camera.frustum;
+        const saved = {
+            fov: frustum && 'fov' in frustum ? frustum.fov : undefined,
+            near: frustum && 'near' in frustum ? frustum.near : undefined,
+            far: frustum && 'far' in frustum ? frustum.far : undefined,
+        };
+        const sideCount = Math.max(8, Math.min(64, Math.round(Number(options.sweepFaces) || 32)));
+        const segmentFov = 360 / sideCount;
+        const faceFovDeg = Math.max(
+            Math.min(120, segmentFov * 2.2),
+            Math.min(120, Math.max(90, Number(options.faceFovDeg) || 100))
+        );
+        const faceDefs = buildPanoramaSweepFaceDefs(sideCount);
+        const faceData = new Map();
+        const basis = this.getTransformBasisFixed(transform);
+        const destination = this.localToCartesian(transform.position);
+        const settleMs = Math.max(0, Number.isFinite(options.settleMs) ? options.settleMs : this.panoramaSettleMs);
+
+        try {
+            if (frustum) {
+                if ('fov' in frustum) frustum.fov = faceFovDeg * Math.PI / 180;
+                if ('near' in frustum) frustum.near = 0.03;
+                if ('far' in frustum) frustum.far = 15000000;
+            }
+
+            for (const faceDef of faceDefs) {
+                camera.setView({
+                    destination,
+                    orientation: {
+                        direction: this._componentDirectionToFixed(basis, faceDef.dir),
+                        up: this._componentDirectionToFixed(basis, faceDef.up),
+                    },
+                });
+                viewer.scene.requestRender();
+                this._renderViewerNow(viewer);
+                if (settleMs > 0) {
+                    await this._settlePanoramaCaptureFace(viewer, settleMs);
+                }
+
+                const faceCanvas = document.createElement('canvas');
+                faceCanvas.width = faceSize;
+                faceCanvas.height = faceSize;
+                faceData.set(faceDef.name, {
+                    name: faceDef.name,
+                    kind: faceDef.kind,
+                    dir: faceDef.dir,
+                    up: faceDef.up,
+                    right: panoramaFaceRight(faceDef),
+                    image: await this._capturePanoramaFaceImage(viewer, faceCanvas, faceDef.name),
+                });
+            }
+
+            return this._stitchPanoramaSweepFaces(faceData, width, height, verticalFovDeg, faceFovDeg);
+        } finally {
+            if (frustum) {
+                if (saved.fov !== undefined && 'fov' in frustum) frustum.fov = saved.fov;
+                if (saved.near !== undefined && 'near' in frustum) frustum.near = saved.near;
+                if (saved.far !== undefined && 'far' in frustum) frustum.far = saved.far;
+            }
+        }
+    }
+
+    async _capturePanoramaSweepIncrementalAsync(viewer, transform, width, height, faceSize, verticalFovDeg = 180, options = {}) {
+        const sideCount = Math.max(8, Math.min(64, Math.round(Number(options.sweepFaces) || 32)));
+        const segmentFov = 360 / sideCount;
+        const faceFovDeg = Math.max(
+            Math.min(120, segmentFov * 2.2),
+            Math.min(120, Math.max(90, Number(options.faceFovDeg) || 100))
+        );
+        const faceDefs = buildPanoramaSweepFaceDefs(sideCount);
+        const facesPerStep = Math.max(1, Math.min(faceDefs.length, Math.round(Number(options.facesPerStep) || 1)));
+        const settleMs = Math.max(0, Number.isFinite(options.settleMs) ? options.settleMs : this.panoramaSettleMs);
+        const requireTiles = options.requireTiles !== false;
+        const tileQuietMs = Math.max(0, Math.min(1500, Number(options.tileQuietMs) || 180));
+        const tileMinSettleMs = Math.max(0, Math.min(1000, Number(options.tileMinSettleMs) || 80));
+        const key = `sweep|${sideCount}|${faceSize}|${faceFovDeg}|${verticalFovDeg}`;
+        let state = this._panoramaScanState;
+        if (!state || state.key !== key) {
+            state = {
+                key,
+                index: 0,
+                completedCycles: 0,
+                cycleTransform: clonePanoramaTransform(transform),
+                faceData: new Map(),
+                tileIdleSince: null,
+                tileFaceKey: null,
+                tileFaceSince: null,
+            };
+            this._panoramaScanState = state;
+        }
+        if (!state.cycleTransform || state.index >= faceDefs.length) {
+            state.cycleTransform = clonePanoramaTransform(transform);
+            state.index = 0;
+            state.faceData = new Map();
+            state.tileIdleSince = null;
+            state.tileFaceKey = null;
+            state.tileFaceSince = null;
+        }
+
+        const camera = viewer.camera;
+        const frustum = camera.frustum;
+        const saved = {
+            fov: frustum && 'fov' in frustum ? frustum.fov : undefined,
+            near: frustum && 'near' in frustum ? frustum.near : undefined,
+            far: frustum && 'far' in frustum ? frustum.far : undefined,
+        };
+        const basis = this.getTransformBasisFixed(state.cycleTransform);
+        const destination = this.localToCartesian(state.cycleTransform.position);
+        let complete = false;
+
+        try {
+            if (frustum) {
+                if ('fov' in frustum) frustum.fov = faceFovDeg * Math.PI / 180;
+                if ('near' in frustum) frustum.near = 0.03;
+                if ('far' in frustum) frustum.far = 15000000;
+            }
+
+            for (let i = 0; i < facesPerStep; i++) {
+                const faceDef = faceDefs[state.index];
+                camera.setView({
+                    destination,
+                    orientation: {
+                        direction: this._componentDirectionToFixed(basis, faceDef.dir),
+                        up: this._componentDirectionToFixed(basis, faceDef.up),
+                    },
+                });
+                viewer.scene.requestRender();
+                this._renderViewerNow(viewer);
+                if (settleMs > 0) {
+                    await this._settlePanoramaCaptureFace(viewer, settleMs);
+                }
+
+                const faceKey = `${state.completedCycles}|${state.index}|${faceDef.name}`;
+                if (requireTiles && !this._panoramaTilesStable(state, tileQuietMs, tileMinSettleMs, faceKey)) {
+                    return {
+                        canvas: null,
+                        complete: false,
+                        ready: state.completedCycles > 0,
+                        loadingTiles: true,
+                        faceIndex: state.index,
+                        faces: faceDefs.length,
+                        pending: this._panoramaTileLoadPending,
+                        processing: this._panoramaTileLoadProcessing,
+                        projectionMode: 'sweep',
+                    };
+                }
+
+                const faceCanvas = document.createElement('canvas');
+                faceCanvas.width = faceSize;
+                faceCanvas.height = faceSize;
+                state.faceData.set(faceDef.name, {
+                    name: faceDef.name,
+                    kind: faceDef.kind,
+                    dir: faceDef.dir,
+                    up: faceDef.up,
+                    right: panoramaFaceRight(faceDef),
+                    image: this._captureCanvasToFace(viewer.scene.canvas, faceCanvas),
+                });
+                state.tileIdleSince = null;
+
+                state.index++;
+                if (state.index >= faceDefs.length) {
+                    state.index = 0;
+                    state.completedCycles++;
+                    state.cycleTransform = null;
+                    state.tileIdleSince = null;
+                    state.tileFaceKey = null;
+                    state.tileFaceSince = null;
+                    complete = true;
+                    break;
+                }
+            }
+        } finally {
+            if (frustum) {
+                if (saved.fov !== undefined && 'fov' in frustum) frustum.fov = saved.fov;
+                if (saved.near !== undefined && 'near' in frustum) frustum.near = saved.near;
+                if (saved.far !== undefined && 'far' in frustum) frustum.far = saved.far;
+            }
+        }
+
+        if (!complete) {
+            return {
+                canvas: null,
+                complete: false,
+                ready: state.completedCycles > 0,
+                faceIndex: state.index,
+                faces: faceDefs.length,
+                projectionMode: 'sweep',
+            };
+        }
+
+        const canvas = this._stitchPanoramaSweepFaces(state.faceData, width, height, verticalFovDeg, faceFovDeg);
+        state.faceData = new Map();
+        return {
+            canvas,
+            complete: true,
+            ready: !!canvas,
+            cycle: state.completedCycles,
+            faces: faceDefs.length,
+            projectionMode: 'sweep',
+        };
+    }
+
     async _capturePanoramaWithViewerAsync(viewer, transform, width, height, faceSize, verticalFovDeg = 180, options = {}) {
         const camera = viewer.camera;
         const frustum = camera.frustum;
@@ -1762,14 +2139,33 @@ export class CesiumWorld {
         const faceData = new Map();
         const basis = this.getTransformBasisFixed(transform);
         const destination = this.localToCartesian(transform.position);
-        const projector = options.useGpuProjector === false ? null : this._getPanoramaProjector();
         const settleMs = Math.max(0, Number.isFinite(options.settleMs) ? options.settleMs : this.panoramaSettleMs);
         const requestedProjectionMode = (
-            options.projectionMode === 'cube' || options.projectionMode === 'side'
-        ) ? options.projectionMode : 'hybrid';
+            options.projectionMode === 'sweep' ||
+            options.projectionMode === 'cube' ||
+            options.projectionMode === 'side' ||
+            options.projectionMode === 'hybrid'
+        ) ? options.projectionMode : 'sweep';
+        if (requestedProjectionMode === 'sweep') {
+            return this._capturePanoramaSweepWithViewerAsync(
+                viewer,
+                transform,
+                width,
+                height,
+                faceSize,
+                verticalFovDeg,
+                {
+                    settleMs,
+                    faceFovDeg: options.faceFovDeg,
+                    sweepFaces: options.sweepFaces,
+                }
+            );
+        }
+
+        const projector = options.useGpuProjector === false ? null : this._getPanoramaProjector();
         const projectionMode = projector ? requestedProjectionMode : 'cube';
         const faceFovDeg = projectionMode === 'cube'
-            ? 90
+            ? (projector ? Math.max(90, Math.min(120, Number(options.faceFovDeg) || 100)) : 90)
             : Math.max(90, Math.min(170, Number(options.faceFovDeg) || 130));
         const faceDefs = projectionMode === 'side' ? PANORAMA_SIDE_FACE_DEFS : PANORAMA_FACE_DEFS;
 
@@ -1805,7 +2201,7 @@ export class CesiumWorld {
                 faceData.set(faceDef.name, {
                     dir: faceDef.dir,
                     up: faceDef.up,
-                    right: normalize3(cross3(faceDef.dir, faceDef.up)),
+                    right: panoramaFaceRight(faceDef),
                     image: await this._capturePanoramaFaceImage(viewer, faceCanvas, faceDef.name),
                 });
             }
@@ -1840,6 +2236,7 @@ export class CesiumWorld {
             useGpuProjector: options.useGpuProjector !== false,
             projectionMode: options.projectionMode,
             faceFovDeg: options.faceFovDeg,
+            sweepFaces: options.sweepFaces,
         });
     }
 
@@ -1853,6 +2250,32 @@ export class CesiumWorld {
         const faceSize = Math.max(96, Math.round(options.faceSize || 128));
         const verticalFovDeg = Math.max(1, Math.min(180, Number(options.verticalFovDeg) || 180));
         const viewer = await this._ensurePanoramaCaptureViewer(faceSize);
+        const requestedProjectionMode = (
+            options.projectionMode === 'sweep' ||
+            options.projectionMode === 'cube' ||
+            options.projectionMode === 'side' ||
+            options.projectionMode === 'hybrid'
+        ) ? options.projectionMode : 'sweep';
+        if (requestedProjectionMode === 'sweep') {
+            return this._capturePanoramaSweepIncrementalAsync(
+                viewer,
+                transform,
+                width,
+                height,
+                faceSize,
+                verticalFovDeg,
+                {
+                    settleMs: Number.isFinite(options.settleMs) ? options.settleMs : this.panoramaSettleMs,
+                    faceFovDeg: options.faceFovDeg,
+                    sweepFaces: options.sweepFaces,
+                    facesPerStep: options.facesPerStep,
+                    requireTiles: options.requireTiles,
+                    tileQuietMs: options.tileQuietMs,
+                    tileMinSettleMs: options.tileMinSettleMs,
+                }
+            );
+        }
+
         const projector = options.useGpuProjector === false ? null : this._getPanoramaProjector();
 
         if (!projector) {
@@ -1873,12 +2296,9 @@ export class CesiumWorld {
             return { canvas, complete: true, ready: !!canvas, fallback: true };
         }
 
-        const requestedProjectionMode = (
-            options.projectionMode === 'cube' || options.projectionMode === 'side'
-        ) ? options.projectionMode : 'hybrid';
         const projectionMode = requestedProjectionMode;
         const faceFovDeg = projectionMode === 'cube'
-            ? 90
+            ? Math.max(90, Math.min(120, Number(options.faceFovDeg) || 100))
             : Math.max(90, Math.min(170, Number(options.faceFovDeg) || 130));
         const faceDefs = projectionMode === 'side' ? PANORAMA_SIDE_FACE_DEFS : PANORAMA_FACE_DEFS;
         const facesPerStep = Math.max(1, Math.min(faceDefs.length, Math.round(Number(options.facesPerStep) || 1)));
@@ -2056,7 +2476,7 @@ export class CesiumWorld {
                 faceData.set(faceDef.name, {
                     dir: faceDef.dir,
                     up: faceDef.up,
-                    right: normalize3(cross3(faceDef.dir, faceDef.up)),
+                    right: panoramaFaceRight(faceDef),
                     image: this._captureCurrentCanvasToFace(faceCanvas),
                 });
             }

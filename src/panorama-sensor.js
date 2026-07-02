@@ -15,15 +15,6 @@ function evenNumber(value) {
     return n % 2 === 0 ? n : n + 1;
 }
 
-function urlString(name, fallback) {
-    try {
-        const value = new URLSearchParams(window.location.search).get(name);
-        return value == null || value === '' ? fallback : value;
-    } catch (_) {
-        return fallback;
-    }
-}
-
 const CAPTURE_INTERVAL_MS = urlNumber('panoMs', 30, 16, 10000);
 const DEPTH_INTERVAL_MS = urlNumber('depthMs', 600, 150, 10000);
 const DA360_TIMEOUT_MS = urlNumber('da360TimeoutMs', 12000, 1000, 60000);
@@ -33,11 +24,12 @@ const PANORAMA_FACE_SIZE = Math.round(urlNumber('panoFace', 256, 128, 2048));
 const PANORAMA_VERTICAL_FOV = urlNumber('panoVfov', 180, 30, 180);
 const PANORAMA_SETTLE_MS = urlNumber('panoSettleMs', 0, 0, 5200);
 const PANORAMA_JPEG_QUALITY = urlNumber('panoJpeg', 0.74, 0.35, 0.95);
-const projectionParam = urlString('panoProjection', 'hybrid');
-const PANORAMA_PROJECTION = (
-    projectionParam === 'cube' || projectionParam === 'side'
-) ? projectionParam : 'hybrid';
-const PANORAMA_FACE_FOV = urlNumber('panoFaceFov', 130, 90, 170);
+const PANORAMA_PROJECTION = 'sweep';
+const defaultFaceFov = (PANORAMA_PROJECTION === 'sweep' || PANORAMA_PROJECTION === 'cube') ? 100 : 130;
+const minFaceFov = 90;
+const maxFaceFov = (PANORAMA_PROJECTION === 'sweep' || PANORAMA_PROJECTION === 'cube') ? 120 : 170;
+const PANORAMA_FACE_FOV = urlNumber('panoFaceFov', defaultFaceFov, minFaceFov, maxFaceFov);
+const PANORAMA_SWEEP_FACES = Math.round(urlNumber('panoSweepFaces', 32, 8, 64));
 const PANORAMA_FACES_PER_STEP = Math.round(urlNumber('panoFacesPerStep', 1, 1, 6));
 const PANORAMA_REQUIRE_TILES = urlNumber('panoRequireTiles', 1, 0, 1) >= 0.5;
 const PANORAMA_TILE_QUIET_MS = urlNumber('panoTileQuietMs', 180, 0, 1500);
@@ -209,6 +201,7 @@ export class PanoramaSensor {
                 useGpuProjector: true,
                 projectionMode: PANORAMA_PROJECTION,
                 faceFovDeg: PANORAMA_FACE_FOV,
+                sweepFaces: PANORAMA_SWEEP_FACES,
                 facesPerStep: PANORAMA_FACES_PER_STEP,
                 requireTiles: PANORAMA_REQUIRE_TILES,
                 tileQuietMs: PANORAMA_TILE_QUIET_MS,

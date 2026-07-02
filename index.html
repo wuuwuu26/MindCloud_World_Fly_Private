@@ -892,7 +892,7 @@
                         window.googleTilesFlightStart();
                         return;
                     }
-                    import('./src/main.js?v=20260630-yopo360-realtime-fix2')
+                    import('./src/main.js?v=20260702-panorama-sweep-fix')
                         .then(function (mod) {
                             var start = window.googleTilesFlightStart || mod.startTilesMode;
                             if (typeof start === 'function') start();
@@ -903,6 +903,6 @@
             });
         }());
     </script>
-    <script type="module" src="src/main.js?v=20260630-yopo360-realtime-fix2"></script>
+    <script type="module" src="src/main.js?v=20260702-panorama-sweep-fix"></script>
 </body>
 </html>
