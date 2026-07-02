@@ -77,6 +77,9 @@ export class PanoramaSensor {
         this.depthImg = document.getElementById('panorama-depth-image');
         this.rgbStatusEl = document.getElementById('panorama-rgb-status');
         this.depthStatusEl = document.getElementById('panorama-depth-status');
+        this.depthNearLabelEl = document.getElementById('panorama-depth-near-label');
+        this.depthFarLabelEl = document.getElementById('panorama-depth-far-label');
+        this.depthUnitEl = document.getElementById('panorama-depth-unit');
         this.endpoint = getDA360Endpoint();
         this.active = false;
         this.capturing = false;
@@ -112,6 +115,7 @@ export class PanoramaSensor {
         if (this.rgbCanvas) this._drawPlaceholder(this.rgbCanvas, 'RGB PANORAMA');
         this._setDepthPlaceholder('DA360 offline');
         this._setStatus('idle', 'offline');
+        this._setDepthLegend(null);
     }
 
     hasRgbFrame() {
@@ -215,6 +219,29 @@ export class PanoramaSensor {
     _setStatus(rgbStatus, depthStatus) {
         if (this.rgbStatusEl) this.rgbStatusEl.textContent = rgbStatus;
         if (this.depthStatusEl) this.depthStatusEl.textContent = depthStatus;
+    }
+
+    _formatRelativeDepth(value) {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n <= 0) return '--';
+        if (n < 10) return `${n.toFixed(1)}x`;
+        if (n < 100) return `${Math.round(n)}x`;
+        return `${n.toExponential(1)}x`;
+    }
+
+    _setDepthLegend(scale) {
+        const valid = scale && scale.valid;
+        if (this.depthUnitEl) {
+            this.depthUnitEl.textContent = valid ? 'x nearest' : 'relative';
+        }
+        if (this.depthNearLabelEl) {
+            const near = valid ? this._formatRelativeDepth(scale.near) : '1x';
+            this.depthNearLabelEl.textContent = `near ${near}`;
+        }
+        if (this.depthFarLabelEl) {
+            const far = valid ? this._formatRelativeDepth(scale.far) : '--';
+            this.depthFarLabelEl.textContent = `far ${far}`;
+        }
     }
 
     async _capture(world, transform) {
@@ -340,6 +367,7 @@ export class PanoramaSensor {
                 throw new Error('DA360 response missing depth_image');
             }
             this.depthImg.src = payload.depth_image;
+            this._setDepthLegend(payload.depth_scale);
             this.hasDepth = true;
             this.lastDepthTime = performance.now();
             const latency = Number.isFinite(payload.latency_ms)

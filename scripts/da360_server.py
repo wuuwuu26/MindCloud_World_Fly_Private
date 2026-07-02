@@ -119,7 +119,10 @@ def depth_to_color(depth, sample_limit=65536):
     depth = np.asarray(depth, dtype=np.float32)
     valid = np.isfinite(depth) & (depth > 0)
     if not np.any(valid):
-        return np.zeros((*depth.shape, 3), dtype=np.uint8)
+        return np.zeros((*depth.shape, 3), dtype=np.uint8), {
+            "valid": False,
+            "unit": "relative_to_nearest",
+        }
 
     valid_values = depth[valid]
     if valid_values.size > sample_limit:
@@ -147,7 +150,19 @@ def depth_to_color(depth, sample_limit=65536):
     frac = (scaled - lo)[..., None]
     color = stops[lo] * (1.0 - frac) + stops[hi] * frac
     color[~valid] = 0
-    return color.astype(np.uint8)
+    full_valid_values = depth[valid]
+    scale = {
+        "valid": True,
+        "unit": "relative_to_nearest",
+        "nearest": 1.0,
+        "near": float(near),
+        "far": float(far),
+        "min": float(full_valid_values.min()),
+        "max": float(full_valid_values.max()),
+        "near_percentile": 2.0,
+        "far_percentile": 98.0,
+    }
+    return color.astype(np.uint8), scale
 
 
 def encode_image(image, output_format="jpeg", jpeg_quality=72):
@@ -314,13 +329,14 @@ def create_app(runner):
             image = decode_request_image(request)
             request_width, request_height = image.size
             pred_depth = runner.infer(image)
-            colored = depth_to_color(pred_depth)
+            colored, depth_scale = depth_to_color(pred_depth)
             return jsonify({
                 "depth_image": encode_image(
                     colored,
                     os.environ.get("DA360_OUTPUT_FORMAT", "jpeg"),
                     env_int("DA360_JPEG_QUALITY", 72),
                 ),
+                "depth_scale": depth_scale,
                 "latency_ms": (time.time() - started) * 1000.0,
                 "model": runner.model_name,
                 "device": str(runner.device),

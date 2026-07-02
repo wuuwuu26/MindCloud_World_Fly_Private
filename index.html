@@ -240,6 +240,49 @@
             font-weight: 600;
             letter-spacing: 0;
         }
+        .depth-legend {
+            padding: 7px 9px 8px;
+            background: rgba(3, 7, 18, 0.84);
+            border: 1px solid rgba(125, 211, 252, 0.26);
+            border-radius: 6px;
+            font-size: 10px;
+            line-height: 1.25;
+        }
+        .depth-legend-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+        .depth-legend-title {
+            color: #f8fafc;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+        }
+        .depth-legend-unit {
+            color: #93c5fd;
+            text-align: right;
+        }
+        .depth-colorbar {
+            height: 10px;
+            margin: 5px 0 4px;
+            border-radius: 999px;
+            border: 1px solid rgba(226, 232, 240, 0.32);
+            background: linear-gradient(
+                90deg,
+                rgb(210, 38, 255) 0%,
+                rgb(255, 64, 43) 16.666%,
+                rgb(255, 238, 67) 33.333%,
+                rgb(92, 255, 120) 50%,
+                rgb(0, 210, 255) 66.666%,
+                rgb(20, 25, 210) 83.333%,
+                rgb(4, 3, 30) 100%
+            );
+        }
+        .depth-legend-labels {
+            color: #cbd5e1;
+            font-size: 10px;
+        }
 
         /* Race timing panel (F1 timing-tower style, left-middle). */
         #hud-race-panel {
@@ -670,6 +713,17 @@
             </div>
             <img id="panorama-depth-image" alt="DA360 panoramic depth">
         </div>
+        <div class="depth-legend" aria-label="DA360 relative distance legend">
+            <div class="depth-legend-row">
+                <span class="depth-legend-title">RELATIVE DISTANCE</span>
+                <span class="depth-legend-unit" id="panorama-depth-unit">x nearest</span>
+            </div>
+            <div class="depth-colorbar"></div>
+            <div class="depth-legend-row depth-legend-labels">
+                <span id="panorama-depth-near-label">near 1x</span>
+                <span id="panorama-depth-far-label">far --</span>
+            </div>
+        </div>
     </div>
 
     <!-- Gear button -->
@@ -915,7 +969,7 @@
                         window.googleTilesFlightStart();
                         return;
                     }
-                    import('./src/main.js?v=20260702-complete-preload')
+                    import('./src/main.js?v=20260702-depth-legend')
                         .then(function (mod) {
                             var start = window.googleTilesFlightStart || mod.startTilesMode;
                             if (typeof start === 'function') start();
@@ -926,6 +980,6 @@
             });
         }());
     </script>
-    <script type="module" src="src/main.js?v=20260702-complete-preload"></script>
+    <script type="module" src="src/main.js?v=20260702-depth-legend"></script>
 </body>
 </html>
