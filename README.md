@@ -11,7 +11,7 @@
 - DA360 深度推理需要 NVIDIA GPU、NVIDIA Container Toolkit、Python 3 + pip，以及可访问模型下载地址的网络
 
 ## 启动主进程
-
+默认
 ```bash
 ./launch.sh
 ```
@@ -22,7 +22,7 @@
 http://127.0.0.1:8080
 ```
 
-常用方式：
+可选常用方式：
 
 ```bash
 # 端口被占用时
@@ -49,7 +49,8 @@ docker rm -f google-tiles-flight
 python3 -m pip install --user gdown
 ./scripts/download_da360_model.sh
 ./scripts/start_da360_api.sh
-curl http://127.0.0.1:5688/health
+
+# 自检：curl http://127.0.0.1:5688/health
 ```
 
 默认使用 `DA360_small`，并以实时优先的 `DA360_INPUT_SCALE=0.46` 推理，模型输入约为 `476x238`。右下角 RGB 全景仍保持原始显示尺寸；只有发送给 DA360 的深度请求会单独缩小，前端默认上传约 `504x252` 的 JPEG。
@@ -73,7 +74,7 @@ DA360_INPUT_SCALE=0.65 ./scripts/start_da360_api.sh
 http://127.0.0.1:8080/?da360Url=http://<host>:5688/depth
 ```
 
-停止推理服务：
+停止推理服务，只要主进程功能：
 
 ```bash
 docker rm -f mindcloud-da360-api
@@ -104,7 +105,7 @@ P           返回放置模式
 Tab         设置面板
 ```
 
-键盘可直接使用。手柄通常会被 Chrome 的 Gamepad API 自动识别。RC 遥控器或 WebHID 设备可在设置面板中连接；如需检查 Linux 输入权限：
+键盘可直接使用，也支持手柄（但需要自己优化映射），手柄通常会被 Chrome 的 Gamepad API 自动识别。RC 遥控器或 WebHID 设备可在设置面板中连接；如需检查 Linux 输入权限：
 
 ```bash
 ./launch.sh --input-status

@@ -982,25 +982,38 @@ export class CesiumWorld {
         }
 
         if (!cartesian) {
-            const ray = this.viewer.camera.getPickRay(windowPosition);
-            const ellipsoidHit = ray
-                ? Cesium.IntersectionTests.rayEllipsoid(ray, Cesium.Ellipsoid.WGS84)
-                : null;
-            if (ellipsoidHit) {
-                cartesian = Cesium.Ray.getPoint(ray, ellipsoidHit.start, new Cesium.Cartesian3());
+            try {
+                const p = this.viewer.camera.pickEllipsoid(windowPosition, Cesium.Ellipsoid.WGS84);
+                if (Cesium.defined(p)) cartesian = p;
+            } catch (_) {
+                cartesian = null;
+            }
+        }
+
+        if (!cartesian) {
+            try {
+                const ray = this.viewer.camera.getPickRay(windowPosition);
+                const ellipsoidHit = ray
+                    ? Cesium.IntersectionTests.rayEllipsoid(ray, Cesium.Ellipsoid.WGS84)
+                    : null;
+                if (ellipsoidHit) {
+                    const distance = ellipsoidHit.start >= 0 ? ellipsoidHit.start : ellipsoidHit.stop;
+                    cartesian = Cesium.Ray.getPoint(ray, distance, new Cesium.Cartesian3());
+                }
+            } catch (_) {
+                cartesian = null;
             }
         }
 
         if (!cartesian) return null;
 
         const cartographic = Cesium.Cartographic.fromCartesian(cartesian);
-        const surfaceAtOriginHeight = Cesium.Cartesian3.fromRadians(
+        this.setOrigin(new Cesium.Cartographic(
             cartographic.longitude,
             cartographic.latitude,
-            this.originCartographic ? this.originCartographic.height : 0
-        );
-        const surface = this.cartesianToLocal(surfaceAtOriginHeight);
-        const spawn = { x: surface.x, y: Math.max(0, altitudeMeters || 0), z: surface.z };
+            0
+        ));
+        const spawn = { x: 0, y: Math.max(0, altitudeMeters || 0), z: 0 };
         this.updateSpawnMarker(spawn);
         return spawn;
     }

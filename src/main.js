@@ -23,7 +23,7 @@
  * from the original simulator.
  */
 
-import { CesiumWorld } from './cesium-world.js';
+import { CesiumWorld } from './cesium-world.js?v=20260702-spawn-rebase';
 import { TilesCollisionProvider } from './tiles-collision.js';
 import { Controller } from './controller.js';
 import { Drone } from './drone.js';
@@ -847,6 +847,11 @@ function isTextEntryTarget(target) {
     return !!target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]');
 }
 
+function isPointerOverCesiumCanvas() {
+    const canvas = world?.viewer?.scene?.canvas;
+    return !!(canvas && typeof canvas.matches === 'function' && canvas.matches(':hover'));
+}
+
 function setupThirdPersonPointerControls() {
     if (!world || !world.viewer) return;
     const canvas = world.viewer.scene.canvas;
@@ -907,7 +912,13 @@ function setupThirdPersonPointerControls() {
 function setupKeyboard() {
     window.addEventListener('keydown', (e) => {
         if (controller && controller.isSettingsOpen && controller.isSettingsOpen()) return;
-        if (isTextEntryTarget(e.target)) return;
+        if (isTextEntryTarget(e.target)) {
+            if (mode === 'placement' && e.code === 'KeyI' && isPointerOverCesiumCanvas()) {
+                placementKeysDown.add(e.code);
+                e.preventDefault();
+            }
+            return;
+        }
 
         if (mode === 'placement') {
             placementKeysDown.add(e.code);
