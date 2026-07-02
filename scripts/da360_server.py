@@ -44,6 +44,7 @@ DEFAULT_MODEL = Path(os.environ.get(
     DA360_ROOT / "checkpoints" / f"DA360_{DEFAULT_MODEL_NAME}.pth",
 ))
 PATCH_SIZE = 14
+DEFAULT_INPUT_SCALE = 0.46
 
 
 def env_bool(name, default=False):
@@ -185,7 +186,7 @@ def resolve_input_size(base_width, base_height, input_scale=None, input_width=No
 
 
 class DA360Runner:
-    def __init__(self, model_path, input_scale=0.65, input_width=None, input_height=None):
+    def __init__(self, model_path, input_scale=DEFAULT_INPUT_SCALE, input_width=None, input_height=None):
         if not DA360_ROOT.is_dir():
             raise FileNotFoundError(f"DA360 repo is missing: {DA360_ROOT}")
         if not Path(model_path).is_file():
@@ -311,6 +312,7 @@ def create_app(runner):
 
         try:
             image = decode_request_image(request)
+            request_width, request_height = image.size
             pred_depth = runner.infer(image)
             colored = depth_to_color(pred_depth)
             return jsonify({
@@ -324,6 +326,10 @@ def create_app(runner):
                 "device": str(runner.device),
                 "width": runner.width,
                 "height": runner.height,
+                "request_width": request_width,
+                "request_height": request_height,
+                "input_pixels": runner.width * runner.height,
+                "request_pixels": request_width * request_height,
             })
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
@@ -339,7 +345,7 @@ def parse_args():
     parser.add_argument("--model-path", default=str(DEFAULT_MODEL), help="Path to DA360 .pth checkpoint.")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", default=5688, type=int)
-    parser.add_argument("--input-scale", default=env_float("DA360_INPUT_SCALE", 0.65), type=float)
+    parser.add_argument("--input-scale", default=env_float("DA360_INPUT_SCALE", DEFAULT_INPUT_SCALE), type=float)
     parser.add_argument("--input-width", default=env_int("DA360_INPUT_WIDTH", 0), type=int)
     parser.add_argument("--input-height", default=env_int("DA360_INPUT_HEIGHT", 0), type=int)
     parser.add_argument("--debug", action="store_true")

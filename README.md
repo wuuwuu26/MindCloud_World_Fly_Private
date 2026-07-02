@@ -10,7 +10,7 @@
 - 本地开发模式需要 Python 3
 - DA360 深度推理需要 NVIDIA GPU、NVIDIA Container Toolkit、Python 3 + pip，以及可访问模型下载地址的网络
 
-## 启动
+## 启动主进程
 
 ```bash
 ./launch.sh
@@ -41,22 +41,30 @@ docker rm -f google-tiles-flight
 ./launch.sh --local
 ```
 
-## DA360 深度
+## 启动副进程（DA360 深度估计）
 
 首次使用前下载模型并启动推理服务：
 
 ```bash
 python3 -m pip install --user gdown
 ./scripts/download_da360_model.sh
-DA360_DETACH=1 ./scripts/start_da360_api.sh
+./scripts/start_da360_api.sh
 curl http://127.0.0.1:5688/health
 ```
 
-默认使用 `DA360_small`。需要更高精度时：
+默认使用 `DA360_small`，并以实时优先的 `DA360_INPUT_SCALE=0.46` 推理，模型输入约为 `476x238`。右下角 RGB 全景仍保持原始显示尺寸；只有发送给 DA360 的深度请求会单独缩小，前端默认上传约 `504x252` 的 JPEG。
+
+需要更高精度的模型时：
 
 ```bash
 DA360_MODEL=large ./scripts/download_da360_model.sh
-DA360_MODEL=large DA360_DETACH=1 ./scripts/start_da360_api.sh
+DA360_MODEL=large ./scripts/start_da360_api.sh
+```
+
+需要提高 DA360 精度但接受更慢推理时：
+
+```bash
+DA360_INPUT_SCALE=0.65 ./scripts/start_da360_api.sh
 ```
 
 推理服务不在本机时：
@@ -71,7 +79,7 @@ http://127.0.0.1:8080/?da360Url=http://<host>:5688/depth
 docker rm -f mindcloud-da360-api
 ```
 
-## 飞行流程
+## 使用流程说明
 
 1. 点击 **Start Google 3D Tiles Flight**。
 2. 等页面进入 **PLACEMENT MODE**。
@@ -96,7 +104,14 @@ P           返回放置模式
 Tab         设置面板
 ```
 
-## 全景相机
+键盘可直接使用。手柄通常会被 Chrome 的 Gamepad API 自动识别。RC 遥控器或 WebHID 设备可在设置面板中连接；如需检查 Linux 输入权限：
+
+```bash
+./launch.sh --input-status
+./launch.sh --setup-input
+```
+
+## 全景相机实现原理
 
 全景 RGB 默认从机头 360 相机位置采集，输出 `672x336` ERP 图。实现方式是对 Cesium/Google Tiles 渲染结果进行 6 个方向采样，然后在 GPU 中按 ERP 射线模型重投影：
 
@@ -105,7 +120,9 @@ yaw   = pi - (u + 0.5) / W * 2pi
 pitch = vfov / 2 - (v + 0.5) / H * vfov
 ```
 
-这保证投影模型与 YOPO_360 的 ERP 相机一致；区别是数据来源为 Cesium 渲染视图，而不是仿真栅格的直接 raycast。放置阶段会后台创建全景采样 viewer；确认出生点后会在用户可控前预采样一张全景首帧。飞行中默认每个采样方向等待 `panoFrameDelayMs=16`，优先提高移动时实时性；首帧预加载使用 `panoPreloadFrameDelayMs=120`，让隐藏 viewer 有时间拉取初始 tiles。
+这保证投影模型与 YOPO_360 的 ERP 相机一致；区别是数据来源为 Cesium 渲染视图，而不是仿真栅格的直接 raycast。放置阶段会后台创建全景采样 viewer；确认出生点后会在用户可控前预采样一张全景首帧。飞行中默认 `panoMs=16`、`panoFace=192`、每个采样方向等待 `panoFrameDelayMs=8`，优先提高移动时实时性；首帧预加载使用 `panoPreloadFrameDelayMs=96`，让隐藏 viewer 有时间拉取初始 tiles。
+
+进入可控飞行前，主 Cesium 视图会预加载出生点周围区域，并分别等待第一人称和第三人称初始视角 tiles idle。默认 `flightPreloadStrict=0`，只要目标区域覆盖率达标就进入视角选择；只有覆盖不足或预加载异常时才会在视角选择面板提示 warning。需要阻塞到全局 tiles 队列完全 idle 时可加 `?flightPreloadStrict=1`。
 
 常用参数：
 
@@ -114,36 +131,17 @@ pitch = vfov / 2 - (v + 0.5) / H * vfov
 http://127.0.0.1:8080/?panoWidth=1036&panoFace=768
 
 # 调整采样视图等待时间
-http://127.0.0.1:8080/?panoFrameDelayMs=32&panoPreloadFrameDelayMs=160
+http://127.0.0.1:8080/?panoFrameDelayMs=16&panoPreloadFrameDelayMs=120
 
 # 调整首帧全景预加载超时
 http://127.0.0.1:8080/?panoPreloadTimeoutMs=10000
 
+# 调整起飞前主视图预加载范围和覆盖率门槛
+http://127.0.0.1:8080/?flightPreloadRadius=600&flightPreloadMinCoverage=0.98
+
 # 调整 RGB / 深度更新间隔
 http://127.0.0.1:8080/?panoMs=1000&depthMs=1200
+
+# 调整仅用于 DA360 的上传尺寸，不影响 RGB 全景显示
+http://127.0.0.1:8080/?da360UploadWidth=672
 ```
-
-## 常用 URL 参数
-
-```text
-# 初始视角
-http://127.0.0.1:8080/?lon=114.1690321&lat=22.3246282&height=1800
-
-# 自定义 Cesium Ion token / asset
-http://127.0.0.1:8080/?ionToken=<your_token>&assetId=2275207
-```
-
-## 输入设备
-
-键盘可直接使用。手柄通常会被 Chrome 的 Gamepad API 自动识别。RC 遥控器或 WebHID 设备可在设置面板中连接；如需检查 Linux 输入权限：
-
-```bash
-./launch.sh --input-status
-./launch.sh --setup-input
-```
-
-## 排查
-
-- 页面一直加载 Google Tiles：确认网络能访问 Cesium Ion 和 Google 3D Tiles，并检查 `ionToken` / `assetId`。
-- 看不到全景或深度：确认右下角设置中 **Nose 360 Panorama Sensor** 已开启；深度还需要 DA360 服务健康。
-- Docker 拉取或构建失败：网络恢复后重跑，或用 `DA360_BASE_IMAGE=<本地或镜像源中的pytorch镜像>` 指定基础镜像。

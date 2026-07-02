@@ -69,7 +69,12 @@ let thirdPersonCamera = {
 const SPAWN_ALTITUDE_MIN = 0;
 const SPAWN_ALTITUDE_MAX = 20000;
 const SPAWN_ALTITUDE_SLIDER_DEFAULT_MAX = 1000;
-const SPAWN_PRELOAD_RADIUS_METERS = 200;
+const SPAWN_PRELOAD_RADIUS_METERS = Math.round(urlNumber('flightPreloadRadius', 420, 120, 2000));
+const FLIGHT_PRELOAD_MIN_COVERAGE = urlNumber('flightPreloadMinCoverage', 0.95, 0.5, 1);
+const FLIGHT_PRELOAD_VIEW_TIMEOUT_MS = Math.round(urlNumber('flightPreloadViewTimeoutMs', 20000, 3000, 60000));
+const FLIGHT_PRELOAD_VIEW_ATTEMPTS = Math.round(urlNumber('flightPreloadViewAttempts', 2, 1, 5));
+const FLIGHT_PRELOAD_STRICT = urlNumber('flightPreloadStrict', 0, 0, 1) >= 0.5;
+const VIEW_CHOICE_HINT_HTML = '1 / O: First Person &nbsp;|&nbsp; 2: Third Person<br>Easy speed: ↑/↓ forward/back, Shift boost, Tab &gt; Easy Max Speed';
 const MAX_PHYSICS_FRAME_DT = 0.25;
 const PHYSICS_SUBSTEP_DT = 0.05;
 const MAX_PHYSICS_SUBSTEPS = 3;
@@ -80,6 +85,19 @@ let lastKeyGuideState = '';
 let lastDisplaySettingsState = '';
 let lastHFovReadTime = 0;
 let cachedHFov = 120;
+let flightStartWarnings = [];
+
+function urlNumber(name, fallback, min = -Infinity, max = Infinity) {
+    try {
+        const value = new URLSearchParams(window.location.search).get(name);
+        if (value == null || value === '') return fallback;
+        const n = Number(value);
+        if (!Number.isFinite(n)) return fallback;
+        return Math.max(min, Math.min(max, n));
+    } catch (_) {
+        return fallback;
+    }
+}
 
 function normalizeViewMode(value, fallback = 'first') {
     return value === 'third' || value === '3rd' ? 'third' : fallback;
@@ -119,6 +137,40 @@ function setProgress(message, isError = false) {
     if (!el) return;
     el.textContent = message;
     el.style.color = isError ? '#f44' : '#4272F5';
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+}
+
+function shortStatusMessage(value, maxLength = 96) {
+    const message = value && value.message ? value.message : String(value || '');
+    if (message.length <= maxLength) return message;
+    return `${message.slice(0, maxLength - 3)}...`;
+}
+
+function rememberFlightStartWarning(message) {
+    const text = String(message || '').trim();
+    if (!text || flightStartWarnings.includes(text)) return;
+    flightStartWarnings.push(text);
+}
+
+function updateViewChoiceHint() {
+    const el = document.getElementById('view-choice-hint');
+    if (!el) return;
+    if (!flightStartWarnings.length) {
+        el.innerHTML = VIEW_CHOICE_HINT_HTML;
+        return;
+    }
+    const warnings = flightStartWarnings
+        .map(message => escapeHtml(message))
+        .join('<br>');
+    el.innerHTML = `${VIEW_CHOICE_HINT_HTML}<br><span style="color:#fbbf24">Preload warning: ${warnings}. Tiles may continue loading after takeoff.</span>`;
 }
 
 function showError(error) {
@@ -258,11 +310,73 @@ async function preloadPanoramaBeforeFlight() {
             options.timeoutMs,
             '360 panorama preload'
         );
-        return panoramaSensor.primeFromCaptureResult(result, performance.now() - started);
+        const ready = panoramaSensor.primeFromCaptureResult(result, performance.now() - started);
+        if (!ready && FLIGHT_PRELOAD_STRICT) {
+            throw new Error('360 panorama preload did not produce a complete frame.');
+        }
+        return ready;
     } catch (error) {
+        if (FLIGHT_PRELOAD_STRICT) throw error;
         console.warn('[TilesFlight] panorama preload failed; live capture will retry in flight:', error);
         return false;
     }
+}
+
+async function preloadInitialFlightViewsBeforeControl() {
+    if (
+        !world ||
+        !drone ||
+        typeof world.settleCurrentCameraView !== 'function'
+    ) {
+        return;
+    }
+
+    const bodyTransform = drone.getBodyTransform ? drone.getBodyTransform() : drone.getCameraTransform();
+    const cameraTransform = drone.getCameraTransform();
+    const settleOptions = {
+        dwellMs: 260,
+        timeoutMs: FLIGHT_PRELOAD_VIEW_TIMEOUT_MS,
+        quietMs: 650,
+    };
+
+    world.setFlightPerformanceMode(true);
+
+    setProgress('Preloading first-person flight view...');
+    const firstReady = await settleFlightView('first-person flight view', () => {
+        world.setCameraFromDroneTransform(cameraTransform, getCameraHFov());
+    }, settleOptions);
+    if (!firstReady && FLIGHT_PRELOAD_STRICT) {
+        throw new Error('First-person flight view tiles did not finish loading before control.');
+    }
+
+    setProgress('Preloading third-person flight view...');
+    initThirdPersonCamera(bodyTransform);
+    world.updateAircraftFromDroneTransform(bodyTransform);
+    world.showAircraft(true);
+    let thirdReady = false;
+    try {
+        thirdReady = await settleFlightView('third-person flight view', () => {
+            world.setThirdPersonCamera(bodyTransform, thirdPersonCamera);
+        }, settleOptions);
+    } finally {
+        world.showAircraft(false);
+    }
+    if (!thirdReady && FLIGHT_PRELOAD_STRICT) {
+        throw new Error('Third-person flight view tiles did not finish loading before control.');
+    }
+}
+
+async function settleFlightView(label, applyView, settleOptions) {
+    let ready = false;
+    for (let attempt = 1; attempt <= FLIGHT_PRELOAD_VIEW_ATTEMPTS; attempt++) {
+        if (attempt > 1) {
+            setProgress(`Waiting for ${label} tiles (${attempt}/${FLIGHT_PRELOAD_VIEW_ATTEMPTS})...`);
+        }
+        applyView();
+        ready = await world.settleCurrentCameraView(settleOptions);
+        if (ready) return true;
+    }
+    return ready;
 }
 
 function setupCesiumPlacementHandler() {
@@ -331,6 +445,8 @@ async function enterPlacementMode(autoPick = false) {
 async function confirmSpawnAndFly() {
     if (!world || !spawnPoint || spawnConfirmInProgress) return;
     spawnConfirmInProgress = true;
+    flightStartWarnings = [];
+    updateViewChoiceHint();
 
     try {
         const Cesium = world.Cesium;
@@ -358,33 +474,69 @@ async function confirmSpawnAndFly() {
         mode = 'loading';
         applyDisplaySettings();
         document.getElementById('loading-overlay')?.classList.add('visible');
-        setProgress('Preloading 200 m collision area before FPV...');
+        setProgress(`Preloading ${SPAWN_PRELOAD_RADIUS_METERS} m flight area before control...`);
         try {
             const preload = await world.preloadLocalArea(spawnPoint, {
                 radius: SPAWN_PRELOAD_RADIUS_METERS,
-                lift: 150,
-                gridSpacing: 180,
-                viewDistance: 160,
-                maxTargets: 8,
-                dwellMs: 120,
-                perViewTimeoutMs: 1200,
-                finalIdleTimeoutMs: 2500,
-                verifyCoverage: false,
+                lift: 220,
+                gridSpacing: 160,
+                viewDistance: 240,
+                maxTargets: 22,
+                dwellMs: 220,
+                perViewTimeoutMs: 3200,
+                finalIdleTimeoutMs: 20000,
+                verifyCoverage: true,
+                coverageSpacing: 160,
+                minCoverageRatio: FLIGHT_PRELOAD_MIN_COVERAGE,
+                repairPasses: 2,
+                repairTargets: 22,
                 progressCb: setProgress,
             });
-            if (preload && preload.coverage && preload.coverage.ratio < 0.72) {
-                const pct = Math.round(preload.coverage.ratio * 100);
+            const coverage = preload && preload.coverage ? preload.coverage.ratio : 0;
+            const pct = Math.round(coverage * 100);
+            if (preload && preload.coverage && coverage < FLIGHT_PRELOAD_MIN_COVERAGE) {
                 console.warn(`[TilesFlight] low preload coverage around spawn: ${pct}%`, preload);
             }
+            const coverageReady = preload && preload.coverage
+                ? coverage >= FLIGHT_PRELOAD_MIN_COVERAGE
+                : preload && preload.finalIdle === true;
+            const preloadReady = preload &&
+                coverageReady &&
+                (!FLIGHT_PRELOAD_STRICT || preload.finalIdle === true);
+            if (!preloadReady) {
+                const coverageText = preload && preload.coverage ? `${pct}%` : 'unknown';
+                const message = `flight tile preload incomplete: idle=${preload ? preload.finalIdle : false}, coverage=${coverageText}`;
+                if (FLIGHT_PRELOAD_STRICT) {
+                    throw new Error(message);
+                }
+                rememberFlightStartWarning(message);
+            }
         } catch (e) {
-            console.error('[TilesFlight] required tile preload failed:', e);
             const msg = e && e.message ? e.message : String(e);
-            throw new Error(`Required 200 m tile preload failed: ${msg}`);
+            if (FLIGHT_PRELOAD_STRICT) {
+                console.error('[TilesFlight] required tile preload failed:', e);
+                throw new Error(`Required flight tile preload failed: ${msg}`);
+            }
+            console.warn('[TilesFlight] tile preload failed; continuing to view selection:', e);
+            rememberFlightStartWarning(`flight tile preload skipped: ${shortStatusMessage(msg)}`);
         }
 
-        await preloadPanoramaBeforeFlight();
+        try {
+            await preloadInitialFlightViewsBeforeControl();
+        } catch (e) {
+            if (FLIGHT_PRELOAD_STRICT) throw e;
+            console.warn('[TilesFlight] initial flight view preload failed; continuing:', e);
+        }
+
+        try {
+            await preloadPanoramaBeforeFlight();
+        } catch (e) {
+            if (FLIGHT_PRELOAD_STRICT) throw e;
+            console.warn('[TilesFlight] panorama preload failed; continuing:', e);
+        }
 
         mode = 'view-select';
+        updateViewChoiceHint();
         document.getElementById('view-choice-overlay')?.classList.add('visible');
         applyDisplaySettings();
     } catch (e) {

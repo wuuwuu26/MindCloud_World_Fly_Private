@@ -387,10 +387,10 @@ export class CesiumWorld {
             2048
         ));
         this.panoramaTileSSE = clampNumber(
-            urlNumber('panoramaTileSse', options.panoramaTileSSE ?? 24),
+            urlNumber('panoramaTileSse', options.panoramaTileSSE ?? 32),
             4,
             128,
-            24
+            32
         );
         this.Cesium = null;
         this.viewer = null;
@@ -764,6 +764,7 @@ export class CesiumWorld {
     }
 
     _sampleLoadedCoverage(centerLocal, radius, spacing) {
+        this._heightSampleCache.clear();
         const samples = this._buildPreloadTargets(radius, spacing, 80);
         let loaded = 0;
         const missing = [];
@@ -797,14 +798,14 @@ export class CesiumWorld {
 
         const radius = Math.max(60, Number.isFinite(options.radius) ? options.radius : 220);
         const lift = Math.max(80, Number.isFinite(options.lift) ? options.lift : (radius >= 800 ? 260 : 150));
-        const gridSpacing = clampNumber(options.gridSpacing, 180, 600, radius >= 800 ? 330 : Math.max(180, radius * 0.75));
+        const gridSpacing = clampNumber(options.gridSpacing, 100, 600, radius >= 800 ? 330 : Math.max(180, radius * 0.75));
         const viewDistance = clampNumber(options.viewDistance, 140, 420, radius >= 800 ? 260 : Math.max(160, radius * 0.75));
         const maxTargets = Math.round(clampNumber(options.maxTargets, 4, 60, radius >= 800 ? 34 : 12));
         const dwellMs = Math.max(80, Number.isFinite(options.dwellMs) ? options.dwellMs : 180);
         const perViewTimeoutMs = Math.max(450, Number.isFinite(options.perViewTimeoutMs) ? options.perViewTimeoutMs : 1600);
         const finalIdleTimeoutMs = Math.max(perViewTimeoutMs, Number.isFinite(options.finalIdleTimeoutMs) ? options.finalIdleTimeoutMs : 5000);
         const verifyCoverage = options.verifyCoverage !== false && radius >= 350;
-        const coverageSpacing = clampNumber(options.coverageSpacing, 180, 600, Math.max(240, gridSpacing));
+        const coverageSpacing = clampNumber(options.coverageSpacing, 100, 600, Math.max(240, gridSpacing));
         const minCoverageRatio = clampNumber(options.minCoverageRatio, 0, 1, 0.72);
         const repairPasses = Math.round(clampNumber(options.repairPasses, 0, 3, verifyCoverage ? 1 : 0));
         const repairTargets = Math.round(clampNumber(options.repairTargets, 4, 32, 16));
@@ -815,6 +816,7 @@ export class CesiumWorld {
             radius,
             views: 0,
             timedOutViews: 0,
+            finalIdle: false,
             coverage: null,
         };
 
@@ -861,7 +863,7 @@ export class CesiumWorld {
                 maxTargets
             );
             await runViews(initialViews, 'scan');
-            await this.waitForTilesIdle(finalIdleTimeoutMs, 350);
+            report.finalIdle = await this.waitForTilesIdle(finalIdleTimeoutMs, 350);
 
             for (let pass = 0; verifyCoverage && pass <= repairPasses; pass++) {
                 if (progressCb) progressCb(`Verifying ${label} collision tile coverage...`);
@@ -874,7 +876,7 @@ export class CesiumWorld {
                     .slice(0, repairTargets)
                     .map((offset, i) => this._makePreloadView(centerLocal, offset, i + pass * repairTargets, lift, viewDistance));
                 await runViews(repairViews, `repair ${pass + 1}`);
-                await this.waitForTilesIdle(finalIdleTimeoutMs, 350);
+                report.finalIdle = await this.waitForTilesIdle(finalIdleTimeoutMs, 350);
             }
         } finally {
             camera.setView({
@@ -903,6 +905,7 @@ export class CesiumWorld {
 
     setOrigin(cartographic) {
         const Cesium = this.Cesium || requireCesium();
+        this._heightSampleCache.clear();
         this.originCartographic = new Cesium.Cartographic(
             cartographic.longitude,
             cartographic.latitude,
@@ -1214,6 +1217,7 @@ export class CesiumWorld {
             destination,
             orientation: { direction, up },
         });
+        this.viewer.scene.requestRender();
     }
 
     getTransformBasisFixed(transform) {
@@ -1315,6 +1319,23 @@ export class CesiumWorld {
 
     _renderNow() {
         this._renderViewerNow(this.viewer);
+    }
+
+    async settleCurrentCameraView(options = {}) {
+        if (!this.viewer || !this.ready) return false;
+        const dwellMs = Math.max(0, Number.isFinite(options.dwellMs) ? options.dwellMs : 120);
+        const timeoutMs = Math.max(500, Number.isFinite(options.timeoutMs) ? options.timeoutMs : 5000);
+        const quietMs = Math.max(0, Number.isFinite(options.quietMs) ? options.quietMs : 350);
+        const delay = (ms) => new Promise(resolve => window.setTimeout(resolve, ms));
+
+        this.viewer.scene.requestRender();
+        this._renderNow();
+        if (dwellMs > 0) {
+            await delay(dwellMs);
+            this.viewer.scene.requestRender();
+            this._renderNow();
+        }
+        return this.waitForTilesIdle(timeoutMs, quietMs);
     }
 
     _configurePanoramaTileset(tileset) {
