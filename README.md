@@ -85,7 +85,13 @@ DA360_MODEL=large DA360_DETACH=1 ./scripts/start_da360_api.sh
 http://127.0.0.1:8080/?da360Url=http://<host>:5688/depth
 ```
 
-右下角传感器默认从机头前置 360 相机位置采集实时 ERP 全景：前端按 `672x336` 输出、`256px` 采样视图、`32` 个水平 yaw 方向加上下 cap 做连续 sweep 拼接；ERP 像素射线采用 YOPO_360 同款 `yaw = pi - (u+0.5)/W*2pi`、`pitch = vfov/2 - (v+0.5)/H*vfov` 映射，并且每个像素只取最接近该射线的一个采样视图，避免多视图平均造成残影。YOPO body 的 forward/left/up 映射到本项目 body 分量为 `-Z/+X/+Y`；本项目 local 到 Cesium ENU 是 `x/z/y`，因此采样视图的屏幕右轴按 `up x dir` 处理。每个采样视图默认切相机后先等 `panoTileMinSettleMs=80`，再等隐藏 Cesium tileset 队列空并持续稳定 `panoTileQuietMs=180` 后才写入全景缓存；DA360 服务默认按 `DA360_INPUT_SCALE=0.65` 使用 `672x336` 输入推理，并且只在完整 360 sweep 稳定更新后触发。需要更高质量时把 scale 和分辨率调回官方 `1036x518`：
+右下角传感器默认从机头前置 360 相机位置采集实时 ERP 全景：前端按 `672x336` 输出、`256px` 采样视图、`hybrid` 六视角 GPU 重投影；ERP 像素射线仍采用 YOPO_360 同款 `yaw = pi - (u+0.5)/W*2pi`、`pitch = vfov/2 - (v+0.5)/H*vfov` 映射，数据来源是 Cesium/Google Tiles 当前渲染视图而不是 YOPO 的栅格 raycast。YOPO body 的 forward/left/up 映射到本项目 body 分量为 `-Z/+X/+Y`；本项目 local 到 Cesium ENU 是 `x/z/y`，因此采样视图的屏幕右轴按 `up x dir` 处理。默认不再硬等隐藏 tileset 全局 `tilesLoaded`，而是在每个视角切换后用 `panoFrameDelayMs=160` 给 Cesium 固定渲染/请求时间；需要强制等待可加 `panoRequireTiles=1`。DA360 服务默认按 `DA360_INPUT_SCALE=0.65` 使用 `672x336` 输入推理，并且只在完整 RGB 全景更新后触发。需要复现旧版 32 yaw sweep + 上下 cap + 瓦片稳定等待，可使用：
+
+```text
+http://127.0.0.1:8080/?panoProjection=sweep&panoSweepFaces=32&panoFacesPerStep=1&panoRequireTiles=1&panoTileMinSettleMs=80&panoTileQuietMs=180
+```
+
+进入飞行后可在浏览器控制台运行 `runPanoramaBenchmark()`，依次测试 `hybrid-6-fast`、`cube-6-fast`、`sweep-12-fast` 和旧 `sweep-32-stable-legacy` 的完整全景生成耗时；实时传感器每次完整 RGB 图也会把耗时写入 `window.__panoramaBenchSamples`。需要更高质量时把 scale 和分辨率调回官方 `1036x518`：
 
 ```text
 DA360_INPUT_SCALE=1.0 DA360_DETACH=1 ./scripts/start_da360_api.sh

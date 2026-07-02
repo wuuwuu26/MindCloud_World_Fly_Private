@@ -127,6 +127,22 @@ function showError(error) {
     document.getElementById('loading-overlay')?.classList.add('visible');
 }
 
+async function waitForCesiumReady(timeoutMs = 15000) {
+    if (window.Cesium) return;
+    if (!window.googleTilesCesiumReady || typeof window.googleTilesCesiumReady.then !== 'function') return;
+    let timeout = null;
+    try {
+        await Promise.race([
+            window.googleTilesCesiumReady,
+            new Promise((_, reject) => {
+                timeout = window.setTimeout(() => reject(new Error('Timed out loading CesiumJS.')), timeoutMs);
+            }),
+        ]);
+    } finally {
+        if (timeout !== null) window.clearTimeout(timeout);
+    }
+}
+
 function initSubsystems() {
     if (controller && drone && hud && osd && panoramaSensor) return;
 
@@ -151,6 +167,7 @@ export async function startTilesMode() {
         document.getElementById('drop-zone')?.classList.add('hidden');
         document.getElementById('loading-overlay')?.classList.add('visible');
         setProgress('Starting Google 3D Tiles world...');
+        await waitForCesiumReady();
 
         if (screenHandler) {
             screenHandler.destroy();
@@ -740,12 +757,139 @@ function setupStartUI() {
     }
 }
 
+function currentPanoramaTransform() {
+    if (!drone) return null;
+    if (typeof drone.getPanoramaTransform === 'function') return drone.getPanoramaTransform();
+    if (typeof drone.getBodyTransform === 'function') return drone.getBodyTransform();
+    if (typeof drone.getCameraTransform === 'function') return drone.getCameraTransform();
+    return null;
+}
+
+function defaultPanoramaBenchmarkVariants() {
+    const common = {
+        width: 672,
+        height: 336,
+        faceSize: 256,
+        verticalFovDeg: 180,
+        settleMs: 0,
+        frameDelayMs: 160,
+        timeoutMs: 24000,
+    };
+    return [
+        {
+            ...common,
+            name: 'hybrid-6-fast',
+            projectionMode: 'hybrid',
+            faceFovDeg: 130,
+            facesPerStep: 6,
+            requireTiles: false,
+            timeoutMs: 8000,
+        },
+        {
+            ...common,
+            name: 'cube-6-fast',
+            projectionMode: 'cube',
+            faceFovDeg: 100,
+            facesPerStep: 6,
+            requireTiles: false,
+            timeoutMs: 8000,
+        },
+        {
+            ...common,
+            name: 'sweep-12-fast',
+            projectionMode: 'sweep',
+            faceFovDeg: 100,
+            sweepFaces: 12,
+            facesPerStep: 6,
+            requireTiles: false,
+            timeoutMs: 12000,
+        },
+        {
+            ...common,
+            name: 'sweep-32-stable-legacy',
+            projectionMode: 'sweep',
+            faceFovDeg: 100,
+            sweepFaces: 32,
+            facesPerStep: 1,
+            requireTiles: true,
+            tileQuietMs: 180,
+            tileMinSettleMs: 80,
+            frameDelayMs: 0,
+            timeoutMs: 24000,
+        },
+    ];
+}
+
+async function runSinglePanoramaBenchmark(variant) {
+    if (!world || !world.ready) throw new Error('Cesium world is not ready.');
+    const transform = currentPanoramaTransform();
+    if (!transform) throw new Error('Drone panorama transform is not available.');
+
+    world.resetPanoramaScan?.();
+    const started = performance.now();
+    const timeoutMs = Math.max(1000, Number(variant.timeoutMs) || 12000);
+    const delayMs = Math.max(0, Number(variant.delayMs) || 16);
+    let result = null;
+    let calls = 0;
+
+    while (performance.now() - started < timeoutMs) {
+        result = await world.capturePanoramaIncrementalAsync(transform, variant);
+        calls++;
+        if (result && result.complete) break;
+        await new Promise(resolve => window.setTimeout(resolve, delayMs));
+    }
+
+    const elapsedMs = performance.now() - started;
+    const canvas = result && result.canvas ? result.canvas : null;
+    if (canvas) window.__lastPanoramaBenchmarkCanvas = canvas;
+    const summary = {
+        name: variant.name || variant.projectionMode || 'panorama',
+        elapsedMs: Math.round(elapsedMs),
+        complete: !!(result && result.complete),
+        calls,
+        projectionMode: variant.projectionMode || 'sweep',
+        faces: result && Number.isFinite(result.faces) ? result.faces : null,
+        width: canvas ? canvas.width : variant.width,
+        height: canvas ? canvas.height : variant.height,
+        faceSize: variant.faceSize,
+        frameDelayMs: Number(variant.frameDelayMs) || 0,
+        requireTiles: variant.requireTiles !== false,
+    };
+    if (variant.returnImage && canvas && typeof canvas.toDataURL === 'function') {
+        summary.imageDataUrl = canvas.toDataURL('image/png');
+    }
+    return summary;
+}
+
+async function runPanoramaBenchmark(variants = null) {
+    const list = Array.isArray(variants) && variants.length
+        ? variants
+        : defaultPanoramaBenchmarkVariants();
+    const results = [];
+    const restorePanoramaActive = panoramaSensor ? panoramaSensor.active : null;
+    if (panoramaSensor) panoramaSensor.setActive(false);
+    try {
+        for (const variant of list) {
+            const result = await runSinglePanoramaBenchmark(variant);
+            results.push(result);
+            console.info('[PanoramaBenchmark]', result);
+        }
+    } finally {
+        if (panoramaSensor && restorePanoramaActive !== null) {
+            panoramaSensor.setActive(restorePanoramaActive);
+        }
+    }
+    console.table(results);
+    return results;
+}
+
 function initializeAppShell() {
     setupStartUI();
     setupKeyboard();
     setupSpawnAltitudeControls();
     setProgress('');
     window.googleTilesFlightStart = startTilesMode;
+    window.runPanoramaBenchmark = runPanoramaBenchmark;
 }
 
 if (document.readyState === 'loading') {

@@ -24,9 +24,32 @@
 	          onerror="this.onerror=null;this.href='https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Widgets/widgets.css';">
 	    <script>
 	        window.CESIUM_BASE_URL = '/ThirdParty/Cesium/';
+            window.googleTilesCesiumReady = new Promise(function (resolve, reject) {
+                window.__googleTilesCesiumReadyResolve = resolve;
+                window.__googleTilesCesiumReadyReject = reject;
+            });
+            window.googleTilesCesiumLoaded = function () {
+                if (window.__googleTilesCesiumReadyResolve) {
+                    window.__googleTilesCesiumReadyResolve(window.Cesium);
+                }
+            };
+            window.googleTilesLoadCesiumFallback = function (failedScript) {
+                var base = 'https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/';
+                window.CESIUM_BASE_URL = base;
+                var script = document.createElement('script');
+                script.src = base + 'Cesium.js';
+                script.onload = window.googleTilesCesiumLoaded;
+                script.onerror = function () {
+                    var error = new Error('Failed to load CesiumJS from local path and CDN fallback.');
+                    if (window.__googleTilesCesiumReadyReject) window.__googleTilesCesiumReadyReject(error);
+                };
+                document.head.appendChild(script);
+                if (failedScript && failedScript.parentNode) failedScript.parentNode.removeChild(failedScript);
+            };
 	    </script>
 	    <script src="/ThirdParty/Cesium/Cesium.js"
-	            onerror="this.onerror=null;window.CESIUM_BASE_URL='https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/';this.src=window.CESIUM_BASE_URL+'Cesium.js';"></script>
+                onload="window.googleTilesCesiumLoaded && window.googleTilesCesiumLoaded();"
+	            onerror="window.googleTilesLoadCesiumFallback && window.googleTilesLoadCesiumFallback(this);"></script>
 	    <script src="https://cdn.jsdelivr.net/npm/playcanvas@2.17.2/build/playcanvas.min.js"></script>
     <!--
       Race-panel type testbed. The CSS variables defined in `:root`
@@ -892,7 +915,7 @@
                         window.googleTilesFlightStart();
                         return;
                     }
-                    import('./src/main.js?v=20260702-panorama-sweep-fix')
+                    import('./src/main.js?v=20260702-panorama-fast-hybrid-final')
                         .then(function (mod) {
                             var start = window.googleTilesFlightStart || mod.startTilesMode;
                             if (typeof start === 'function') start();
@@ -903,6 +926,6 @@
             });
         }());
     </script>
-    <script type="module" src="src/main.js?v=20260702-panorama-sweep-fix"></script>
+    <script type="module" src="src/main.js?v=20260702-panorama-fast-hybrid-final"></script>
 </body>
 </html>

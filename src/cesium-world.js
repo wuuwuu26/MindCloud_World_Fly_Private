@@ -598,10 +598,10 @@ export class CesiumWorld {
             2048
         ));
         this.panoramaTileSSE = clampNumber(
-            urlNumber('panoramaTileSse', options.panoramaTileSSE ?? 18),
+            urlNumber('panoramaTileSse', options.panoramaTileSSE ?? 24),
             4,
             128,
-            18
+            24
         );
         this.panoramaSettleMs = clampNumber(
             urlNumber('panoSettleMs', options.panoramaSettleMs ?? 0),
@@ -1646,10 +1646,11 @@ export class CesiumWorld {
                     if (edge >= 1) continue;
 
                     let score = 1 - edge;
+                    const absY = Math.abs(dirY);
                     if (face.kind === 'side') {
-                        score *= 1 - smoothstep(0.82, 0.96, Math.abs(dirY));
+                        score *= 1 - smoothstep(0.78, 0.92, absY);
                     } else {
-                        score *= smoothstep(0.45, 0.82, Math.abs(dirY));
+                        score *= smoothstep(0.74, 0.90, absY);
                     }
                     if (score <= bestScore) continue;
                     bestScore = score;
@@ -1693,6 +1694,13 @@ export class CesiumWorld {
 
         ctx.putImageData(out, 0, 0);
         return canvas;
+    }
+
+    resetPanoramaScan() {
+        this._panoramaScanState = null;
+        if (this._panoramaProjector && this._panoramaProjector.readyFaces) {
+            this._panoramaProjector.readyFaces.clear();
+        }
     }
 
     _configurePanoramaTileset(tileset) {
@@ -2000,6 +2008,8 @@ export class CesiumWorld {
         const requireTiles = options.requireTiles !== false;
         const tileQuietMs = Math.max(0, Math.min(1500, Number(options.tileQuietMs) || 180));
         const tileMinSettleMs = Math.max(0, Math.min(1000, Number(options.tileMinSettleMs) || 80));
+        const frameDelayMs = Math.max(0, Math.min(1000, Number(options.frameDelayMs) || 0));
+        const sleep = (ms) => new Promise(resolve => window.setTimeout(resolve, ms));
         const key = `sweep|${sideCount}|${faceSize}|${faceFovDeg}|${verticalFovDeg}`;
         let state = this._panoramaScanState;
         if (!state || state.key !== key) {
@@ -2053,6 +2063,11 @@ export class CesiumWorld {
                 });
                 viewer.scene.requestRender();
                 this._renderViewerNow(viewer);
+                if (frameDelayMs > 0) {
+                    await sleep(frameDelayMs);
+                    viewer.scene.requestRender();
+                    this._renderViewerNow(viewer);
+                }
                 if (settleMs > 0) {
                     await this._settlePanoramaCaptureFace(viewer, settleMs);
                 }
@@ -2272,6 +2287,7 @@ export class CesiumWorld {
                     requireTiles: options.requireTiles,
                     tileQuietMs: options.tileQuietMs,
                     tileMinSettleMs: options.tileMinSettleMs,
+                    frameDelayMs: options.frameDelayMs,
                 }
             );
         }
@@ -2306,6 +2322,8 @@ export class CesiumWorld {
         const requireTiles = options.requireTiles !== false;
         const tileQuietMs = Math.max(0, Math.min(1500, Number(options.tileQuietMs) || 180));
         const tileMinSettleMs = Math.max(0, Math.min(1000, Number(options.tileMinSettleMs) || 80));
+        const frameDelayMs = Math.max(0, Math.min(1000, Number(options.frameDelayMs) || 0));
+        const sleep = (ms) => new Promise(resolve => window.setTimeout(resolve, ms));
         const key = `${faceSize}|${projectionMode}|${faceFovDeg}|${verticalFovDeg}`;
         let state = this._panoramaScanState;
         if (!state || state.key !== key) {
@@ -2357,6 +2375,11 @@ export class CesiumWorld {
                 });
                 viewer.scene.requestRender();
                 this._renderViewerNow(viewer);
+                if (frameDelayMs > 0) {
+                    await sleep(frameDelayMs);
+                    viewer.scene.requestRender();
+                    this._renderViewerNow(viewer);
+                }
                 if (settleMs > 0) {
                     await this._settlePanoramaCaptureFace(viewer, settleMs);
                 }
