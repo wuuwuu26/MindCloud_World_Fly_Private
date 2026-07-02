@@ -1454,6 +1454,13 @@ export class CesiumWorld {
         }
     }
 
+    async warmPanoramaCaptureViewer(faceSize = 256) {
+        if (!this.viewer || !this.ready) return false;
+        const size = Math.max(96, Math.round(faceSize || 256));
+        await this._ensurePanoramaCaptureViewer(size);
+        return !!this._getPanoramaProjector();
+    }
+
     async _capturePanoramaHybridWithViewerAsync(viewer, transform, width, height, faceSize, verticalFovDeg = 180, options = {}) {
         const projector = this._getPanoramaProjector();
         if (!projector) return { canvas: null, complete: false, ready: false };
@@ -1511,6 +1518,22 @@ export class CesiumWorld {
                 if (saved.far !== undefined && 'far' in frustum) frustum.far = saved.far;
             }
         }
+    }
+
+    async preloadPanoramaAtTransform(transform, options = {}) {
+        if (!this.viewer || !this.ready || !transform || !transform.position || !transform.orientation) {
+            return { canvas: null, complete: false, ready: false };
+        }
+
+        const width = Math.max(256, Math.round(options.width || 512));
+        const height = Math.max(128, Math.round(options.height || Math.round(width / 2)));
+        const faceSize = Math.max(96, Math.round(options.faceSize || 128));
+        const verticalFovDeg = Math.max(1, Math.min(180, Number(options.verticalFovDeg) || 180));
+        const viewer = await this._ensurePanoramaCaptureViewer(faceSize);
+        return this._capturePanoramaHybridWithViewerAsync(viewer, transform, width, height, faceSize, verticalFovDeg, {
+            faceFovDeg: options.faceFovDeg,
+            frameDelayMs: options.frameDelayMs,
+        });
     }
 
     async capturePanoramaIncrementalAsync(transform, options = {}) {

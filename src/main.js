@@ -51,6 +51,7 @@ let placementInitClickUntil = 0;
 let screenHandler = null;
 let spawnConfirmInProgress = false;
 let startTilesModeInProgress = false;
+let panoramaWarmupPromise = null;
 let thirdPersonPointer = {
     active: false,
     button: -1,
@@ -127,6 +128,19 @@ function showError(error) {
     document.getElementById('loading-overlay')?.classList.add('visible');
 }
 
+function withTimeout(promise, timeoutMs, label) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
+    let timeout = null;
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+            timeout = window.setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+        }),
+    ]).finally(() => {
+        if (timeout !== null) window.clearTimeout(timeout);
+    });
+}
+
 async function waitForCesiumReady(timeoutMs = 15000) {
     if (window.Cesium) return;
     if (!window.googleTilesCesiumReady || typeof window.googleTilesCesiumReady.then !== 'function') return;
@@ -174,6 +188,7 @@ export async function startTilesMode() {
             screenHandler = null;
         }
         if (world) world.destroy();
+        panoramaWarmupPromise = null;
         world = new CesiumWorld('cesium-container');
         await world.init(setProgress);
         collisionProvider = new TilesCollisionProvider(world);
@@ -182,6 +197,7 @@ export async function startTilesMode() {
         setupCesiumPlacementHandler();
         setupThirdPersonPointerControls();
         await enterPlacementMode(true);
+        warmPanoramaViewerInBackground();
         document.getElementById('loading-overlay')?.classList.remove('visible');
 
         if (!loopStarted) {
@@ -193,6 +209,59 @@ export async function startTilesMode() {
         showError(e);
     } finally {
         startTilesModeInProgress = false;
+    }
+}
+
+function warmPanoramaViewerInBackground() {
+    if (!world || !panoramaSensor || panoramaWarmupPromise) return panoramaWarmupPromise;
+    if (typeof world.warmPanoramaCaptureViewer !== 'function') return null;
+
+    const options = typeof panoramaSensor.getCaptureOptions === 'function'
+        ? panoramaSensor.getCaptureOptions({ preload: true })
+        : { faceSize: 256 };
+    panoramaWarmupPromise = world.warmPanoramaCaptureViewer(options.faceSize)
+        .catch((error) => {
+            console.warn('[TilesFlight] panorama viewer warmup failed:', error);
+            panoramaWarmupPromise = null;
+            return false;
+        });
+    return panoramaWarmupPromise;
+}
+
+async function preloadPanoramaBeforeFlight() {
+    if (
+        !world ||
+        !drone ||
+        !panoramaSensor ||
+        typeof world.preloadPanoramaAtTransform !== 'function' ||
+        typeof panoramaSensor.getCaptureOptions !== 'function'
+    ) {
+        return false;
+    }
+
+    const transform = drone.getPanoramaTransform
+        ? drone.getPanoramaTransform()
+        : (drone.getBodyTransform ? drone.getBodyTransform() : drone.getCameraTransform());
+    if (!transform) return false;
+
+    const options = panoramaSensor.getCaptureOptions({ preload: true });
+    const started = performance.now();
+    setProgress('Preloading 360 panorama sensor before flight...');
+
+    try {
+        const result = await withTimeout(
+            (async () => {
+                const warmup = warmPanoramaViewerInBackground();
+                if (warmup) await warmup;
+                return world.preloadPanoramaAtTransform(transform, options);
+            })(),
+            options.timeoutMs,
+            '360 panorama preload'
+        );
+        return panoramaSensor.primeFromCaptureResult(result, performance.now() - started);
+    } catch (error) {
+        console.warn('[TilesFlight] panorama preload failed; live capture will retry in flight:', error);
+        return false;
     }
 }
 
@@ -284,6 +353,7 @@ async function confirmSpawnAndFly() {
         drone.setSpawnPoint(spawnPoint.x, spawnPoint.y, spawnPoint.z);
         drone.reset();
         controller.armed = true;
+        panoramaSensor?.reset();
 
         mode = 'loading';
         applyDisplaySettings();
@@ -311,6 +381,8 @@ async function confirmSpawnAndFly() {
             const msg = e && e.message ? e.message : String(e);
             throw new Error(`Required 200 m tile preload failed: ${msg}`);
         }
+
+        await preloadPanoramaBeforeFlight();
 
         mode = 'view-select';
         document.getElementById('view-choice-overlay')?.classList.add('visible');
@@ -341,7 +413,7 @@ function startFlight(viewMode = 'first') {
     document.getElementById('view-choice-overlay')?.classList.remove('visible');
     document.getElementById('game-logo')?.classList.add('visible');
     hud?.show();
-    panoramaSensor?.reset();
+    if (!panoramaSensor?.hasRgbFrame?.()) panoramaSensor?.reset();
     panoramaSensor?.setActive(true);
 
     const transform = drone.getBodyTransform ? drone.getBodyTransform() : drone.getCameraTransform();

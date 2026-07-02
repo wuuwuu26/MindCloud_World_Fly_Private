@@ -105,7 +105,7 @@ yaw   = pi - (u + 0.5) / W * 2pi
 pitch = vfov / 2 - (v + 0.5) / H * vfov
 ```
 
-这保证投影模型与 YOPO_360 的 ERP 相机一致；区别是数据来源为 Cesium 渲染视图，而不是仿真栅格的直接 raycast。默认每个采样方向切换后等待 `panoFrameDelayMs=160`，用于给 Cesium 完成一帧渲染和纹理上传。
+这保证投影模型与 YOPO_360 的 ERP 相机一致；区别是数据来源为 Cesium 渲染视图，而不是仿真栅格的直接 raycast。放置阶段会后台创建全景采样 viewer；确认出生点后会在用户可控前预采样一张全景首帧。飞行中默认每个采样方向等待 `panoFrameDelayMs=16`，优先提高移动时实时性；首帧预加载使用 `panoPreloadFrameDelayMs=120`，让隐藏 viewer 有时间拉取初始 tiles。
 
 常用参数：
 
@@ -114,7 +114,10 @@ pitch = vfov / 2 - (v + 0.5) / H * vfov
 http://127.0.0.1:8080/?panoWidth=1036&panoFace=768
 
 # 调整采样视图等待时间
-http://127.0.0.1:8080/?panoFrameDelayMs=240
+http://127.0.0.1:8080/?panoFrameDelayMs=32&panoPreloadFrameDelayMs=160
+
+# 调整首帧全景预加载超时
+http://127.0.0.1:8080/?panoPreloadTimeoutMs=10000
 
 # 调整 RGB / 深度更新间隔
 http://127.0.0.1:8080/?panoMs=1000&depthMs=1200

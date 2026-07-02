@@ -24,7 +24,14 @@ const PANORAMA_FACE_SIZE = Math.round(urlNumber('panoFace', 256, 128, 2048));
 const PANORAMA_VERTICAL_FOV = urlNumber('panoVfov', 180, 30, 180);
 const PANORAMA_JPEG_QUALITY = urlNumber('panoJpeg', 0.74, 0.35, 0.95);
 const PANORAMA_FACE_FOV = urlNumber('panoFaceFov', 130, 90, 170);
-const PANORAMA_FRAME_DELAY_MS = urlNumber('panoFrameDelayMs', 160, 0, 1000);
+const PANORAMA_FRAME_DELAY_MS = urlNumber('panoFrameDelayMs', 16, 0, 1000);
+const PANORAMA_PRELOAD_FRAME_DELAY_MS = urlNumber(
+    'panoPreloadFrameDelayMs',
+    Math.max(120, PANORAMA_FRAME_DELAY_MS),
+    0,
+    1000
+);
+const PANORAMA_PRELOAD_TIMEOUT_MS = urlNumber('panoPreloadTimeoutMs', 7000, 500, 30000);
 
 function getDA360Endpoint() {
     const params = new URLSearchParams(window.location.search);
@@ -102,6 +109,41 @@ export class PanoramaSensor {
         if (this.rgbCanvas) this._drawPlaceholder(this.rgbCanvas, 'RGB PANORAMA');
         this._setDepthPlaceholder('DA360 offline');
         this._setStatus('idle', 'offline');
+    }
+
+    hasRgbFrame() {
+        return this.hasRgb;
+    }
+
+    getCaptureOptions(options = {}) {
+        const preload = !!options.preload;
+        return {
+            width: PANORAMA_WIDTH,
+            height: PANORAMA_HEIGHT,
+            faceSize: PANORAMA_FACE_SIZE,
+            verticalFovDeg: PANORAMA_VERTICAL_FOV,
+            faceFovDeg: PANORAMA_FACE_FOV,
+            frameDelayMs: preload ? PANORAMA_PRELOAD_FRAME_DELAY_MS : PANORAMA_FRAME_DELAY_MS,
+            timeoutMs: preload ? PANORAMA_PRELOAD_TIMEOUT_MS : 0,
+        };
+    }
+
+    primeFromCaptureResult(result, captureMs = 0) {
+        if (!this.rgbCanvas) return false;
+        const structuredResult = result && typeof result === 'object' && 'complete' in result;
+        const panoCanvas = structuredResult ? result.canvas : result;
+        const complete = structuredResult ? result.complete !== false : true;
+        if (!complete || !isDrawableImageSource(panoCanvas)) return false;
+
+        const ctx = this.rgbCanvas.getContext('2d');
+        ctx.clearRect(0, 0, this.rgbCanvas.width, this.rgbCanvas.height);
+        ctx.drawImage(panoCanvas, 0, 0, this.rgbCanvas.width, this.rgbCanvas.height);
+        const now = performance.now();
+        this.lastCaptureStartTime = now;
+        this.lastCaptureTime = now;
+        this.hasRgb = true;
+        this._setStatus(`preloaded ${Math.round(captureMs)}ms`, this.hasDepth ? 'ready' : 'offline');
+        return true;
     }
 
     update(world, transform, now = performance.now()) {
@@ -183,14 +225,7 @@ export class PanoramaSensor {
                 : typeof world.capturePanoramaAsync === 'function'
                 ? world.capturePanoramaAsync.bind(world)
                 : world.capturePanorama.bind(world);
-            const result = await capture(transform, {
-                width: PANORAMA_WIDTH,
-                height: PANORAMA_HEIGHT,
-                faceSize: PANORAMA_FACE_SIZE,
-                verticalFovDeg: PANORAMA_VERTICAL_FOV,
-                faceFovDeg: PANORAMA_FACE_FOV,
-                frameDelayMs: PANORAMA_FRAME_DELAY_MS,
-            });
+            const result = await capture(transform, this.getCaptureOptions());
             const structuredResult = result && typeof result === 'object' && 'complete' in result;
             const panoCanvas = structuredResult ? result.canvas : result;
             const complete = structuredResult ? result.complete !== false : true;
