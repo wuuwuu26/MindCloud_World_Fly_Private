@@ -10,18 +10,6 @@ function urlNumber(name, fallback, min, max) {
     }
 }
 
-function urlString(name, fallback, allowed = null) {
-    try {
-        const value = new URLSearchParams(window.location.search).get(name);
-        if (value == null || value === '') return fallback;
-        const normalized = value.trim().toLowerCase();
-        if (Array.isArray(allowed) && !allowed.includes(normalized)) return fallback;
-        return normalized || fallback;
-    } catch (_) {
-        return fallback;
-    }
-}
-
 function evenNumber(value) {
     const n = Math.max(2, Math.round(value));
     return n % 2 === 0 ? n : n + 1;
@@ -34,22 +22,9 @@ const PANORAMA_WIDTH = evenNumber(urlNumber('panoWidth', 672, 280, 5760));
 const PANORAMA_HEIGHT = evenNumber(urlNumber('panoHeight', Math.round(PANORAMA_WIDTH / 2), 140, 2880));
 const PANORAMA_FACE_SIZE = Math.round(urlNumber('panoFace', 256, 128, 2048));
 const PANORAMA_VERTICAL_FOV = urlNumber('panoVfov', 180, 30, 180);
-const PANORAMA_SETTLE_MS = urlNumber('panoSettleMs', 0, 0, 5200);
 const PANORAMA_JPEG_QUALITY = urlNumber('panoJpeg', 0.74, 0.35, 0.95);
-const PANORAMA_PROJECTION = urlString('panoProjection', 'hybrid', ['hybrid', 'cube', 'side', 'sweep']);
-const defaultFaceFov = (PANORAMA_PROJECTION === 'sweep' || PANORAMA_PROJECTION === 'cube') ? 100 : 130;
-const minFaceFov = 90;
-const maxFaceFov = (PANORAMA_PROJECTION === 'sweep' || PANORAMA_PROJECTION === 'cube') ? 120 : 170;
-const PANORAMA_FACE_FOV = urlNumber('panoFaceFov', defaultFaceFov, minFaceFov, maxFaceFov);
-const PANORAMA_SWEEP_FACES = Math.round(urlNumber('panoSweepFaces', 12, 8, 64));
-const defaultFacesPerStep = PANORAMA_PROJECTION === 'sweep'
-    ? Math.min(6, PANORAMA_SWEEP_FACES + 2)
-    : 6;
-const PANORAMA_FACES_PER_STEP = Math.round(urlNumber('panoFacesPerStep', defaultFacesPerStep, 1, 6));
-const PANORAMA_REQUIRE_TILES = urlNumber('panoRequireTiles', 0, 0, 1) >= 0.5;
-const PANORAMA_TILE_QUIET_MS = urlNumber('panoTileQuietMs', PANORAMA_REQUIRE_TILES ? 80 : 0, 0, 1500);
-const PANORAMA_TILE_MIN_SETTLE_MS = urlNumber('panoTileMinSettleMs', PANORAMA_REQUIRE_TILES ? 40 : 0, 0, 1000);
-const PANORAMA_FRAME_DELAY_MS = urlNumber('panoFrameDelayMs', PANORAMA_REQUIRE_TILES ? 0 : 160, 0, 1000);
+const PANORAMA_FACE_FOV = urlNumber('panoFaceFov', 130, 90, 170);
+const PANORAMA_FRAME_DELAY_MS = urlNumber('panoFrameDelayMs', 160, 0, 1000);
 
 function getDA360Endpoint() {
     const params = new URLSearchParams(window.location.search);
@@ -83,15 +58,6 @@ function captureProgressStatus(result, hasRgb) {
     if (result && result.loadingTiles) return `tiles ${faceIndex + 1}/${faceCount}`;
     if (hasRgb) return 'ready';
     return `scanning ${faceIndex}/${faceCount}`;
-}
-
-function recordPanoramaBenchSample(sample) {
-    try {
-        const root = window;
-        if (!Array.isArray(root.__panoramaBenchSamples)) root.__panoramaBenchSamples = [];
-        root.__panoramaBenchSamples.push(sample);
-        if (root.__panoramaBenchSamples.length > 200) root.__panoramaBenchSamples.shift();
-    } catch (_) {}
 }
 
 export class PanoramaSensor {
@@ -222,15 +188,7 @@ export class PanoramaSensor {
                 height: PANORAMA_HEIGHT,
                 faceSize: PANORAMA_FACE_SIZE,
                 verticalFovDeg: PANORAMA_VERTICAL_FOV,
-                settleMs: PANORAMA_SETTLE_MS,
-                useGpuProjector: true,
-                projectionMode: PANORAMA_PROJECTION,
                 faceFovDeg: PANORAMA_FACE_FOV,
-                sweepFaces: PANORAMA_SWEEP_FACES,
-                facesPerStep: PANORAMA_FACES_PER_STEP,
-                requireTiles: PANORAMA_REQUIRE_TILES,
-                tileQuietMs: PANORAMA_TILE_QUIET_MS,
-                tileMinSettleMs: PANORAMA_TILE_MIN_SETTLE_MS,
                 frameDelayMs: PANORAMA_FRAME_DELAY_MS,
             });
             const structuredResult = result && typeof result === 'object' && 'complete' in result;
@@ -258,20 +216,6 @@ export class PanoramaSensor {
             this.hasRgb = true;
             const rgbStatus = `${Math.round(captureMs)}ms`;
             this._setStatus(rgbStatus, this.depthPending ? 'inferring' : (this.hasDepth ? 'ready' : 'offline'));
-            recordPanoramaBenchSample({
-                time: new Date().toISOString(),
-                elapsedMs: Math.round(captureMs),
-                projectionMode: PANORAMA_PROJECTION,
-                faces: structuredResult && Number.isFinite(result.faces) ? result.faces : null,
-                width: PANORAMA_WIDTH,
-                height: PANORAMA_HEIGHT,
-                faceSize: PANORAMA_FACE_SIZE,
-                sweepFaces: PANORAMA_SWEEP_FACES,
-                requireTiles: PANORAMA_REQUIRE_TILES,
-                tileQuietMs: PANORAMA_TILE_QUIET_MS,
-                tileMinSettleMs: PANORAMA_TILE_MIN_SETTLE_MS,
-                frameDelayMs: PANORAMA_FRAME_DELAY_MS,
-            });
 
             if (!this.depthPending && this.lastCaptureTime - this.lastDepthTime >= DEPTH_INTERVAL_MS) {
                 this._requestDepth(this.rgbCanvas);

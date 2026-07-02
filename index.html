@@ -915,7 +915,7 @@
                         window.googleTilesFlightStart();
                         return;
                     }
-                    import('./src/main.js?v=20260702-panorama-fast-hybrid-final')
+                    import('./src/main.js?v=20260702-panorama-hybrid-only')
                         .then(function (mod) {
                             var start = window.googleTilesFlightStart || mod.startTilesMode;
                             if (typeof start === 'function') start();
@@ -926,6 +926,6 @@
             });
         }());
     </script>
-    <script type="module" src="src/main.js?v=20260702-panorama-fast-hybrid-final"></script>
+    <script type="module" src="src/main.js?v=20260702-panorama-hybrid-only"></script>
 </body>
 </html>

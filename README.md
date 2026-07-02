@@ -1,37 +1,28 @@
-# Google 3D Tiles Flight 用户手册
+# Google 3D Tiles Flight
 
-浏览器中的 Google Photorealistic 3D Tiles 穿越机驾驶器。启动本地服务后，在 Chrome / Chromium 里选择城市、放置出生点，然后用键盘、手柄或 RC 遥控器飞行。
+浏览器中的 Google Photorealistic 3D Tiles 穿越机驾驶器。进入页面后选择城市、放置出生点，然后用键盘、手柄或 RC 遥控器飞行。右下角可显示机头 360 ERP 全景 RGB 和 DA360 深度。
 
 ## 环境要求
 
 - Docker Engine
-- Git
 - Chrome / Chromium
 - 浏览器可以访问 Cesium Ion 和 Google 3D Tiles
 - 本地开发模式需要 Python 3
-- 全景 RGB / DA360 深度需要 NVIDIA GPU、NVIDIA Container Toolkit、Python 3 + pip，以及可访问 Google Drive 的网络；默认下载 DA360 small 模型，large 模型约 1.3 GB
+- DA360 深度推理需要 NVIDIA GPU、NVIDIA Container Toolkit、Python 3 + pip，以及可访问模型下载地址的网络
 
-## 开始飞行
-
-在项目目录执行：
+## 启动
 
 ```bash
 ./launch.sh
 ```
 
-启动后打开：
+打开：
 
 ```text
 http://127.0.0.1:8080
 ```
 
-如果脚本没有执行权限，先运行：
-
-```bash
-chmod +x launch.sh scripts/*.sh
-```
-
-常用启动方式：
+常用方式：
 
 ```bash
 # 端口被占用时
@@ -46,91 +37,90 @@ PORT=18081 ./launch.sh
 # 停止后台容器
 docker rm -f google-tiles-flight
 
-# 本地开发模式，不走 Docker
+# 本地开发模式
 ./launch.sh --local
 ```
 
-## 全景 RGB / DA360 深度
+## DA360 深度
 
-第一次使用 DA360 前，先安装模型下载工具：
+首次使用前下载模型并启动推理服务：
 
 ```bash
 python3 -m pip install --user gdown
-```
-
-先启动 DA360 GPU 推理服务：
-
-```bash
 ./scripts/download_da360_model.sh
 DA360_DETACH=1 ./scripts/start_da360_api.sh
 curl http://127.0.0.1:5688/health
 ```
 
-默认使用 `DA360_small`，实时性优先。需要更高精度时可以切换模型：
+默认使用 `DA360_small`。需要更高精度时：
 
 ```bash
 DA360_MODEL=large ./scripts/download_da360_model.sh
 DA360_MODEL=large DA360_DETACH=1 ./scripts/start_da360_api.sh
 ```
 
-再启动飞行页面：
-
-```bash
-./launch.sh
-```
-
-进入飞行后，右下角会显示机头 360 全景 RGB 和 DA360 深度。推理服务不在本机时：
+推理服务不在本机时：
 
 ```text
 http://127.0.0.1:8080/?da360Url=http://<host>:5688/depth
 ```
 
-右下角传感器默认从机头前置 360 相机位置采集实时 ERP 全景：前端按 `672x336` 输出、`256px` 采样视图、`hybrid` 六视角 GPU 重投影；ERP 像素射线仍采用 YOPO_360 同款 `yaw = pi - (u+0.5)/W*2pi`、`pitch = vfov/2 - (v+0.5)/H*vfov` 映射，数据来源是 Cesium/Google Tiles 当前渲染视图而不是 YOPO 的栅格 raycast。YOPO body 的 forward/left/up 映射到本项目 body 分量为 `-Z/+X/+Y`；本项目 local 到 Cesium ENU 是 `x/z/y`，因此采样视图的屏幕右轴按 `up x dir` 处理。默认不再硬等隐藏 tileset 全局 `tilesLoaded`，而是在每个视角切换后用 `panoFrameDelayMs=160` 给 Cesium 固定渲染/请求时间；需要强制等待可加 `panoRequireTiles=1`。DA360 服务默认按 `DA360_INPUT_SCALE=0.65` 使用 `672x336` 输入推理，并且只在完整 RGB 全景更新后触发。需要复现旧版 32 yaw sweep + 上下 cap + 瓦片稳定等待，可使用：
-
-```text
-http://127.0.0.1:8080/?panoProjection=sweep&panoSweepFaces=32&panoFacesPerStep=1&panoRequireTiles=1&panoTileMinSettleMs=80&panoTileQuietMs=180
-```
-
-进入飞行后可在浏览器控制台运行 `runPanoramaBenchmark()`，依次测试 `hybrid-6-fast`、`cube-6-fast`、`sweep-12-fast` 和旧 `sweep-32-stable-legacy` 的完整全景生成耗时；实时传感器每次完整 RGB 图也会把耗时写入 `window.__panoramaBenchSamples`。需要更高质量时把 scale 和分辨率调回官方 `1036x518`：
-
-```text
-DA360_INPUT_SCALE=1.0 DA360_DETACH=1 ./scripts/start_da360_api.sh
-http://127.0.0.1:8080/?panoMs=1000&depthMs=1200&panoWidth=1036&panoFace=768&panoSettleMs=600
-```
-
-如果 Docker Hub 拉取 PyTorch 基础镜像时 TLS 超时，脚本会自动重试 `DA360_BUILD_RETRIES=3` 次。已有本地镜像包含当前 `scripts/da360_server.py` 时会直接复用；否则会停止，避免继续运行旧镜像。网络恢复后重跑即可，或用 `DA360_BASE_IMAGE=<本地或镜像源中的pytorch镜像>` 指定替代基础镜像。只有确认旧镜像可兼容但 SHA 检查无法通过时，才使用 `DA360_ALLOW_STALE_IMAGE=1`。
-
-停止 DA360 推理服务：
+停止推理服务：
 
 ```bash
 docker rm -f mindcloud-da360-api
 ```
 
-从零重跑或模拟新用户 clone 后的首次运行：
+## 飞行流程
 
-```bash
-docker rm -f google-tiles-flight mindcloud-da360-api 2>/dev/null || true
-rm -rf third_party/DA360
-./scripts/download_da360_model.sh
-DA360_DETACH=1 ./scripts/start_da360_api.sh
-curl http://127.0.0.1:5688/health
-./launch.sh --no-open --detach
-curl -I http://127.0.0.1:8080/
-curl -I http://127.0.0.1:8080/ThirdParty/Cesium/Cesium.js
-```
-
-进入页面后的飞行流程：
-
-1. 点 **Start Google 3D Tiles Flight**。
+1. 点击 **Start Google 3D Tiles Flight**。
 2. 等页面进入 **PLACEMENT MODE**。
-3. 用 Cesium 搜索框搜索城市或地点，也可以用鼠标浏览场景。
-4. 按住 `I` 并点击建筑、道路或地面设置出生点；普通点击 / 拖拽只用于移动视角。
-5. 用 `W/A/S/D` 微调位置，按住 `Shift` 可以加快微调。
-6. 在 **SPAWN ALTITUDE (m)** 设置出生高度。
+3. 用 Cesium 搜索框搜索城市或地点。
+4. 按住 `I` 并点击建筑、道路或地面设置出生点。
+5. 用 `W/A/S/D` 微调水平位置，`Shift` 加快微调。
+6. 设置 **SPAWN ALTITUDE (m)**。
 7. 按 `O` 确认出生点。
 8. 选择 **First Person** 或 **Third Person** 开始飞行。
 
-需要固定初始视角或更换 Cesium Ion 资源时，可以在 URL 中加入参数：
+常用按键：
+
+```text
+↑ / ↓       前进 / 后退
+← / →       左右平移
+W / S       上升 / 下降
+A / D       左右偏航
+Shift       加速
+R           重置
+V           切换视角
+P           返回放置模式
+Tab         设置面板
+```
+
+## 全景相机
+
+全景 RGB 默认从机头 360 相机位置采集，输出 `672x336` ERP 图。实现方式是对 Cesium/Google Tiles 渲染结果进行 6 个方向采样，然后在 GPU 中按 ERP 射线模型重投影：
+
+```text
+yaw   = pi - (u + 0.5) / W * 2pi
+pitch = vfov / 2 - (v + 0.5) / H * vfov
+```
+
+这保证投影模型与 YOPO_360 的 ERP 相机一致；区别是数据来源为 Cesium 渲染视图，而不是仿真栅格的直接 raycast。默认每个采样方向切换后等待 `panoFrameDelayMs=160`，用于给 Cesium 完成一帧渲染和纹理上传。
+
+常用参数：
+
+```text
+# 更高输出分辨率
+http://127.0.0.1:8080/?panoWidth=1036&panoFace=768
+
+# 调整采样视图等待时间
+http://127.0.0.1:8080/?panoFrameDelayMs=240
+
+# 调整 RGB / 深度更新间隔
+http://127.0.0.1:8080/?panoMs=1000&depthMs=1200
+```
+
+## 常用 URL 参数
 
 ```text
 # 初始视角
@@ -142,116 +132,15 @@ http://127.0.0.1:8080/?ionToken=<your_token>&assetId=2275207
 
 ## 输入设备
 
-键盘可以直接使用，手柄和 RC 遥控器是可选设备。`launch.sh` 启动时会检查 `/dev/input/js*` 和 `/dev/hidraw*`，并在终端显示当前输入设备状态。
-
-### 手柄
-
-普通手柄通常会被 Chrome 通过 Gamepad API 自动识别。启动页面后如果没有识别到手柄，可以插上设备后刷新页面。
-
-RC 遥控器或需要 WebHID 的设备，建议先检查权限：
+键盘可直接使用。手柄通常会被 Chrome 的 Gamepad API 自动识别。RC 遥控器或 WebHID 设备可在设置面板中连接；如需检查 Linux 输入权限：
 
 ```bash
 ./launch.sh --input-status
-```
-
-如果提示 HID 权限不足，运行一次：
-
-```bash
 ./launch.sh --setup-input
 ```
 
-然后重新插拔设备，再刷新页面。
+## 排查
 
-WebHID 连接步骤：
-
-1. 插上遥控器。
-2. 打开页面后按 `Tab` 打开设置面板。
-3. 如果设备被 Gamepad API 抢占，勾选 **Disable Gamepad API (use Chrome WebHID)**。
-4. 点 **Connect HID**，在 Chrome 弹窗里选择设备。
-5. 需要时点 **Calibrate...** 校准通道。
-
-默认 AETR 映射：
-
-```text
-Axis 0   Roll
-Axis 1   Pitch
-Axis 2   Throttle
-Axis 3   Yaw
-Button 0 Arm toggle
-```
-
-### 键盘
-
-共享按键：
-
-```text
-Space        ARM / DISARM
-Shift        Boost
-R            回到出生点
-M            Drone / FPV 飞行模式
-V            第一人称 / 第三人称视角切换
-P            回到放置模式
-Tab          打开设置面板
-Esc          飞行中返回放置模式
-```
-
-`Drone (Easy)` 模式：
-
-```text
-↑ / ↓        前进 / 后退
-← / →        左 / 右平移
-W / S        上升 / 下降
-A / D        左 / 右偏航
-Q / E        相机俯仰角
-```
-
-`FPV (Manual)` 模式：
-
-```text
-↑ / ↓        向前 / 向后俯仰
-← / →        左 / 右横滚
-W / S        电机推力
-A / D        左 / 右偏航
-```
-
-设置面板里的 **Easy Max Speed** 控制 Easy 模式水平速度，默认 18 m/s；按住 `Shift` 会临时加倍。**Easy W/S Vertical** 控制 Easy 模式升降速度。FPV 模式的 `W/S` 是电机推力，想往前飞需要同时压低机头；FPV 相机固定俯仰角在设置面板的 **FPV Cam Angle** 调整，不使用 `Q/E` 实时调节。
-
-第三人称观察相机：
-
-```text
-鼠标左键拖动      环绕观察
-鼠标右键拖动      环绕观察
-滚轮              拉近 / 拉远
-按住滚轮拖动      平移 / 调观察高度
-```
-
-## troubleshooting
-
-检查服务是否正常：
-
-```bash
-curl -I http://127.0.0.1:8080/
-curl -I http://127.0.0.1:8080/ThirdParty/Cesium/Cesium.js
-```
-
-查看输入设备状态：
-
-```bash
-./launch.sh --input-status
-```
-
-清掉容器和镜像后重建：
-
-```bash
-docker rm -f google-tiles-flight 2>/dev/null || true
-docker rmi google-tiles-flight:latest 2>/dev/null || true
-./launch.sh
-```
-
-常见问题：
-
-- 页面一直加载 Google tiles：确认浏览器可以访问 Cesium Ion 和 Google 3D Tiles，并检查 `ionToken` / `assetId` 是否有效。
-- 页面空白、按钮无反应或 WebGL 报错：用 Chrome / Chromium 打开 `http://127.0.0.1:8080`，不要用 `file://` 打开 `index.html`。浏览器会把 `localhost` 和 `127.0.0.1` 当作不同站点，历史缓存或权限状态可能不同。
-- 端口冲突：用 `PORT=18081 ./launch.sh` 或 `./launch.sh --port 18081`。
-- Chrome 看不到 HID：运行 `./launch.sh --setup-input` 后重新插拔设备。
-- 碰撞偶尔穿墙：这是当前 Cesium 查询代理的限制。
+- 页面一直加载 Google Tiles：确认网络能访问 Cesium Ion 和 Google 3D Tiles，并检查 `ionToken` / `assetId`。
+- 看不到全景或深度：确认右下角设置中 **Nose 360 Panorama Sensor** 已开启；深度还需要 DA360 服务健康。
+- Docker 拉取或构建失败：网络恢复后重跑，或用 `DA360_BASE_IMAGE=<本地或镜像源中的pytorch镜像>` 指定基础镜像。
