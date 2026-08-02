@@ -88,6 +88,8 @@ export class PanoramaSensor {
         this.active = false;
         this.capturing = false;
         this.depthPending = false;
+        this.depthSuppress = false;  // yopo_nav 时抑制 UI 深度请求, 避免与导航环竞争 DA360
+        this.captureIntervalOverride = 0;  // yopo_nav 时降低全景捕获频率 (ms), 0=用默认值
         this.lastCaptureStartTime = 0;
         this.lastCaptureTime = 0;
         this.lastDepthTime = 0;
@@ -165,7 +167,8 @@ export class PanoramaSensor {
         if (!this.panel || !this.rgbCanvas || !world || !transform) return;
         this._applyVisibility();
         if (!this._shouldRun()) return;
-        if (this.capturing || now - this.lastCaptureStartTime < CAPTURE_INTERVAL_MS) return;
+        const capInterval = this.captureIntervalOverride > 0 ? this.captureIntervalOverride : CAPTURE_INTERVAL_MS;
+        if (this.capturing || now - this.lastCaptureStartTime < capInterval) return;
         this._capture(world, transform);
     }
 
@@ -295,7 +298,7 @@ export class PanoramaSensor {
             const rgbStatus = `${Math.round(captureMs)}ms`;
             this._setStatus(rgbStatus, this.depthPending ? 'inferring' : (this.hasDepth ? 'ready' : 'offline'));
 
-            if (!this.depthPending && this.lastCaptureTime - this.lastDepthTime >= DEPTH_INTERVAL_MS) {
+            if (!this.depthPending && !this.depthSuppress && this.lastCaptureTime - this.lastDepthTime >= DEPTH_INTERVAL_MS) {
                 this._requestDepth(this.rgbCanvas);
             }
         } catch (error) {

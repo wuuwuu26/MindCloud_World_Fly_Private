@@ -30,6 +30,8 @@ import { Drone } from './drone.js';
 import { HUD } from './hud.js';
 import { OSD } from './osd.js';
 import { PanoramaSensor } from './panorama-sensor.js';
+import { YOPONavigator } from './yopo-navigator.js';
+import { YOPODepthFromPanorama } from './yopo-depth-from-panorama.js';
 import { reportUserError } from './error-report.js';
 
 let world = null;
@@ -39,6 +41,8 @@ let controller = null;
 let hud = null;
 let osd = null;
 let panoramaSensor = null;
+let yopoNavigator = null;
+let yopoDepthFromPanorama = null;
 
 let mode = 'loading'; // loading | placement | view-select | flight
 let cameraMode = 'first'; // first | third
@@ -52,6 +56,10 @@ let placementInitClickUntil = 0;
 let screenHandler = null;
 let spawnConfirmInProgress = false;
 let startTilesModeInProgress = false;
+let yopoTargetSelectMode = false;
+let yopoTargetMarker = null;
+let yopoNavInProgress = false;
+let yopoControlInProgress = false;
 let panoramaWarmupPromise = null;
 let thirdPersonPointer = {
     active: false,
@@ -75,7 +83,7 @@ const FLIGHT_PRELOAD_MIN_COVERAGE = urlNumber('flightPreloadMinCoverage', 0.95, 
 const FLIGHT_PRELOAD_VIEW_TIMEOUT_MS = Math.round(urlNumber('flightPreloadViewTimeoutMs', 20000, 3000, 60000));
 const FLIGHT_PRELOAD_VIEW_ATTEMPTS = Math.round(urlNumber('flightPreloadViewAttempts', 2, 1, 5));
 const FLIGHT_PRELOAD_STRICT = urlNumber('flightPreloadStrict', 0, 0, 1) >= 0.5;
-const PANORAMA_PRELOAD_REQUIRED = urlNumber('panoPreloadRequired', 1, 0, 1) >= 0.5;
+const PANORAMA_PRELOAD_REQUIRED = urlNumber('panoPreloadRequired', 0, 0, 1) >= 0.5;
 const VIEW_CHOICE_HINT_HTML = '1 / O: First Person &nbsp;|&nbsp; 2: Third Person<br>Easy speed: ↑/↓ forward/back, Shift boost, Tab &gt; Easy Max Speed';
 const MAX_PHYSICS_FRAME_DT = 0.25;
 const PHYSICS_SUBSTEP_DT = 0.05;
@@ -216,8 +224,11 @@ function initSubsystems() {
     hud = new HUD();
     osd = new OSD('osd-canvas');
     panoramaSensor = new PanoramaSensor();
+    yopoNavigator = new YOPONavigator();
 
     setupDisplaySettingsListeners();
+    setupYOPOUI();
+    yopoDepthFromPanorama = null;
 }
 
 export async function startTilesMode() {
@@ -240,6 +251,7 @@ export async function startTilesMode() {
         await world.init(setProgress);
         collisionProvider = new TilesCollisionProvider(world);
         sceneLoaded = true;
+        yopoDepthFromPanorama = new YOPODepthFromPanorama(world, panoramaSensor);
 
         setupCesiumPlacementHandler();
         setupThirdPersonPointerControls();
@@ -621,7 +633,9 @@ function moveSpawn(dt) {
     const speed = (fast ? 25 : 6) * dt;
     const heading = world.viewer.camera.heading || 0;
     const fwd = { x: Math.sin(heading), z: Math.cos(heading) };
-    const right = { x: Math.cos(heading), z: -Math.sin(heading) };
+    // 右手系: right = cross(fwd, up) = (-cos h, 0, sin h)
+    // 原代码 right=(cos h, 0, -sin h)=cross(up,fwd)=left → D键左移, A键右移(反了)
+    const right = { x: -Math.cos(heading), z: Math.sin(heading) };
 
     if (placementKeysDown.has('KeyW')) {
         spawnPoint.x += fwd.x * speed;
@@ -694,7 +708,7 @@ function updateFlight(dt) {
         controller.armed = true;
     }
 
-    if (drone.flightMode === 'drone') {
+    if (drone.flightMode === 'drone' || drone.flightMode === 'simpleflight') {
         if (Math.abs(input.cameraTiltKeyboard) > 0.05) {
             drone.adjustCameraTilt(input.cameraTiltKeyboard * 60 * dt);
         }
@@ -710,6 +724,149 @@ function updateFlight(dt) {
         drone.update(stepDt, input, collisionProvider);
         remainingDt -= stepDt;
         substeps++;
+    }
+
+    // ---- YOPO 导航更新 (深度/控制分离) ----
+    // 模仿 YOPO 原始架构: control_pub(50Hz) + callback_depth(30Hz重规划)
+    //   - 控制环 (~60Hz, 每渲染帧): /yopo/control 推进 ctrl_time, 评估多项式
+    //   - 深度环 (~0.4Hz, 深度到达时): /yopo/navigate 重新推理, 重建多项式
+    // 两者独立, 互不阻塞。控制命令始终新鲜, 无人机不盲飞。
+    if (drone.flightMode === 'yopo_nav' && drone.yopoNavActive && yopoNavigator && !drone.yopoArrived) {
+        const pos = { x: drone.x, y: drone.y, z: drone.z };
+        const vel = { x: drone.vx, y: drone.vy, z: drone.vz };
+        const orient = {
+            x: drone.orientation.x,
+            y: drone.orientation.y,
+            z: drone.orientation.z,
+            w: drone.orientation.w,
+        };
+
+        // ── 控制环 (高频, 每帧) ──
+        // 不带深度, 用上次多项式推进 ctrl_time, 返回 poly(ctrl_time) 的 pos/vel/acc/yaw。
+        // 一次只允许一个 control 请求在途, HTTP 往返自然限频 (~50-100Hz)。
+        if (!yopoControlInProgress) {
+            yopoControlInProgress = true;
+            (async () => {
+                try {
+                    const cmd = await yopoNavigator.control(pos, vel, orient);
+                    if (cmd && !cmd.error) {
+                        drone.yopoCmdPos = cmd.position;
+                        drone.yopoCmdVel = cmd.velocity;
+                        drone.yopoCmdAcc = cmd.acceleration;
+                        drone.yopoCmdYaw = cmd.yaw;
+                        drone.yopoCmdYawDot = cmd.yaw_dot || 0;
+                        drone.yopoCmdTime = performance.now();
+                        drone.yopoArrived = cmd.arrived || false;
+                        drone.yopoDistToGoal = cmd.dist_to_goal || 0;
+                    }
+                } catch (e) {
+                    // 高频调用, 静默处理瞬态错误
+                }
+                yopoControlInProgress = false;
+            })();
+        }
+
+        // ── 深度环 (低频, 深度到达时) ──
+        // 带深度+odom, 运行 YOPO 推理, 重建多项式, 重置 ctrl_time=0。
+        // 一次只允许一个 navigate 请求在途, 与控制环并行不阻塞。
+        if (!yopoNavInProgress) {
+            yopoNavInProgress = true;
+            if (drone.yopoInferenceCount === 0) {
+                console.log('YOPO nav loop: starting first inference cycle');
+            }
+            (async () => {
+                try {
+                    const t0 = performance.now();
+                    const cameraTransform = drone.getCameraTransform();
+                    let depthResult = null;
+
+                    // Prefer DA360 ERP panoramic depth (YOPO_360 native input).
+                    if (yopoDepthFromPanorama) {
+                        depthResult = await yopoDepthFromPanorama.captureYOPODepthERP(cameraTransform, {
+                            width: 384,   // YOPO_360 ERP image_width  (columns)
+                            height: 192,  // YOPO_360 ERP image_height (rows)
+                            maxDistance: 20,
+                            timeoutMs: 6000,
+                        });
+                    }
+                    const t1 = performance.now();
+                    if (!depthResult) {
+                        if (drone.yopoInferenceCount < 3 || drone.yopoInferenceCount % 30 === 0) {
+                            console.warn('YOPO: DA360 ERP depth capture failed, using Cesium ray fallback');
+                        }
+                        depthResult = world.captureForwardDepth(cameraTransform, {
+                            width: 384,
+                            height: 192,
+                            gridCols: 24,
+                            gridRows: 12,
+                            hfovDeg: 90,
+                            maxDistance: 20,
+                        });
+                    }
+
+                    if (!depthResult || !depthResult.depth) {
+                        throw new Error('depth capture failed');
+                    }
+
+                    const cmd = await yopoNavigator.navigate(
+                        depthResult.depth,
+                        depthResult.encoding,
+                        pos,
+                        vel,
+                        orient,
+                        depthResult.mask
+                    );
+                    const t2 = performance.now();
+                    if (drone.yopoInferenceCount < 5 || drone.yopoInferenceCount % 20 === 0) {
+                        console.log(`YOPO timing: depth=${(t1-t0).toFixed(0)}ms navigate=${(t2-t1).toFixed(0)}ms total=${(t2-t0).toFixed(0)}ms`);
+                    }
+
+                    if (cmd && !cmd.error) {
+                        // navigate 返回 ctrl_time=0 处的命令; 控制环下一帧会推进
+                        // ctrl_time 并覆盖。首次推理后立即更新避免悬停等待。
+                        drone.yopoCmdPos = cmd.position;
+                        drone.yopoCmdVel = cmd.velocity;
+                        drone.yopoCmdAcc = cmd.acceleration;
+                        drone.yopoCmdYaw = cmd.yaw;
+                        drone.yopoCmdYawDot = cmd.yaw_dot || 0;
+                        drone.yopoCmdTime = performance.now();
+                        drone.yopoArrived = cmd.arrived || false;
+                        drone.yopoDistToGoal = cmd.dist_to_goal || 0;
+                        if (drone.yopoInferenceCount < 5 || drone.yopoInferenceCount % 30 === 0) {
+                            const dx = cmd.position.x - drone.x;
+                            const dy = cmd.position.y - drone.y;
+                            const dz = cmd.position.z - drone.z;
+                            const posErrMag = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                            console.log(`YOPO #${drone.yopoInferenceCount}: cmd_pos=(${cmd.position.x.toFixed(1)},${cmd.position.y.toFixed(1)},${cmd.position.z.toFixed(1)}) ` +
+                                `drone_pos=(${drone.x.toFixed(1)},${drone.y.toFixed(1)},${drone.z.toFixed(1)}) ` +
+                                `posErr=(${dx.toFixed(2)},${dy.toFixed(2)},${dz.toFixed(2)}) mag=${posErrMag.toFixed(2)} ` +
+                                `cmd_vel=(${cmd.velocity.x.toFixed(2)},${cmd.velocity.y.toFixed(2)},${cmd.velocity.z.toFixed(2)}) ` +
+                                `cmd_acc=(${cmd.acceleration.x.toFixed(2)},${cmd.acceleration.y.toFixed(2)},${cmd.acceleration.z.toFixed(2)})`);
+                        }
+                    } else if (cmd && cmd.error) {
+                        if (drone.yopoInferenceCount < 3 || drone.yopoInferenceCount % 30 === 0) {
+                            console.warn('YOPO server error:', cmd.error);
+                        }
+                    }
+                } catch (e) {
+                    // Silently handle YOPO errors during flight
+                    if (drone.yopoInferenceCount % 30 === 0) {
+                        console.warn('YOPO navigation error:', e);
+                    }
+                }
+                drone.yopoInferenceCount++;
+                yopoNavInProgress = false;
+            })();
+        }
+    }
+
+    // Locally compute distance to goal every frame (independent of server
+    // response) so the UI always reflects the true distance.
+    if (drone.yopoNavTarget && drone.flightMode === 'yopo_nav') {
+        const dx = drone.yopoNavTarget.x - drone.x;
+        const dy = drone.yopoNavTarget.y - drone.y;
+        const dz = drone.yopoNavTarget.z - drone.z;
+        drone.yopoDistToGoal = Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
 
     // Camera mode only selects visualization; controller and physics stay shared.
@@ -730,6 +887,7 @@ function updateFlight(dt) {
     applyDisplaySettings();
     osd?.update(drone, controller);
     updateKeyGuide();
+    updateYOPOStatusUI();
 }
 
 function applyDisplaySettings() {
@@ -770,6 +928,289 @@ function setupDisplaySettingsListeners() {
         if (!el || el._tilesDisplayBound) continue;
         el._tilesDisplayBound = true;
         el.addEventListener('change', applyDisplaySettings);
+    }
+}
+
+function setupYOPOUI() {
+    if (yopoNavigator && yopoNavigator._uiBound) return;
+    if (!yopoNavigator) return;
+
+    const selectTargetBtn = document.getElementById('yopo-select-target-btn');
+    const startNavBtn = document.getElementById('yopo-start-nav-btn');
+    const stopNavBtn = document.getElementById('yopo-stop-nav-btn');
+    if (!selectTargetBtn || !startNavBtn || !stopNavBtn) return;
+
+    yopoNavigator._uiBound = true;
+
+    // 选取目标点 button: enter keyboard-driven target selection mode.
+    // Target starts at the drone's current position; user moves it with
+    // arrow keys and presses Enter to confirm (which also auto-starts nav).
+    selectTargetBtn.addEventListener('click', () => {
+        if (mode !== 'flight' || !drone) return;
+        if (yopoTargetSelectMode) return; // already selecting
+        yopoTargetSelectMode = true;
+        // Initialise target at the drone's current position
+        const x = drone.x;
+        const y = drone.y;
+        const z = drone.z;
+        document.getElementById('yopo-target-x').value = x.toFixed(1);
+        document.getElementById('yopo-target-y').value = y.toFixed(1);
+        document.getElementById('yopo-target-z').value = z.toFixed(1);
+        createYOPOTargetMarker(x, y, z);
+        document.getElementById('yopo-status-text').textContent =
+            '状态: 目标选择模式 (小键盘8/2/4/6/9/3移动, 5确认, 0取消)';
+        console.log('YOPO target select mode: starting at drone pos', { x, y, z });
+    });
+
+    // Start Navigation button (manual fallback — normally Enter in select mode)
+    startNavBtn.addEventListener('click', async () => {
+        if (!drone.yopoNavTarget) {
+            document.getElementById('yopo-status-text').textContent = '状态: 请先设置目标点';
+            return;
+        }
+        // Check YOPO server connectivity
+        const status = await yopoNavigator.getStatus();
+        if (!status) {
+            document.getElementById('yopo-status-text').textContent = '状态: YOPO服务器未响应 (端口5689)';
+            console.warn('YOPO server not reachable at', yopoNavigator.serverUrl);
+            return;
+        }
+        drone.flightMode = 'yopo_nav';
+        drone.yopoNavActive = true;
+        if (panoramaSensor) {
+            panoramaSensor.depthSuppress = true;  // 抑制 UI 深度, 导航环独占 DA360
+            panoramaSensor.captureIntervalOverride = 100;  // 10Hz 全景, 释放 GPU 给深度管线
+        }
+        drone.yopoArrived = false;
+        drone.yopoInferenceCount = 0;
+        drone.yopoCmdPos = null;
+        drone.yopoCmdVel = null;
+        drone.yopoCmdTime = 0;
+        // Sync the flight mode dropdown
+        const modeSelect = document.getElementById('flight-mode-select');
+        if (modeSelect) modeSelect.value = 'yopo_nav';
+        document.getElementById('yopo-status-text').textContent = '状态: 导航中...';
+        document.getElementById('yopo-start-nav-btn').textContent = '导航中...';
+        console.log('YOPO navigation started, goal:', drone.yopoNavTarget);
+    });
+
+    // Stop Navigation button
+    stopNavBtn.addEventListener('click', () => {
+        drone.yopoNavActive = false;
+        if (panoramaSensor) {
+            panoramaSensor.depthSuppress = false;  // 恢复 UI 深度显示
+            panoramaSensor.captureIntervalOverride = 0;  // 恢复 60Hz 全景
+        }
+        drone.yopoCmdPos = null;
+        drone.yopoCmdVel = null;
+        drone.yopoCmdTime = 0;
+        // Switch back to simpleflight or drone mode
+        drone.flightMode = 'simpleflight';
+        const modeSelect = document.getElementById('flight-mode-select');
+        if (modeSelect) modeSelect.value = 'simpleflight';
+        document.getElementById('yopo-status-text').textContent = '状态: 已停止';
+        document.getElementById('yopo-start-nav-btn').textContent = '开始导航';
+        removeYOPOTargetMarker();
+    });
+}
+
+// ── YOPO target selection helpers ───────────────────────────────
+
+const YOPO_TARGET_STEP = 0.5; // metres per key press
+
+/** Create (or reuse) a Cesium entity marking the YOPO target position. */
+function createYOPOTargetMarker(x, y, z) {
+    if (!world || !world.viewer) return;
+    const Cesium = world.Cesium;
+    const position = world.localToCartesian({ x, y, z });
+    if (yopoTargetMarker) {
+        yopoTargetMarker.position = position;
+        yopoTargetMarker.show = true;
+    } else {
+        yopoTargetMarker = world.viewer.entities.add({
+            name: 'yopo-target',
+            position,
+            point: {
+                pixelSize: 16,
+                color: Cesium.Color.fromBytes(255, 200, 0, 255), // amber
+                outlineColor: Cesium.Color.WHITE,
+                outlineWidth: 2,
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+            label: {
+                text: 'YOPO TARGET',
+                font: '12px sans-serif',
+                pixelOffset: new Cesium.Cartesian2(0, -24),
+                fillColor: Cesium.Color.fromBytes(255, 200, 0, 255),
+                outlineColor: Cesium.Color.BLACK,
+                outlineWidth: 2,
+                style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+        });
+    }
+    world.viewer.scene.requestRender();
+}
+
+/** Move the existing target marker to a new position. */
+function updateYOPOTargetMarker(x, y, z) {
+    if (!yopoTargetMarker || !world || !world.viewer) return;
+    yopoTargetMarker.position = world.localToCartesian({ x, y, z });
+    world.viewer.scene.requestRender();
+}
+
+/** Hide / destroy the target marker. */
+function removeYOPOTargetMarker() {
+    if (yopoTargetMarker && world && world.viewer) {
+        world.viewer.entities.remove(yopoTargetMarker);
+    }
+    yopoTargetMarker = null;
+}
+
+/**
+ * Keyboard handler for YOPO target selection.  Called from the main
+ * keydown listener (capture phase) when yopoTargetSelectMode is active.
+ * Uses the numeric keypad (e.code so NumLock state does not matter).
+ *
+ *   Numpad 8/2 = forward/back (north/south, -z/+z)
+ *   Numpad 4/6 = left/right   (west/east,  -x/+x)
+ *   Numpad 9/3 = up/down      (+y/-y)
+ *   Numpad 5   = confirm (start navigation)
+ *   Numpad 0   = cancel
+ *
+ * Returns true if the event was consumed.
+ */
+function handleYOPOKeyDown(e) {
+    if (!yopoTargetSelectMode) return false;
+
+    const xInput = document.getElementById('yopo-target-x');
+    const yInput = document.getElementById('yopo-target-y');
+    const zInput = document.getElementById('yopo-target-z');
+    if (!xInput || !yInput || !zInput) return false;
+
+    let x = parseFloat(xInput.value);
+    let y = parseFloat(yInput.value);
+    let z = parseFloat(zInput.value);
+    if (!Number.isFinite(x)) x = 0;
+    if (!Number.isFinite(y)) y = 2;
+    if (!Number.isFinite(z)) z = 0;
+
+    let consumed = true;
+    switch (e.code) {
+        case 'Numpad8': case 'NumpadArrowUp':    z -= YOPO_TARGET_STEP; break; // north (-z)
+        case 'Numpad2': case 'NumpadArrowDown':  z += YOPO_TARGET_STEP; break; // south (+z)
+        case 'Numpad4': case 'NumpadArrowLeft':  x -= YOPO_TARGET_STEP; break; // west  (-x)
+        case 'Numpad6': case 'NumpadArrowRight': x += YOPO_TARGET_STEP; break; // east  (+x)
+        case 'Numpad9':                          y += YOPO_TARGET_STEP; break; // up    (+y)
+        case 'Numpad3':                          y -= YOPO_TARGET_STEP; break; // down  (-y)
+        case 'Numpad5': case 'NumpadEnter':
+            confirmYOPOTarget(x, y, z);
+            break;
+        case 'Numpad0': case 'NumpadDecimal': case 'Escape':
+            cancelYOPOTarget();
+            break;
+        default:
+            consumed = false;
+    }
+
+    if (consumed) {
+        xInput.value = x.toFixed(1);
+        yInput.value = y.toFixed(1);
+        zInput.value = z.toFixed(1);
+        // Update marker only; do NOT set drone.yopoNavTarget here —
+        // that must only happen in confirmYOPOTarget so the drone
+        // doesn't start flying before the user presses Numpad 5.
+        updateYOPOTargetMarker(x, y, z);
+        e.preventDefault();
+        e.stopImmediatePropagation(); // prevent controller from flying
+    }
+    return consumed;
+}
+
+/** Confirm the selected target: set goal on server and auto-start nav. */
+async function confirmYOPOTarget(x, y, z) {
+    yopoTargetSelectMode = false;
+    document.getElementById('yopo-status-text').textContent =
+        `状态: 设置目标 (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})...`;
+
+    const ok = await yopoNavigator.setGoal(x, y, z);
+    if (!ok) {
+        document.getElementById('yopo-status-text').textContent = '状态: 设置目标失败';
+        removeYOPOTargetMarker();
+        return;
+    }
+    drone.yopoNavTarget = { x, y, z };
+
+    // Check YOPO server connectivity before starting
+    const status = await yopoNavigator.getStatus();
+    if (!status) {
+        document.getElementById('yopo-status-text').textContent =
+            '状态: YOPO服务器未响应 (端口5689)';
+        console.warn('YOPO server not reachable at', yopoNavigator.serverUrl);
+        removeYOPOTargetMarker();
+        return;
+    }
+
+    // Auto-start navigation
+    drone.flightMode = 'yopo_nav';
+    drone.yopoNavActive = true;
+    if (panoramaSensor) {
+        panoramaSensor.depthSuppress = true;  // 抑制 UI 深度, 导航环独占 DA360
+        panoramaSensor.captureIntervalOverride = 100;  // 10Hz 全景, 释放 GPU 给深度管线
+    }
+    drone.yopoArrived = false;
+    drone.yopoInferenceCount = 0;
+    drone.yopoCmdPos = null;
+    drone.yopoCmdVel = null;
+    drone.yopoCmdTime = 0;
+    const modeSelect = document.getElementById('flight-mode-select');
+    if (modeSelect) modeSelect.value = 'yopo_nav';
+    document.getElementById('yopo-status-text').textContent = '状态: 导航中...';
+    document.getElementById('yopo-start-nav-btn').textContent = '导航中...';
+    console.log('YOPO navigation started, goal:', drone.yopoNavTarget);
+}
+
+/** Cancel target selection mode. */
+function cancelYOPOTarget() {
+    yopoTargetSelectMode = false;
+    // Clear the temporary target set during selection (not yet confirmed
+    // with the server, so no goal to revoke there).
+    drone.yopoNavTarget = null;
+    drone.yopoDistToGoal = 0;
+    removeYOPOTargetMarker();
+    document.getElementById('yopo-status-text').textContent = '状态: 已取消目标选择';
+}
+
+function updateYOPOStatusUI() {
+    if (!drone || !yopoNavigator) return;
+    const statusEl = document.getElementById('yopo-status-text');
+    const distEl = document.getElementById('yopo-dist-text');
+    const countEl = document.getElementById('yopo-count-text');
+    if (!statusEl || !distEl || !countEl) return;
+
+    // Show distance during target selection mode too (compute from inputs,
+    // NOT from drone.yopoNavTarget which is not set until confirmation).
+    if (yopoTargetSelectMode && drone) {
+        const tx = parseFloat(document.getElementById('yopo-target-x')?.value);
+        const ty = parseFloat(document.getElementById('yopo-target-y')?.value);
+        const tz = parseFloat(document.getElementById('yopo-target-z')?.value);
+        if (Number.isFinite(tx) && Number.isFinite(ty) && Number.isFinite(tz)) {
+            const dx = tx - drone.x, dy = ty - drone.y, dz = tz - drone.z;
+            distEl.textContent = `到目标距离: ${Math.sqrt(dx*dx+dy*dy+dz*dz).toFixed(2)} m`;
+        }
+        return;
+    }
+
+    if (drone.flightMode === 'yopo_nav' && drone.yopoNavActive) {
+        if (drone.yopoArrived) {
+            statusEl.textContent = '状态: 已到达目标 ✓';
+            // Remove target marker once arrived
+            if (yopoTargetMarker) removeYOPOTargetMarker();
+        } else {
+            statusEl.textContent = '状态: 导航中...';
+        }
+        distEl.textContent = `到目标距离: ${drone.yopoDistToGoal.toFixed(2)} m`;
+        countEl.textContent = `推理计数: ${drone.yopoInferenceCount}`;
     }
 }
 
@@ -947,6 +1388,10 @@ function setupKeyboard() {
             }
             return;
         }
+
+        // YOPO target selection mode intercepts arrow keys / Enter / Esc
+        // before they reach the flight controller.
+        if (yopoTargetSelectMode && handleYOPOKeyDown(e)) return;
 
         if (mode === 'placement') {
             placementKeysDown.add(e.code);

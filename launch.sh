@@ -9,9 +9,12 @@ DETACH="${DETACH:-0}"
 MODE="docker"
 OPEN_BROWSER=1
 LOOPBACK_HOST="127.0.0.1"
+YOPO_ENABLE=0
+YOPO_PORT="${YOPO_PORT:-5689}"
 
 RULE_FILE="/etc/udev/rules.d/99-google-tiles-flight-input.rules"
 LOCAL_PID=""
+YOPO_PID=""
 LOG_PID=""
 CONTAINER_STARTED=0
 _CLEANED=0
@@ -22,16 +25,20 @@ Usage:
   ./launch.sh                 Build/run Docker, then open the browser
   ./launch.sh --no-open       Start the server only
   ./launch.sh --local         Use scripts/serve.py for local development
+  ./launch.sh --yopo          Also start the YOPO navigation backend service
   ./launch.sh --setup-input   Install Linux udev rules for RC/WebHID access
+  ./launch.sh --rebuild       Force rebuild Docker image even if it exists
 
 Options:
   --docker                    Use Docker mode (default)
   --local                     Use local Python server
+  --yopo                      Start YOPO navigation backend service (port $YOPO_PORT)
   --no-open, no-open          Do not open Chrome/Chromium
   --detach                    Keep Docker container running in the background
   --port PORT                 Host port, same as PORT=18081 ./launch.sh
   --image IMAGE               Docker image name
   --name NAME                 Docker container name
+  --rebuild                   Force rebuild Docker image
   --input-status              Print controller/HID status and exit
   -h, --help                  Show this help
 
@@ -238,6 +245,14 @@ cleanup() {
         wait "$LOG_PID" 2>/dev/null || true
     fi
 
+    if [[ -n "$YOPO_PID" ]]; then
+        echo
+        echo "Stopping YOPO navigation server..."
+        kill -TERM "$YOPO_PID" 2>/dev/null || true
+        sleep 0.3
+        kill -KILL "$YOPO_PID" 2>/dev/null || true
+    fi
+
     exit "$code"
 }
 
@@ -420,8 +435,22 @@ run_docker() {
     stop_repo_local_servers "$PORT" || true
     ensure_port_available "$PORT"
 
-    echo "Building Docker image: $IMAGE"
-    docker build -f "$SCRIPT_DIR/Dockerfile.cesium" -t "$IMAGE" "$SCRIPT_DIR"
+    # Check if the Docker image exists and if we need to rebuild
+    local image_exists=0
+    if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+        image_exists=1
+    fi
+
+    # Only build if image doesn't exist OR --rebuild flag is set
+    if [[ "${REBUILD:-0}" == "1" ]]; then
+        echo "Force rebuilding Docker image: $IMAGE"
+        docker build -f "$SCRIPT_DIR/Dockerfile.cesium" -t "$IMAGE" "$SCRIPT_DIR"
+    elif [[ "$image_exists" == "0" ]]; then
+        echo "Building Docker image: $IMAGE"
+        docker build -f "$SCRIPT_DIR/Dockerfile.cesium" -t "$IMAGE" "$SCRIPT_DIR"
+    else
+        echo "Using existing Docker image: $IMAGE (use --rebuild to force rebuild)"
+    fi
 
     local url="http://$LOOPBACK_HOST:$PORT"
 
@@ -431,6 +460,8 @@ run_docker() {
         --name "$NAME" \
         -p "$PORT:8000" \
         -v "$SCRIPT_DIR/asset/gate-paths:/var/www/google-tiles-flight/asset/gate-paths" \
+        -v "$SCRIPT_DIR/index.html:/var/www/google-tiles-flight/index.html:ro" \
+        -v "$SCRIPT_DIR/src:/var/www/google-tiles-flight/src:ro" \
         "$IMAGE" 2>&1)"; then
         echo "$docker_output" >&2
         if [[ "$docker_output" == *"address already in use"* || "$docker_output" == *"port is already allocated"* || "$docker_output" == *"failed to bind"* ]]; then
@@ -440,6 +471,22 @@ run_docker() {
     fi
     CONTAINER_STARTED=1
 
+    # Start YOPO navigation backend if requested
+    if [[ "$YOPO_ENABLE" == "1" ]]; then
+        if [[ -x "$SCRIPT_DIR/scripts/start_yopo_api.sh" ]]; then
+            echo "Starting YOPO navigation backend service..."
+            YOPO_MODE=local \
+            YOPO_PORT="$YOPO_PORT" \
+            "$SCRIPT_DIR/scripts/start_yopo_api.sh" &
+            YOPO_PID=$!
+            sleep 1
+            kill -0 "$YOPO_PID" 2>/dev/null || echo "Warning: YOPO server may not have started." >&2
+            echo "YOPO navigation backend started (PID $YOPO_PID, port $YOPO_PORT)"
+        else
+            echo "Warning: start_yopo_api.sh not found. Skipping YOPO startup." >&2
+        fi
+    fi
+
     open_browser "$url"
 
     cat <<EOF
@@ -448,6 +495,10 @@ Simulator: $url
 Stop:      Ctrl+C
 Input:     keyboard works; gamepad/WebHID is optional.
 EOF
+
+    if [[ "$YOPO_ENABLE" == "1" ]]; then
+        echo "YOPO:     http://$LOOPBACK_HOST:$YOPO_PORT (navigation backend)"
+    fi
 
     if truthy "$DETACH"; then
         echo "Docker container $NAME is running in the background."
@@ -469,6 +520,22 @@ run_local() {
 
     ensure_port_available "$PORT"
 
+    # Start YOPO navigation backend if requested
+    if [[ "$YOPO_ENABLE" == "1" ]]; then
+        if [[ -x "$SCRIPT_DIR/scripts/start_yopo_api.sh" ]]; then
+            echo "Starting YOPO navigation backend service..."
+            YOPO_MODE=local \
+            YOPO_PORT="$YOPO_PORT" \
+            "$SCRIPT_DIR/scripts/start_yopo_api.sh" &
+            YOPO_PID=$!
+            sleep 1
+            kill -0 "$YOPO_PID" 2>/dev/null || echo "Warning: YOPO server may not have started." >&2
+            echo "YOPO navigation backend started (PID $YOPO_PID, port $YOPO_PORT)"
+        else
+            echo "Warning: start_yopo_api.sh not found. Skipping YOPO startup." >&2
+        fi
+    fi
+
     local url="http://$LOOPBACK_HOST:$PORT"
 
     echo "Starting local server at $url"
@@ -486,9 +553,15 @@ Stop:      Ctrl+C
 Input:     keyboard works; gamepad/WebHID is optional.
 EOF
 
+    if [[ "$YOPO_ENABLE" == "1" ]]; then
+        echo "YOPO:     http://$LOOPBACK_HOST:$YOPO_PORT (navigation backend)"
+    fi
+
     wait "$LOCAL_PID"
 }
 
+# Parse command line arguments
+REBUILD=0
 while (($# > 0)); do
     case "$1" in
         --docker)
@@ -527,6 +600,9 @@ while (($# > 0)); do
         --name=*)
             NAME="${1#*=}"
             ;;
+        --rebuild)
+            REBUILD=1
+            ;;
         --setup-input)
             setup_input_rules
             exit 0
@@ -534,6 +610,9 @@ while (($# > 0)); do
         --input-status)
             print_input_status
             exit 0
+            ;;
+        --yopo)
+            YOPO_ENABLE=1
             ;;
         -h|--help)
             usage

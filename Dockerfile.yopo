@@ -1,0 +1,61 @@
+# YOPO Navigation Server
+# Based on PyTorch CUDA runtime image (same base as DA360)
+
+ARG YOPO_BASE_IMAGE=pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime
+FROM $YOPO_BASE_IMAGE
+
+LABEL maintainer="mindcloud-yopo"
+ARG YOPO_SERVER_SHA=unknown
+LABEL mindcloud.yopo.server_sha="${YOPO_SERVER_SHA}"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies using host proxy (port 7890).
+# Build with --network=host so 127.0.0.1 reaches the host's proxy.
+ARG HTTP_PROXY=http://127.0.0.1:7890
+ARG HTTPS_PROXY=http://127.0.0.1:7890
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+ENV http_proxy=${HTTP_PROXY}
+ENV https_proxy=${HTTPS_PROXY}
+
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir \
+        --default-timeout 120 \
+        --retries 10 \
+        'numpy<2' \
+        pillow \
+        opencv-python-headless \
+        scipy \
+        flask \
+        flask-cors \
+        ruamel.yaml
+
+# Clear proxy env so the running container doesn't inherit it
+ENV HTTP_PROXY=
+ENV HTTPS_PROXY=
+ENV http_proxy=
+ENV https_proxy=
+
+# Create directories
+RUN mkdir -p /opt/mindcloud-yopo/scripts /opt/mindcloud-yopo/third_party/yopo
+
+# Copy the server script
+COPY scripts/yopo_server.py /opt/mindcloud-yopo/scripts/yopo_server.py
+
+# Copy the YOPO source code
+COPY third_party/yopo /opt/mindcloud-yopo/third_party/yopo
+
+# Expose the YOPO API port
+EXPOSE 5689
+
+# Default command (overridden by start_yopo_api.sh)
+CMD ["python", "/opt/mindcloud-yopo/scripts/yopo_server.py", "--help"]

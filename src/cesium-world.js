@@ -1082,6 +1082,52 @@ export class CesiumWorld {
         return spawn;
     }
 
+    /**
+     * Pick a 3D point and return it in the EXISTING local frame.
+     * Unlike pickSpawn, this does NOT reset the world origin.
+     * Used for YOPO target selection.
+     */
+    async pickTargetPoint(windowPosition) {
+        const Cesium = this.Cesium;
+        const scene = this.viewer.scene;
+        let cartesian = null;
+
+        try {
+            const picked = scene.pick(windowPosition);
+            if (picked && scene.pickPositionSupported) {
+                const p = scene.pickPosition(windowPosition);
+                if (Cesium.defined(p)) cartesian = p;
+            }
+        } catch (error) {
+            cartesian = null;
+        }
+
+        if (!cartesian) {
+            try {
+                const ray = this.viewer.camera.getPickRay(windowPosition);
+                if (ray && typeof scene.pickFromRay === 'function') {
+                    const hit = scene.pickFromRay(ray);
+                    if (hit && Cesium.defined(hit.position)) cartesian = hit.position;
+                }
+            } catch (error) {
+                cartesian = null;
+            }
+        }
+
+        if (!cartesian) {
+            try {
+                const p = this.viewer.camera.pickEllipsoid(windowPosition, Cesium.Ellipsoid.WGS84);
+                if (Cesium.defined(p)) cartesian = p;
+            } catch (error) {
+                cartesian = null;
+            }
+        }
+
+        if (!cartesian) return null;
+
+        return this.cartesianToLocal(cartesian);
+    }
+
     updateSpawnMarker(local) {
         if (!this.viewer || !local) return;
         const Cesium = this.Cesium;
@@ -1741,5 +1787,99 @@ export class CesiumWorld {
             `lat ${this.Cesium.Math.toDegrees(carto.latitude).toFixed(6)}`,
             `alt ${Number(altitudeMeters || 0).toFixed(1)} m`,
         ].join(' | ');
+    }
+
+    /**
+     * Capture a forward-facing depth map from the drone's perspective.
+     * Uses raycasting on a sparse grid and bilinear interpolation to
+     * produce the 192×384 depth image expected by the YOPO_360 network.
+     * Serves as a degraded fallback when DA360 ERP depth is unavailable.
+     *
+     * @param {object} transform  - Drone camera transform {position, orientation}
+     * @param {object} [options]  - {width, height, gridCols, gridRows, hfovDeg, maxDistance}
+     * @returns {{depth: Float32Array, encoding: string}} depth map + encoding metadata
+     */
+    captureForwardDepth(transform, options = {}) {
+        const width = Math.max(16, options.width || 384);
+        const height = Math.max(16, options.height || 192);
+        const gridCols = Math.max(4, Math.min(width, options.gridCols || 12));
+        const gridRows = Math.max(4, Math.min(height, options.gridRows || 20));
+        const hfovDeg = options.hfovDeg || 90;
+        const maxDistance = options.maxDistance || 20.0;
+
+        if (!transform || !transform.position || !transform.orientation) {
+            return { depth: new Float32Array(height * width).fill(maxDistance), encoding: '32FC1' };
+        }
+
+        const pos = transform.position;
+        const basis = getTransformBasisLocal(transform);
+        const forward = basis.forward;
+        const right = basis.right;
+        const up = basis.up;
+
+        const hfovRad = hfovDeg * Math.PI / 180;
+        const vfovRad = hfovRad * (height / width);
+        const tanHalfH = Math.tan(hfovRad * 0.5);
+        const tanHalfV = Math.tan(vfovRad * 0.5);
+
+        // Sample depth on a sparse grid
+        // Image convention: row 0 = top (up/sky), row max = bottom (down/ground)
+        // col 0 = left, col max = right
+        const depthGrid = new Float32Array(gridRows * gridCols);
+        let hitCount = 0;
+        for (let r = 0; r < gridRows; r++) {
+            // v: +1 = up (row 0), -1 = down (row max) → standard image orientation
+            const v = gridRows > 1 ? 1.0 - (r / (gridRows - 1)) * 2.0 : 0;
+            for (let c = 0; c < gridCols; c++) {
+                const u = gridCols > 1 ? (c / (gridCols - 1)) * 2 - 1 : 0;
+
+                const dir = {
+                    x: forward.x + u * tanHalfH * right.x + v * tanHalfV * up.x,
+                    y: forward.y + u * tanHalfH * right.y + v * tanHalfV * up.y,
+                    z: forward.z + u * tanHalfH * right.z + v * tanHalfV * up.z,
+                };
+                const norm = Math.hypot(dir.x, dir.y, dir.z);
+                if (norm > 1e-9) { dir.x /= norm; dir.y /= norm; dir.z /= norm; }
+
+                const hit = this.pickLocalRay(pos, dir, maxDistance);
+                if (hit && hit.distance < maxDistance) hitCount++;
+                depthGrid[r * gridCols + c] = hit ? Math.min(hit.distance, maxDistance) : maxDistance;
+            }
+        }
+        if (!this._depthCaptureLogged) {
+            this._depthCaptureLogged = true;
+            console.log(`captureForwardDepth: ${gridRows}x${gridCols} grid, ${hitCount}/${gridRows*gridCols} hits, ` +
+                `output ${height}x${width}, pos=(${pos.x?.toFixed(1)},${pos.y?.toFixed(1)},${pos.z?.toFixed(1)})`);
+        }
+
+        // Bilinear interpolation to full resolution
+        const depth = new Float32Array(height * width);
+        const xScale = (gridCols - 1) / (width - 1 || 1);
+        const yScale = (gridRows - 1) / (height - 1 || 1);
+
+        for (let py = 0; py < height; py++) {
+            const gy = py * yScale;
+            const gy0 = Math.min(Math.floor(gy), gridRows - 2);
+            const gy1 = gy0 + 1;
+            const fy = gy - gy0;
+
+            for (let px = 0; px < width; px++) {
+                const gx = px * xScale;
+                const gx0 = Math.min(Math.floor(gx), gridCols - 2);
+                const gx1 = gx0 + 1;
+                const fx = gx - gx0;
+
+                const v00 = depthGrid[gy0 * gridCols + gx0];
+                const v10 = depthGrid[gy0 * gridCols + gx1];
+                const v01 = depthGrid[gy1 * gridCols + gx0];
+                const v11 = depthGrid[gy1 * gridCols + gx1];
+
+                const top = v00 + (v10 - v00) * fx;
+                const bot = v01 + (v11 - v01) * fx;
+                depth[py * width + px] = top + (bot - top) * fy;
+            }
+        }
+
+        return { depth, encoding: '32FC1' };
     }
 }

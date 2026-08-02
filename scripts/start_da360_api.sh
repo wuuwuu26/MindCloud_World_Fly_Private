@@ -206,7 +206,7 @@ if [[ "$MOUNT_SERVER" == "1" ]]; then
     run_args+=(-v "$SCRIPT_DIR/da360_server.py:/opt/mindcloud-da360/scripts/da360_server.py:ro")
 fi
 
-if [[ "${DA360_DETACH:-1}" == "1" ]]; then
+if [[ "${DA360_DETACH:-0}" == "1" ]]; then
     run_args=(-d "${run_args[@]}")
 fi
 

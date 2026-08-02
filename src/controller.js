@@ -38,6 +38,10 @@ const SETTINGS_IDS = [
     'phys-mass', 'phys-thrust', 'phys-drag-cd', 'phys-drag-area',
     'phys-drone-size', 'phys-collision-radius',
     'clean-mode-toggle', 'osd-toggle',
+    // SimpleFlight 增益（全局持久化，不参与 per-mode 快照）
+    'sf-pos-kp', 'sf-vel-kp', 'sf-vel-ki', 'sf-vel-kd',
+    'sf-angle-kp', 'sf-angle-kd', 'sf-rate-kp', 'sf-rate-ki',
+    'sf-alt-kp', 'sf-alt-kd', 'sf-yaw-rate-kp',
 ];
 
 const CONFIG_VERSION = 3;
@@ -98,8 +102,8 @@ const DEFAULT_BUTTON_MAPPING = {
 const KEYBOARD_MAP = {
     'KeyW':       { action: 'throttle', value: 1 },
     'KeyS':       { action: 'throttle', value: -1 },
-    'KeyA':       { action: 'yaw',      value: -1 },
-    'KeyD':       { action: 'yaw',      value: 1 },
+    'KeyA':       { action: 'yaw',      value: 1 },
+    'KeyD':       { action: 'yaw',      value: -1 },
     'ArrowUp':    { action: 'pitch',    value: -1 },
     'ArrowDown':  { action: 'pitch',    value: 1 },
     'ArrowLeft':  { action: 'roll',     value: -1 },
@@ -2035,6 +2039,19 @@ export class Controller {
         this._bindSliderNum('ctrl-pos-kd', 'ctrl-pos-kd-num');
         this._bindSliderNum('ctrl-vel-kd', 'ctrl-vel-kd-num');
         this._bindSliderNum('ctrl-alt-kd', 'ctrl-alt-kd-num');
+
+        // SimpleFlight 增益滑块
+        this._bindSliderNum('sf-pos-kp', 'sf-pos-kp-num');
+        this._bindSliderNum('sf-vel-kp', 'sf-vel-kp-num');
+        this._bindSliderNum('sf-vel-ki', 'sf-vel-ki-num');
+        this._bindSliderNum('sf-vel-kd', 'sf-vel-kd-num');
+        this._bindSliderNum('sf-angle-kp', 'sf-angle-kp-num');
+        this._bindSliderNum('sf-angle-kd', 'sf-angle-kd-num');
+        this._bindSliderNum('sf-rate-kp', 'sf-rate-kp-num');
+        this._bindSliderNum('sf-rate-ki', 'sf-rate-ki-num');
+        this._bindSliderNum('sf-alt-kp', 'sf-alt-kp-num');
+        this._bindSliderNum('sf-alt-kd', 'sf-alt-kd-num');
+        this._bindSliderNum('sf-yaw-rate-kp', 'sf-yaw-rate-kp-num');
 
         // Display toggle checkboxes
         for (const cbId of ['clean-mode-toggle', 'osd-toggle']) {

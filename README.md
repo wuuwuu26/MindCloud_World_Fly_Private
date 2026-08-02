@@ -159,3 +159,58 @@ http://127.0.0.1:8080/?panoTopPoleGuard=0&panoBottomPoleGuard=0
 http://127.0.0.1:8080/?da360UploadScale=0.35
 http://127.0.0.1:8080/?da360UploadWidth=672
 ```
+
+## YOPO 自主导航
+
+基于 YOPO 端到端导航网络，无人机可自主飞行到指定目标点。YOPO 接收深度图、里程计和目标点，输出位置/速度/加速度/偏航指令，通过 SimpleFlight 级联 PID 控制器驱动无人机。
+
+### 启动 YOPO 后端
+
+```bash
+# 首次需要构建 Docker 镜像
+YOPO_FORCE_BUILD=1 ./scripts/start_yopo_api.sh
+
+# 后续启动（自动跳过构建，挂载本地 yopo_server.py）
+./scripts/start_yopo_api.sh
+
+# 构建时如遇代理问题，确保本机 7890 端口代理可用
+# Dockerfile.yopo 使用 --network=host + http://127.0.0.1:7890
+```
+
+服务运行在 `http://127.0.0.1:5689`。`yopo_server.py` 通过 Docker volume 挂载，修改后无需重建镜像。
+
+### 目标点选择与导航
+
+1. 飞行模式下，在右侧 YOPO 面板点击 **"选取目标点"**。
+2. 目标初始位置为无人机当前位置，用**数字键盘**移动：
+   - `Numpad 8 / 2`：前进 / 后退（北 / 南）
+   - `Numpad 4 / 6`：左移 / 右移（西 / 东）
+   - `Numpad 9 / 3`：上升 / 下降
+3. **`Numpad 5`**：确认目标点并**自动开始导航**。
+4. **`Numpad 0`** 或 **`Esc`**：取消选择。
+
+导航期间：
+- 无人机使用 YOPO 轨迹指令 + 速度前馈跟踪路径
+- 推动摇杆临时切换人工控制（松杆恢复导航）
+- 到达目标 2m 内自动标记到达
+- 点击 **"停止导航"** 结束导航
+
+### 深度图
+
+YOPO 需要 96×160 float32 深度图（绝对距离，单位米）。获取流程：
+
+1. DA360 全景深度 → 相对深度图
+2. Cesium 射线检测 → 少量真实距离校准点
+3. 校准得到全局缩放因子 → 绝对深度图
+4. 重投影为前方 90° FOV pinhole 深度图 → YOPO 输入
+
+DA360 不可用时自动回退到纯 Cesium 射线检测。
+
+### 坐标系
+
+| 坐标系 | x | y | z | 前向 |
+|--------|---|---|---|------|
+| MindCloud / Cesium | 东 | 上 | 北 | +z |
+| YOPO / ROS FLU | 前 | 左 | 上 | +x |
+
+目标点在 MindCloud 坐标系下设置，服务端自动转换。相机有 30° 下倾补偿。

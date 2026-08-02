@@ -173,6 +173,14 @@ def depth_to_color(depth, sample_limit=65536):
     return color.astype(np.uint8), scale
 
 
+def encode_raw_depth(depth):
+    """Encode a float32 depth array as a base64 string."""
+    import base64
+    buf = io.BytesIO()
+    np.save(buf, np.asarray(depth, dtype=np.float32))
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def encode_image(image, output_format="jpeg", jpeg_quality=72):
     out = io.BytesIO()
     fmt = (output_format or "jpeg").lower()
@@ -310,7 +318,7 @@ def create_app(runner):
     def add_cors_headers(response):
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-DA360-Raw-Depth"
         return response
 
     @app.route("/health", methods=["GET"])
@@ -354,7 +362,9 @@ def create_app(runner):
                 env_int("DA360_JPEG_QUALITY", 72),
             )
             timings["encode_ms"] = (time.time() - mark) * 1000.0
-            return jsonify({
+
+            include_raw = request.headers.get("X-DA360-Raw-Depth", "0") in {"1", "true", "yes"}
+            response_payload = {
                 "depth_image": depth_image,
                 "depth_scale": depth_scale,
                 "latency_ms": (time.time() - started) * 1000.0,
@@ -367,7 +377,14 @@ def create_app(runner):
                 "request_height": request_height,
                 "input_pixels": runner.width * runner.height,
                 "request_pixels": request_width * request_height,
-            })
+            }
+            if include_raw:
+                mark = time.time()
+                response_payload["raw_depth"] = encode_raw_depth(pred_depth)
+                response_payload["raw_depth_shape"] = list(pred_depth.shape)
+                response_payload["raw_depth_dtype"] = "float32"
+                response_payload["raw_depth_encode_ms"] = (time.time() - mark) * 1000.0
+            return jsonify(response_payload)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except Exception as exc:  # pylint: disable=broad-except

@@ -791,11 +791,13 @@
                 <select id="flight-mode-select" style="background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:4px 8px;font-size:13px;">
                     <option value="drone" selected>Drone (Easy)</option>
                     <option value="fpv">FPV (Manual)</option>
+                    <option value="simpleflight">SimpleFlight (AirSim)</option>
+                    <option value="yopo_nav">YOPO Navigation</option>
                 </select>
             </div>
         </div>
         <div style="font-size:12px;color:#8aa;margin:-2px 0 8px;line-height:1.4;">
-            Drone (Easy): ↑/↓ controls forward/back speed, W/S climbs or descends, Shift boosts lower speed settings up to the 300 km/h cap. FPV (Manual): W/S is motor thrust, so forward flight needs pitch.
+            Drone (Easy): ↑/↓ controls forward/back speed, W/S climbs or descends, Shift boosts lower speed settings up to the 300 km/h cap. FPV (Manual): W/S is motor thrust, so forward flight needs pitch. SimpleFlight (AirSim): AirSim simpleflight 级联 PID 端口，输入映射同 Easy，但使用 4 层级联（位置→速度→姿态→角速率）。YOPO Navigation: 端到端自主导航，需启动 YOPO 后端服务，点击"选取目标点"后用数字键盘移动目标，5确认并自动开始导航。
         </div>
         <div class="setting-row">
             <label>Easy Max Speed (m/s; 83.3 = 300 km/h)</label>
@@ -889,6 +891,121 @@
                 <input type="range" id="ctrl-alt-kd" min="0" max="5" value="0.1" step="0.01">
                 <input type="number" id="ctrl-alt-kd-num" min="0" max="5" step="0.01" value="0.1" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
             </div>
+        </div>
+
+        <h3>SimpleFlight Gains (AirSim)</h3>
+        <div style="font-size:12px;color:#8aa;margin:-2px 0 8px;line-height:1.4;">
+            AirSim simpleflight 级联 PID 增益。默认值对应 AirSim Params.hpp。仅在 Flight Mode = SimpleFlight 时生效。
+        </div>
+        <div class="setting-row">
+            <label>Pos Kp</label>
+            <div class="controls">
+                <input type="range" id="sf-pos-kp" min="0" max="5" value="1.0" step="0.1">
+                <input type="number" id="sf-pos-kp-num" min="0" max="5" step="0.1" value="1.0" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Vel Kp</label>
+            <div class="controls">
+                <input type="range" id="sf-vel-kp" min="0" max="15" value="5.0" step="0.1">
+                <input type="number" id="sf-vel-kp-num" min="0" max="15" step="0.1" value="5.0" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Vel Ki</label>
+            <div class="controls">
+                <input type="range" id="sf-vel-ki" min="0" max="5" value="0.0" step="0.05">
+                <input type="number" id="sf-vel-ki-num" min="0" max="5" step="0.05" value="0.0" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Vel Kd</label>
+            <div class="controls">
+                <input type="range" id="sf-vel-kd" min="0" max="5" value="1.0" step="0.05">
+                <input type="number" id="sf-vel-kd-num" min="0" max="5" step="0.05" value="1.0" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Angle Kp</label>
+            <div class="controls">
+                <input type="range" id="sf-angle-kp" min="0" max="15" value="4.5" step="0.1">
+                <input type="number" id="sf-angle-kp-num" min="0" max="15" step="0.1" value="4.5" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Angle Kd</label>
+            <div class="controls">
+                <input type="range" id="sf-angle-kd" min="0" max="5" value="0.1" step="0.01">
+                <input type="number" id="sf-angle-kd-num" min="0" max="5" step="0.01" value="0.1" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Rate Kp</label>
+            <div class="controls">
+                <input type="range" id="sf-rate-kp" min="0" max="5" value="0.5" step="0.05">
+                <input type="number" id="sf-rate-kp-num" min="0" max="5" step="0.05" value="0.5" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Rate Ki</label>
+            <div class="controls">
+                <input type="range" id="sf-rate-ki" min="0" max="5" value="0.0" step="0.01">
+                <input type="number" id="sf-rate-ki-num" min="0" max="5" step="0.01" value="0.0" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Alt Kp</label>
+            <div class="controls">
+                <input type="range" id="sf-alt-kp" min="0" max="10" value="2.0" step="0.1">
+                <input type="number" id="sf-alt-kp-num" min="0" max="10" step="0.1" value="2.0" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Alt Kd</label>
+            <div class="controls">
+                <input type="range" id="sf-alt-kd" min="0" max="5" value="0.5" step="0.05">
+                <input type="number" id="sf-alt-kd-num" min="0" max="5" step="0.05" value="0.5" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Yaw Rate Kp</label>
+            <div class="controls">
+                <input type="range" id="sf-yaw-rate-kp" min="0" max="5" value="1.0" step="0.1">
+                <input type="number" id="sf-yaw-rate-kp-num" min="0" max="5" step="0.1" value="1.0" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+
+        <h3>YOPO Navigation</h3>
+        <div style="font-size:12px;color:#8aa;margin:-2px 0 8px;line-height:1.4;">
+            端到端自主导航。点击"选取目标点"后用数字键盘移动目标：8/2前后，4/6左右，9/3上下，5确认开始导航，0取消。
+        </div>
+        <div class="setting-row">
+            <label>目标点 X</label>
+            <div class="controls">
+                <input type="number" id="yopo-target-x" step="0.1" value="0" style="width:80px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>目标点 Y</label>
+            <div class="controls">
+                <input type="number" id="yopo-target-y" step="0.1" value="2" style="width:80px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>目标点 Z</label>
+            <div class="controls">
+                <input type="number" id="yopo-target-z" step="0.1" value="0" style="width:80px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div style="display:flex;gap:8px;margin:8px 0;">
+            <button class="assign-btn" id="yopo-select-target-btn" style="flex:1;">选取目标点</button>
+            <button class="assign-btn" id="yopo-start-nav-btn" style="flex:1;background:#285e28;">开始导航</button>
+            <button class="assign-btn" id="yopo-stop-nav-btn" style="flex:1;background:#5e2828;">停止导航</button>
+        </div>
+        <div style="font-size:12px;color:#aaa;line-height:1.6;margin-top:4px;">
+            <span id="yopo-status-text">状态: 未激活</span><br>
+            <span id="yopo-dist-text">到目标距离: --</span><br>
+            <span id="yopo-count-text">推理计数: 0</span>
         </div>
 
         <h3>Physics</h3>
