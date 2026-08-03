@@ -744,7 +744,8 @@ function updateFlight(dt) {
         // ── 控制环 (高频, 每帧) ──
         // 不带深度, 用上次多项式推进 ctrl_time, 返回 poly(ctrl_time) 的 pos/vel/acc/yaw。
         // 一次只允许一个 control 请求在途, HTTP 往返自然限频 (~50-100Hz)。
-        if (!yopoControlInProgress) {
+        // 深度不可用(悬停等待)期间跳过, 保留悬停指令, 防止旧多项式覆盖。
+        if (!drone.yopoDepthUnavailable && !yopoControlInProgress) {
             yopoControlInProgress = true;
             (async () => {
                 try {
@@ -791,18 +792,22 @@ function updateFlight(dt) {
                     }
                     const t1 = performance.now();
                     if (!depthResult) {
+                        // 深度不可用(DA360 失败/超时): 不回退 Cesium 射线检测。
+                        // 原地悬停等待深度图恢复, 深度环持续低频重试, 直到拿到有效深度。
                         if (drone.yopoInferenceCount < 3 || drone.yopoInferenceCount % 30 === 0) {
-                            console.warn('YOPO: DA360 ERP depth capture failed, using Cesium ray fallback');
+                            console.warn('YOPO: DA360 depth unavailable, hovering to retry (no Cesium fallback)');
                         }
-                        depthResult = world.captureForwardDepth(cameraTransform, {
-                            width: 384,
-                            height: 192,
-                            gridCols: 24,
-                            gridRows: 12,
-                            hfovDeg: 90,
-                            maxDistance: 20,
-                        });
+                        drone.yopoDepthUnavailable = true;
+                        drone.yopoCmdPos = { x: drone.x, y: drone.y, z: drone.z };
+                        drone.yopoCmdVel = { x: 0, y: 0, z: 0 };
+                        drone.yopoCmdAcc = { x: 0, y: 0, z: 0 };
+                        drone.yopoCmdYaw = drone.yaw * (Math.PI / 180);   // 冻结偏航: 保持当前机头朝向(deg→rad)
+                        drone.yopoCmdYawDot = 0;
+                        drone.yopoCmdTime = performance.now();
+                        yopoNavInProgress = false;
+                        return;
                     }
+                    drone.yopoDepthUnavailable = false;
 
                     if (!depthResult || !depthResult.depth) {
                         throw new Error('depth capture failed');

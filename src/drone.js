@@ -160,6 +160,7 @@ export class Drone {
         this.yopoCmdTime = 0;            // performance.now() 时间戳，追踪 cmd 新鲜度
         this.yopoCmdYaw = 0;              // 当前指令偏航 (rad, ROS/drone yaw 约定)
         this.yopoCmdYawDot = 0;           // 当前指令偏航角速率 (rad/s)
+        this.yopoDepthUnavailable = false; // DA360 深度不可用 → 悬停等待(不回退射线检测)
         this.yopoInferenceCount = 0;      // 推理计数
         this.yopoServerUrl = 'http://localhost:5689'; // YOPO 服务器地址
 
@@ -602,6 +603,7 @@ export class Drone {
             this.yopoCmdTime = 0;
             this.yopoCmdYaw = 0;
             this.yopoCmdYawDot = 0;
+            this.yopoDepthUnavailable = false;
             this.yopoInferenceCount = 0;
         }
     }
