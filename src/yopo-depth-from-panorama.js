@@ -429,7 +429,15 @@ export class YOPODepthFromPanorama {
         this._erpFrameCount += 1;
         const doCalibrate = calibrate && (this._erpFrameCount <= 1 || this._erpFrameCount % this._calibrateInterval === 0);
         if (doCalibrate) {
-            const calibrationPoints = this.sampleCalibrationPoints(cameraTransform, maxDistance);
+            // 自适应 raycast 距离: 高空中固定 20m 的 Cesium raycast 射不到地面/
+            // 远处物体, 命中的标定点不足, 会退回缓存旧 scale, 导致高空深度被
+            // 错误缩放成"四周全近距"的假近障, YOPO 因而持续大幅掉头、无法朝
+            // 目标飞行。根据无人机高度放大 raycast 距离, 使高空也能命中地面/
+            // 远处建筑来正确恢复 metric scale。
+            const droneH = cameraTransform && cameraTransform.position
+                ? (cameraTransform.position.y || 0) : 0;
+            const calibMaxDist = Math.max(maxDistance, Math.abs(droneH) * 1.5 + 20);
+            const calibrationPoints = this.sampleCalibrationPoints(cameraTransform, calibMaxDist);
             if (calibrationPoints.length >= 3) {
                 const r = this.estimateScale(rawDepth, rawW, rawH, calibrationPoints);
                 scale = r.scale;
@@ -440,6 +448,17 @@ export class YOPODepthFromPanorama {
         // Resize depth (bilinear) and mask (nearest) to the YOPO ERP resolution.
         const depth = this._resizeBilinear(rawDepth, rawW, rawH, width, height);
         const mask = this._resizeNearestUint8(rawMask, rawW, rawH, width, height);
+
+        // 方位角旋向对齐 (关键):
+        // 全景着色器的 ERP 约定为 yaw = PI - u * 2PI, 即方位角随列号 *递减*
+        // (第 0 列 = 正后方 +PI, 中心列 = 正前方 0, 末列 = 正后方 -PI)。
+        // 而 YOPO 锚点 primitive.py 中 alpha = -d*(N-1)/2 + j*d 随序号 *递增*。
+        // 两者旋向相反 => 网络第 j 个锚点会读到 alpha = -alpha_j 处的深度,
+        // 前后不变但左右完全镜像, 导致朝障碍物方向飞行。
+        // 水平翻转列序即可令 alpha 与锚点序号同向。
+        // (basis 由无人机四元数构建, 全景已随机头旋转, 故无需再做 yaw 移位。)
+        this._flipHorizontalInPlace(depth, width, height);
+        this._flipHorizontalInPlace(mask, width, height);
 
         // Scale to metres and clamp. Invalid pixels become maxDistance; the
         // server's _preprocess_depth will additionally mean-fill them using
@@ -464,6 +483,24 @@ export class YOPODepthFromPanorama {
         let n = 0;
         for (let i = 0; i < mask.length; i++) if (mask[i] > 127) n++;
         return n;
+    }
+
+    /**
+     * 就地水平翻转 (列序反转), 适用于 Float32Array / Uint8Array。
+     * 用于把 ERP 方位角旋向对齐到 YOPO 锚点的 alpha 递增方向。
+     */
+    _flipHorizontalInPlace(buf, width, height) {
+        const half = width >> 1;
+        for (let y = 0; y < height; y++) {
+            const row = y * width;
+            for (let x = 0; x < half; x++) {
+                const a = row + x;
+                const b = row + width - 1 - x;
+                const t = buf[a];
+                buf[a] = buf[b];
+                buf[b] = t;
+            }
+        }
     }
 
     /**

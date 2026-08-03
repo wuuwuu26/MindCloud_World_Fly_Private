@@ -26,6 +26,7 @@ Usage:
 import argparse
 import base64
 import io
+import math
 import os
 import sys
 import time
@@ -61,7 +62,6 @@ except ImportError:
     CORS = None
 
 # ── YOPO imports (after sys.path manipulation) ────────────────────
-# Made optional: when USE_SIMPLE_AVOIDANCE=True, YOPO network is not needed.
 YOPO_AVAILABLE = False
 try:
     from config.config import cfg as yopo_cfg
@@ -98,32 +98,16 @@ MAX_DIS = 20.0
 MIN_DIS = 0.04
 CTRL_DT = 0.02  # 50 Hz control loop (matches original YOPO)
 ARRIVE_THRESHOLD = 2.0  # metres (matches test_yopo_ros.py L132: norm(pos-goal)<2.0)
-PROXIMITY_THRESHOLD = 5.0  # metres: within this, skip inference and navigate directly to goal
-# 碰撞预警减速 (用户要求: 阈值调大, 现在很容易撞到物体):
-#   前方障碍(深度图中心 patch 最小距离) < WARN 即开始减速, < STOP 降到 MIN。
-#   方向仍由网络 argmin(score) 决定, 只降速度/位置指令, 给网络更多转向时间。
-COLLISION_WARN_DIST = 10.0   # m: 前方障碍 < 此值开始减速
-COLLISION_STOP_DIST = 2.5    # m: 前方障碍 ≤ 此值速度降到最低
-COLLISION_MIN_SCALE = 0.30   # 最低速度比例(保留机动性; 不钉死在原地, 让网络能转向避开)
-# 目标方向软引导 (用户反馈: 到不了目标点, 指向性不明显):
-#   纯 argmin(score) 时网络 score 主要反映碰撞代价, 对"朝目标"的引导弱,
-#   长距离/复杂场景下轨迹选择偏侧向 → 到不了目标点。
-#   叠加小权重目标方向惩罚: score + GOAL_GUIDE_WEIGHT * (1-cos(轨迹方向,目标方向))。
-#   权重取小值: 碰撞代价(score 差异)仍主导, 不破坏避障。
-GOAL_GUIDE_WEIGHT = 8.0
-
 # YOPO 轨迹选择: 严格对齐 YOPO_360 test_yopo_ros.py (process_output L297-L310)
-#   直接 argmin(score) 选最优轨迹, 不做任何额外干预(无碰撞过滤/方向连续性)
+#   直接 argmin(score) 选最优轨迹, 不做任何额外干预。
+#   目标代价与安全代价均已包含在网络输出的 score 中(训练时的 score_label),
+#   任何外部启发式(目标引导/碰撞减速/紧急脱离)都会破坏这一代价场的平衡,
+#   曾导致互相打架的抖动, 已全部移除。
 # plan_from_reference=True: 新轨迹从上次指令(desire_pos/vel/acc)出发, 在衔接点
-#   与旧轨迹重合 → 轨迹连续、无往复运动(用户要求)。这正是原版级联控制的语义
-#   (轨迹规划 + SO3 位置控制器), 原版 test settings L440 即 True。
+#   与旧轨迹重合 -> 轨迹连续。原版 test settings L440 即 True。
 PLAN_FROM_REFERENCE = True
-DEFAULT_LOCK_YAW = True  # ERP/360°: yaw decoupled from avoidance; hold initial yaw
-
-# ═══════════════════════════════════════════════════════════════════
-# 简化避障算法开关: True=放弃YOPO网络, 使用自写的深度图反应式避障
-# ═══════════════════════════════════════════════════════════════════
-USE_SIMPLE_AVOIDANCE = False
+# 启用 calculate_yaw(): 机身平滑转向目标方向, 使目标落入 lattice 扇区覆盖范围。
+DEFAULT_LOCK_YAW = False
 
 app = Flask(__name__)
 if CORS is not None:
@@ -148,17 +132,13 @@ class YOPOServer:
         self.visualize = visualize
         self.camera_pitch_deg = camera_pitch_deg
 
-        # ── YOPO config (skipped in simple avoidance mode) ──
-        if not USE_SIMPLE_AVOIDANCE and YOPO_AVAILABLE:
-            yopo_cfg["train"] = False
-            self.height = yopo_cfg['image_height']
-            self.width = yopo_cfg['image_width']
-            self.in_channels = int(yopo_cfg['image_channels'])
-        else:
-            # Defaults matching YOPO_360 ERP panorama
-            self.height = DEPTH_HEIGHT
-            self.width = DEPTH_WIDTH
-            self.in_channels = 2
+        # ── YOPO config ──
+        if not YOPO_AVAILABLE:
+            raise RuntimeError(f"YOPO imports failed: {_yopo_import_err_msg}")
+        yopo_cfg["train"] = False
+        self.height = yopo_cfg['image_height']
+        self.width = yopo_cfg['image_width']
+        self.in_channels = int(yopo_cfg['image_channels'])
 
         self.lock_yaw = bool(lock_yaw)
         self.min_dis = MIN_DIS
@@ -200,52 +180,36 @@ class YOPOServer:
         # last_cruise_speed: scalar m/s
         # last_climb_rate: scalar m/s (vertical velocity target)
         # last_target_yaw: target yaw (rad) for smooth yaw tracking
-        self._simple_cmd_dir = np.array([0.0, 0.0, -1.0])  # forward at identity (south)
-        self._simple_cruise_speed = 0.0
-        self._simple_climb_rate = 0.0
-        self._simple_target_yaw = 0.0
-        self._simple_replan_count = 0
 
-        # ── Transforms & model (only for YOPO mode) ──
-        if not USE_SIMPLE_AVOIDANCE and YOPO_AVAILABLE:
-            self.state_transform = StateTransform()
-            self.lattice_primitive = LatticePrimitive.get_instance()
-            self.traj_time = self.lattice_primitive.segment_time
-            self._angles_np = self.lattice_primitive.lattice_angle_node.cpu().numpy()
+        # ── Transforms & model ──
+        if not YOPO_AVAILABLE:
+            raise RuntimeError(f"YOPO imports failed: {_yopo_import_err_msg}")
 
-            from scipy.spatial.transform import Rotation as R
-            self.Rotation_bc = R.from_euler('ZYX', [0.0, self.camera_pitch_deg, 0.0], degrees=True).as_matrix()
+        self.state_transform = StateTransform()
+        self.lattice_primitive = LatticePrimitive.get_instance()
+        self.traj_time = self.lattice_primitive.segment_time
+        self._angles_np = self.lattice_primitive.lattice_angle_node.cpu().numpy()
 
-            # ── Load model ──
-            print(f"Loading YOPO model from: {model_path}")
-            print(f"Using device: {self.device}")
-            print(f"Camera pitch: {self.camera_pitch_deg}°, plan_from_reference: {PLAN_FROM_REFERENCE}, "
-                  f"lock_yaw: {self.lock_yaw}, in_channels: {self.in_channels}")
-            state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
-            self.policy = YopoNetwork()
-            self.policy.load_state_dict(state_dict)
-            self.policy = self.policy.to(self.device)
-            self.policy.eval()
-            self._warm_up()
-            print(f"YOPO model loaded. Traj time: {self.traj_time:.2f}s, "
-                  f"Traj num: {self.lattice_primitive.traj_num}, "
-                  f"vel_max: {self.lattice_primitive.vel_max:.1f}, "
-                  f"acc_max: {self.lattice_primitive.acc_max:.1f}")
-        else:
-            # Simple avoidance mode: no YOPO model, no polynomial solver
-            self.state_transform = None
-            self.lattice_primitive = None
-            self.traj_time = 4.0  # not used, but referenced in some logs
-            self.policy = None
-            self.Rotation_bc = None
-            mode_msg = "SIMPLE AVOIDANCE" if USE_SIMPLE_AVOIDANCE else "YOPO UNAVAILABLE"
-            print(f"╔════════════════════════════════════════════════════════╗")
-            print(f"║  YOPO model SKIPPED — running {mode_msg:20s}        ║")
-            print(f"║  Depth: {self.width}x{self.height} ERP, panorama cols map to azimuth        ║")
-            print(f"╚════════════════════════════════════════════════════════╝")
-            if USE_SIMPLE_AVOIDANCE and not YOPO_AVAILABLE:
-                print(f"  (YOPO imports failed: {_yopo_import_err_msg})")
+        # 全向 ERP 全景无相机俯仰偏置: body 系与 camera 系重合。
+        # (原版针对前视 pinhole 才需要 camera_pitch; 360 全景下叠加俯仰会
+        #  使锚点方向与深度图行位置错配。)
+        self.Rotation_bc = np.eye(3)
 
+        # ── Load model ──
+        print(f"Loading YOPO model from: {model_path}")
+        print(f"Using device: {self.device}")
+        print(f"Camera pitch: {self.camera_pitch_deg}°, plan_from_reference: {PLAN_FROM_REFERENCE}, "
+              f"lock_yaw: {self.lock_yaw}, in_channels: {self.in_channels}")
+        state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
+        self.policy = YopoNetwork()
+        self.policy.load_state_dict(state_dict)
+        self.policy = self.policy.to(self.device)
+        self.policy.eval()
+        self._warm_up()
+        print(f"YOPO model loaded. Traj time: {self.traj_time:.2f}s, "
+              f"Traj num: {self.lattice_primitive.traj_num}, "
+              f"vel_max: {self.lattice_primitive.vel_max:.1f}, "
+              f"acc_max: {self.lattice_primitive.acc_max:.1f}")
         # Timing stats
         self.time_forward = 0.0
         self.time_prepare = 0.0
@@ -272,8 +236,6 @@ class YOPOServer:
         self.last_nav_time = None
         print(f"New goal: ({x:.1f}, {y:.1f}, {z:.1f})")
         # Reset simple avoidance state on new goal
-        self._simple_replan_count = 0
-        self._simple_target_yaw = self.last_yaw
         # Reset 终点平滑, 避免上一目标的方向惯性
         self._last_end_xy = None
 
@@ -317,384 +279,6 @@ class YOPOServer:
     _SA_DEPTH_AGE_STOP = 1.0   # s: 深度过期停车阈值, 完全停车
     _SA_MAX_ALT_ABOVE_GOAL = 100.0  # m: 最大超过目标高度, 超过则强制下降
     _SA_MAX_EMERGENCY_FRAMES = 8    # 连续紧急帧数上限, 超过则盲飞
-
-    def _simple_avoid(self, depth_raw):
-        """反应式避障核心: 分析深度图, 返回 (cmd_dir, cruise_speed, climb_rate, fwd_clear, chosen_clear, max_clear).
-
-        Args:
-            depth_raw: (H, W) float32, metric depth in metres
-        Returns:
-            cmd_dir: (3,) unit vector in MC world (horizontal)
-            cruise_speed: scalar m/s
-            climb_rate: scalar m/s (vertical target)
-            fwd_clear: scalar m (forward clear distance)
-            chosen_clear: scalar m (chosen direction clear distance)
-            max_clear: scalar m (max clear across all directions)
-        """
-        from scipy.spatial.transform import Rotation as R
-
-        H, W = depth_raw.shape
-
-        # ── 1. Compute body forward & right in MC world (horizontal) ──
-        quat_ros = self._quat_mc_to_ros(self.quat)
-        R_wc_ros = R.from_quat(quat_ros).as_matrix()  # world-from-body in ROS frame
-        forward_w = self._vec_ros_to_mc(R_wc_ros @ np.array([1.0, 0.0, 0.0]))
-        right_w = self._vec_ros_to_mc(R_wc_ros @ np.array([0.0, -1.0, 0.0]))
-
-        # Zero out vertical, normalize
-        forward_w[1] = 0.0
-        right_w[1] = 0.0
-        fn = np.linalg.norm(forward_w)
-        rn = np.linalg.norm(right_w)
-        if fn < 0.01 or rn < 0.01:
-            # Drone pointing straight up/down — keep last cmd_dir
-            return self._simple_cmd_dir.copy(), 0.0, 0.0, self.max_dis, self.max_dis, self.max_dis
-        forward_w /= fn
-        right_w /= rn
-
-        # ── 2. Scan panorama in angular bins ──
-        h_lo = max(0, H // 2 - self._SA_BAND_HALF_H)
-        h_hi = min(H, H // 2 + self._SA_BAND_HALF_H)
-
-        clears = []
-        for angle_deg in self._SA_SCAN_ANGLES:
-            angle_rad = np.radians(angle_deg)
-            # Column = W/2 + delta_col, where delta_col = angle_rad * W / (2π)
-            col_center = int(round(W / 2 + angle_rad * W / (2 * np.pi)))
-            col_lo = max(0, col_center - self._SA_PATCH_HALF_W)
-            col_hi = min(W, col_center + self._SA_PATCH_HALF_W)
-            patch = depth_raw[h_lo:h_hi, col_lo:col_hi]
-            clear = float(patch.min()) if patch.size else self.max_dis
-            clears.append(clear)
-
-        fwd_idx = self._SA_SCAN_ANGLES.index(0)
-        fwd_clear = clears[fwd_idx]
-        max_clear = max(clears)
-
-        # ── 3. Goal direction in body frame (angle from forward, + = right) ──
-        to_goal = self.goal - self.pos
-        to_goal_h = to_goal.copy()
-        to_goal_h[1] = 0.0
-        goal_dist_h = float(np.linalg.norm(to_goal_h))
-
-        if goal_dist_h > 0.5:
-            to_goal_h /= goal_dist_h
-            goal_fwd = float(np.dot(to_goal_h, forward_w))
-            goal_right = float(np.dot(to_goal_h, right_w))
-            goal_angle_rad = np.arctan2(goal_right, goal_fwd)
-            goal_angle_deg = np.degrees(goal_angle_rad)
-        else:
-            goal_angle_rad = 0.0
-            goal_angle_deg = 0.0
-
-        # ── 4. Decision logic ──
-        # 速度连续衰减: speed = CRUISE * clip((clear - EMERG) / (SAFE - EMERG), 0, 1)
-        # 这样在SAFE_DIST以上全速, EMERGENCY_DIST以下停车, 中间线性过渡
-        def speed_for_clear(clear_dist):
-            t = (clear_dist - self._SA_EMERGENCY_DIST) / (self._SA_SAFE_DIST - self._SA_EMERGENCY_DIST)
-            t = max(0.0, min(1.0, t))
-            return self._SA_MIN_SPEED + (self._SA_CRUISE_SPEED - self._SA_MIN_SPEED) * t
-
-        if fwd_clear > self._SA_SAFE_DIST:
-            # 前方畅通: 朝目标方向飞, 全速
-            cmd_angle = goal_angle_rad
-            cruise_speed = self._SA_CRUISE_SPEED
-            chosen_clear = fwd_clear
-        else:
-            # 前方受阻: 在所有方向中选最优
-            # 只考虑 clearance > EMERGENCY_DIST 的方向(可通行方向)
-            best_score = -1e9
-            best_angle = goal_angle_rad  # 默认朝目标
-            best_clear = 0.0
-            sigma = self._SA_GOAL_SIGMA_DEG
-            for i, angle_deg in enumerate(self._SA_SCAN_ANGLES):
-                clear = clears[i]
-                # 不可通行方向跳过(除非全部不可通行)
-                if clear < self._SA_EMERGENCY_DIST:
-                    continue
-                # Angular distance to goal direction (wrapped to [-180,180])
-                angle_diff = (angle_deg - goal_angle_deg + 180.0) % 360.0 - 180.0
-                weight = np.exp(-(angle_diff ** 2) / (2.0 * sigma ** 2))
-                # 评分 = 通行空间 × 目标方向高斯权重
-                score = clear * weight
-                if score > best_score:
-                    best_score = score
-                    best_angle = np.radians(angle_deg)
-                    best_clear = clear
-
-            cmd_angle = best_angle
-            chosen_clear = best_clear if best_clear > 0 else fwd_clear
-            # 速度随所选方向通行距离连续衰减
-            cruise_speed = speed_for_clear(chosen_clear)
-
-        # ── 5. Compute cmd_dir in MC world ──
-        cmd_dir = forward_w * np.cos(cmd_angle) + right_w * np.sin(cmd_angle)
-        cmd_dir[1] = 0.0
-        cn = np.linalg.norm(cmd_dir)
-        if cn > 0.01:
-            cmd_dir /= cn
-        else:
-            cmd_dir = forward_w.copy()
-
-        # ── 6. Emergency / failsafe logic ──
-        alt_above_goal = self.pos[1] - self.goal[1]
-        alt_cap_exceeded = alt_above_goal > self._SA_MAX_ALT_ABOVE_GOAL
-
-        if not hasattr(self, '_emergency_count'):
-            self._emergency_count = 0
-
-        if chosen_clear < self._SA_EMERGENCY_DIST:
-            self._emergency_count += 1
-        else:
-            self._emergency_count = 0
-
-        # Failsafe 1: 高度超过目标100m → 不再爬升, 强制朝目标飞
-        # Failsafe 2: 连续8帧紧急 → 深度数据可能无效, 切盲飞模式
-        if alt_cap_exceeded or self._emergency_count >= 8:
-            # 强制朝目标方向飞, 速度降低
-            if goal_dist_h > 0.5:
-                cmd_dir = to_goal_h.copy()
-            else:
-                cmd_dir = forward_w.copy()
-            cmd_dir[1] = 0.0
-            cn = np.linalg.norm(cmd_dir)
-            if cn > 0.01:
-                cmd_dir /= cn
-            cruise_speed = self._SA_CRUISE_SPEED * 0.5  # 半速盲飞
-            # 强制下降 toward goal altitude
-            alt_err = self.goal[1] - self.pos[1]
-            climb_rate = float(np.clip(alt_err * 0.3, -self._SA_CLIMB_MAX, self._SA_CLIMB_MAX))
-        elif chosen_clear < self._SA_EMERGENCY_DIST:
-            # 所选方向通行距离不够 → 紧急爬升越过障碍
-            cmd_dir = np.zeros(3)
-            cruise_speed = 0.0
-            climb_rate = self._SA_EMERGENCY_CLIMB
-        elif fwd_clear < self._SA_EMERGENCY_DIST:
-            # 前方很近但选了侧面方向 → 仍然减速, 爬升辅助
-            alt_err = self.goal[1] - self.pos[1]
-            climb_rate = float(np.clip(self._SA_CLIMB_KP * alt_err,
-                                       -self._SA_CLIMB_MAX, self._SA_CLIMB_MAX))
-            climb_rate = max(climb_rate, 1.0)  # 障碍近时优先爬升
-        else:
-            # Altitude: simple P toward goal altitude
-            alt_err = self.goal[1] - self.pos[1]
-            climb_rate = float(np.clip(self._SA_CLIMB_KP * alt_err,
-                                       -self._SA_CLIMB_MAX, self._SA_CLIMB_MAX))
-
-        # ── 7. Smooth cmd_dir (low-pass filter to reduce jitter) ──
-        smooth = self._SA_DIR_SMOOTH
-        cmd_dir = (1.0 - smooth) * self._simple_cmd_dir + smooth * cmd_dir
-        cn = np.linalg.norm(cmd_dir)
-        if cn > 0.01:
-            cmd_dir /= cn
-
-        # ── 8. Compute target yaw (MC yaw convention: atan2(x, -z)) ──
-        # cmd_dir is horizontal in MC world. MC yaw = atan2(dir.x, -dir.z).
-        # This matches drone.js yaw convention (0=south, +=CCW/left).
-        if np.linalg.norm(cmd_dir[:2]) > 0.01:
-            target_yaw = float(np.arctan2(cmd_dir[0], -cmd_dir[2]))
-        else:
-            target_yaw = self._simple_target_yaw
-
-        return cmd_dir, cruise_speed, climb_rate, fwd_clear, chosen_clear, max_clear
-
-    def _navigate_simple(self, depth_bytes, depth_encoding, pos, vel, quat, mask_bytes=None):
-        """简化避障导航: 解析深度图 → _simple_avoid → 返回PositionCommand."""
-        time0 = time.time()
-
-        # ── 1. Parse depth ──
-        if depth_encoding == "32FC1":
-            depth_raw = np.frombuffer(depth_bytes, dtype=np.float32).reshape(self.height, self.width)
-        elif depth_encoding == "16UC1":
-            depth_raw = np.frombuffer(depth_bytes, dtype=np.uint16).reshape(self.height, self.width).astype(np.float32) / 1000.0
-        else:
-            depth_raw = np.frombuffer(depth_bytes, dtype=np.float32).reshape(self.height, self.width)
-
-        # Clip to valid range
-        depth_raw = np.clip(depth_raw, self.min_dis, self.max_dis)
-
-        # ── 2. Update odometry ──
-        self.pos = np.array(pos, dtype=np.float64)
-        self.vel = np.array(vel, dtype=np.float64)
-        self.quat = np.array(quat, dtype=np.float64)
-
-        # Initialize yaw from actual heading on first call
-        if not self.desire_init:
-            from scipy.spatial.transform import Rotation as R
-            quat_ros = self._quat_mc_to_ros(self.quat)
-            self.last_yaw = float(R.from_quat(quat_ros).as_euler('ZYX', degrees=False)[0])
-            self._simple_target_yaw = self.last_yaw
-            self.desire_init = True
-
-        # ── 3. Arrival check ──
-        dist_to_goal = float(np.linalg.norm(self.pos - self.goal))
-        if dist_to_goal < ARRIVE_THRESHOLD:
-            self.arrive = True
-        if self.arrive:
-            return {
-                "position": {"x": float(self.goal[0]), "y": float(self.goal[1]), "z": float(self.goal[2])},
-                "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
-                "acceleration": {"x": 0.0, "y": 0.0, "z": 0.0},
-                "yaw": float(self.last_yaw),
-                "yaw_dot": 0.0,
-                "arrived": True,
-                "dist_to_goal": dist_to_goal,
-                "ctrl_time": 0.0,
-            }
-
-        # ── 4. Run avoidance ──
-        with self._lock:
-            cmd_dir, cruise_speed, climb_rate, fwd_clear, chosen_clear, max_clear = self._simple_avoid(depth_raw)
-
-            # Store for control_update
-            self._simple_cmd_dir = cmd_dir.copy()
-            self._simple_cruise_speed = cruise_speed
-            self._simple_climb_rate = climb_rate
-            self._simple_last_navigate_time = time.time()  # for depth-age decay
-
-            # Smooth yaw
-            yaw_new = self._simple_target_yaw
-            if np.linalg.norm(cmd_dir[:2]) > 0.01:
-                yaw_new = float(np.arctan2(cmd_dir[0], -cmd_dir[2]))
-            # Low-pass filter yaw (wrap-aware)
-            yaw_diff = (yaw_new - self._simple_target_yaw + np.pi) % (2 * np.pi) - np.pi
-            self._simple_target_yaw += self._SA_YAW_SMOOTH * yaw_diff
-            self.last_yaw = self._simple_target_yaw
-
-            # ── 5. Compute target position & velocity ──
-            # target_pos = pos + cmd_dir * lookahead (horizontal) + altitude P
-            target_pos = self.pos.copy()
-            target_pos[0] += cmd_dir[0] * self._SA_LOOKAHEAD
-            target_pos[2] += cmd_dir[2] * self._SA_LOOKAHEAD
-            target_pos[1] = self.pos[1] + climb_rate * 0.5  # gentle altitude target
-
-            target_vel = np.zeros(3)
-            target_vel[0] = cmd_dir[0] * cruise_speed
-            target_vel[2] = cmd_dir[2] * cruise_speed
-            target_vel[1] = climb_rate
-
-            self._simple_replan_count += 1
-            self.count += 1
-
-        time1 = time.time()
-
-        # ── 6. Proximity speed limit (same as YOPO mode) ──
-        if dist_to_goal < PROXIMITY_THRESHOLD:
-            max_speed = max(1.0, dist_to_goal * 0.5)
-            spd = float(np.linalg.norm(target_vel))
-            if spd > max_speed:
-                scale = max_speed / spd
-                target_vel *= scale
-                target_pos[0] = float(self.pos[0] + (target_pos[0] - self.pos[0]) * scale)
-                target_pos[1] = float(self.pos[1] + (target_pos[1] - self.pos[1]) * scale)
-                target_pos[2] = float(self.pos[2] + (target_pos[2] - self.pos[2]) * scale)
-
-        # ── 7. Logging ──
-        if self.count < 5 or self.count % 20 == 0:
-            print(f"[SIMPLE#{self.count}] pos=({self.pos[0]:.1f},{self.pos[1]:.1f},{self.pos[2]:.1f}) "
-                  f"cmd_dir=({cmd_dir[0]:+.2f},{cmd_dir[2]:+.2f}) "
-                  f"spd={cruise_speed:.1f} climb={climb_rate:+.1f} "
-                  f"fwd={fwd_clear:.1f}m chosen={chosen_clear:.1f}m max={max_clear:.1f}m "
-                  f"dist_goal={dist_to_goal:.1f}m ({1000*(time1-time0):.0f}ms)")
-
-        return {
-            "position": {"x": float(target_pos[0]), "y": float(target_pos[1]), "z": float(target_pos[2])},
-            "velocity": {"x": float(target_vel[0]), "y": float(target_vel[1]), "z": float(target_vel[2])},
-            "acceleration": {"x": 0.0, "y": 0.0, "z": 0.0},
-            "yaw": float(self.last_yaw),
-            "yaw_dot": 0.0,
-            "arrived": bool(self.arrive),
-            "dist_to_goal": float(dist_to_goal),
-            "ctrl_time": 0.0,
-        }
-
-    def _control_update_simple(self, pos, vel, quat):
-        """高频控制更新: 用上次避障结果 + 当前位置重新计算target_pos/vel.
-
-        与 YOPO mode 的 control_update 类似: navigate()在~10Hz重规划,
-        control_update()在~60Hz推进. 区别是simple mode不需要多项式,
-        只需用当前pos + last cmd_dir 重新算 target_pos.
-        """
-        # Update odometry
-        self.pos = np.array(pos, dtype=np.float64)
-        self.vel = np.array(vel, dtype=np.float64)
-        self.quat = np.array(quat, dtype=np.float64)
-
-        # Arrival check
-        dist_to_goal = float(np.linalg.norm(self.pos - self.goal))
-        if dist_to_goal < ARRIVE_THRESHOLD:
-            self.arrive = True
-        if self.arrive:
-            return {
-                "position": {"x": float(self.goal[0]), "y": float(self.goal[1]), "z": float(self.goal[2])},
-                "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
-                "acceleration": {"x": 0.0, "y": 0.0, "z": 0.0},
-                "yaw": float(self.last_yaw),
-                "yaw_dot": 0.0,
-                "arrived": True,
-                "dist_to_goal": dist_to_goal,
-                "ctrl_time": 0.0,
-            }
-
-        with self._lock:
-            cmd_dir = self._simple_cmd_dir.copy()
-            cruise_speed = self._simple_cruise_speed
-            climb_rate = self._simple_climb_rate
-
-            # ── 深度过期减速 (depth-age decay) ──
-            # navigate()更新深度@~2.6Hz, control_update@~60Hz.
-            # 如果距离上次深度更新超过200ms, 逐渐减速到0.
-            # 这防止无人机在深度盲区全速飞行撞上障碍.
-            nav_time = getattr(self, '_simple_last_navigate_time', None)
-            if nav_time is not None:
-                age = time.time() - nav_time
-                if age > self._SA_DEPTH_AGE_WARN:
-                    # 线性衰减: 200ms→1.0, 1000ms→0.0
-                    decay = max(0.0, 1.0 - (age - self._SA_DEPTH_AGE_WARN) /
-                                (self._SA_DEPTH_AGE_STOP - self._SA_DEPTH_AGE_WARN))
-                    cruise_speed *= decay
-                    if decay < 0.3:
-                        # 深度严重过期: 也缩减前视目标, 防止继续冲
-                        lookahead = self._SA_LOOKAHEAD * decay
-                    else:
-                        lookahead = self._SA_LOOKAHEAD
-                else:
-                    lookahead = self._SA_LOOKAHEAD
-            else:
-                lookahead = self._SA_LOOKAHEAD
-
-            # Recompute target_pos from current pos (keeps lookahead ahead of drone)
-            target_pos = self.pos.copy()
-            target_pos[0] += cmd_dir[0] * lookahead
-            target_pos[2] += cmd_dir[2] * lookahead
-            target_pos[1] = self.pos[1] + climb_rate * 0.5
-
-            target_vel = np.zeros(3)
-            target_vel[0] = cmd_dir[0] * cruise_speed
-            target_vel[2] = cmd_dir[2] * cruise_speed
-            target_vel[1] = climb_rate
-
-        # Proximity speed limit
-        if dist_to_goal < PROXIMITY_THRESHOLD:
-            max_speed = max(1.0, dist_to_goal * 0.5)
-            spd = float(np.linalg.norm(target_vel))
-            if spd > max_speed:
-                scale = max_speed / spd
-                target_vel *= scale
-                target_pos[0] = float(self.pos[0] + (target_pos[0] - self.pos[0]) * scale)
-                target_pos[1] = float(self.pos[1] + (target_pos[1] - self.pos[1]) * scale)
-                target_pos[2] = float(self.pos[2] + (target_pos[2] - self.pos[2]) * scale)
-
-        return {
-            "position": {"x": float(target_pos[0]), "y": float(target_pos[1]), "z": float(target_pos[2])},
-            "velocity": {"x": float(target_vel[0]), "y": float(target_vel[1]), "z": float(target_vel[2])},
-            "acceleration": {"x": 0.0, "y": 0.0, "z": 0.0},
-            "yaw": float(self.last_yaw),
-            "yaw_dot": 0.0,
-            "arrived": bool(self.arrive),
-            "dist_to_goal": float(dist_to_goal),
-            "ctrl_time": 0.0,
-        }
 
     @staticmethod
     def _quat_mc_to_ros(quat):
@@ -795,8 +379,14 @@ class YOPOServer:
 
         start_acc_ros = self._vec_mc_to_ros(self.desire_acc) if self.desire_acc is not None else np.zeros(3)
 
-        # 3D 导航: 不投影 z 到目标高度/水平面。网络预测的 endstate_w[2,:] 直接
-        # 作为 z 轴终端位移/速度/加速度(相对起点高度), 垂直避障由网络决定。
+        # 强制 z 轴终点到固定巡航高度 (对齐原版 test_yopo_ros.py L240:
+        #   endstate_w[:, 2, 0] = fixed_height - start_pos[2])
+        # 原版为水平导航: 网络只负责水平(x,y)方向规划, 高度方向强制保持
+        # fixed_height(即目标高度), 不被网络不可靠的垂直输出(β锚点)带飞。
+        # MindCloud 之前"完全信任网络 z 终端状态"会导致无人机被网络垂直输出
+        # 猛拉(如飞到 160m 高空、β=±75° 乱跳), 无法保持目标高度水平推进。
+        fixed_height = float(self.goal[1])  # MC y=up = 目标高度(ROS z 一致)
+        endstate_w_ros[0, 2, 0] = fixed_height - start_pos_ros[2]
 
         self.optimal_poly_x = Poly5Solver(
             start_pos_ros[0], start_vel_ros[0], start_acc_ros[0],
@@ -835,23 +425,17 @@ class YOPOServer:
             if mask_raw is not None:
                 mask_raw = cv2.resize(mask_raw, (self.width, self.height), interpolation=cv2.INTER_NEAREST)
 
-        # ── 深度可信度检测 ──
-        # 只把"整帧 360° 几乎全部被 2m 内包围"视为深度估计彻底失败(异常)。
-        # 注意: 不能仅凭"近距像素多"判定异常——真实城市楼群/高空环境深度图
-        # 本来就有大量近距值(高楼就在旁边), 这些是有效障碍数据, 应交给
-        # 碰撞过滤器 + 网络正常避障, 而不是悬停。
-        valid_d = depth_raw[(~np.isnan(depth_raw)) & (depth_raw > 0.01) & (depth_raw < self.max_dis)]
-        self._depth_anomaly = False
-        if valid_d.size > 100:
-            med_d = float(np.median(valid_d))
-            frac_low = float(np.mean(valid_d < 2.0))
-            abnormal = (med_d < 2.0 and frac_low > 0.80)
-            self._depth_anomaly = bool(abnormal)
-            if abnormal:
-                print(f"[深度异常] 中位={med_d:.2f}m <2m={frac_low:.2f} ({valid_d.size}px) → 重置为开阔")
-                depth_raw = np.full_like(depth_raw, self.max_dis)
-        # 深度正常时才重置异常连续计数(异常期间保持递增, 供悬停超时兜底使用)
-        self._anomaly_frames = 0 if not self._depth_anomaly else getattr(self, '_anomaly_frames', 0)
+        # 深度可信度检测已移除: 原版的深度异常悬停启发式在城市楼群等真实环境
+        # 会误判"近距像素多"为深度失败而频繁悬停, 直接阻止正常导航 (用户要求
+        # 严格对齐原版, 原版无此逻辑)。深度有效性交由 mask 通道与网络自行判断。
+
+        # ── 临时诊断: 低频打印前端传来的深度分布 (确认 DA360 scale) ──
+        self._diag_frames = getattr(self, '_diag_frames', 0) + 1
+        if self._diag_frames % 30 == 1:
+            fv = depth_raw[np.isfinite(depth_raw) & (depth_raw > 0.01)]
+            if fv.size:
+                print(f"[深度诊断] min={float(fv.min()):.2f} med={float(np.median(fv)):.2f} "
+                      f"max={float(fv.max()):.2f} <2m={(fv < 2.0).mean():.2f} <5m={(fv < 5.0).mean():.2f}")
 
         depth = np.minimum(depth_raw, self.max_dis) / self.max_dis
         nan_mask = np.isnan(depth) | (depth < self.min_dis / self.max_dis)
@@ -861,14 +445,15 @@ class YOPOServer:
         else:
             valid = (~nan_mask).astype(np.uint8)
 
-        # Replace invalid pixels with the panorama-mean of valid pixels.
+        # ── 无效深度填充: 严格对齐原版 test_yopo_ros.py ──
+        # 无效像素统一填"有效像素均值", 有效性信息通过 mask 通道(channel 1)
+        # 交给网络自行判断 —— 这是训练时的输入约定。
+        # 不可把无效区填成近距障碍: 那会与 mask 语义冲突(网络已从 mask 得知
+        # 该处无效), 等于人为制造虚假近障, 使代价场失真。
         invalid = nan_mask | (valid == 0)
         if invalid.any():
-            if (~invalid).any():
-                fill = float(depth[~invalid].mean())
-            else:
-                fill = 1.0
-            depth = np.where(invalid, fill, depth)
+            fill = float(depth[~invalid].mean()) if (~invalid).any() else 1.0
+            depth = np.where(invalid, np.float32(fill), depth)
         depth = depth.astype(np.float32)
 
         if self.in_channels >= 2:
@@ -879,12 +464,6 @@ class YOPOServer:
 
     @torch.inference_mode()
     def navigate(self, depth_bytes, depth_encoding, pos, vel, quat, mask_bytes=None):
-        """Stateful navigation entry point. Dispatches to simple avoidance or YOPO."""
-        if USE_SIMPLE_AVOIDANCE:
-            return self._navigate_simple(depth_bytes, depth_encoding, pos, vel, quat, mask_bytes)
-        return self._navigate_yopo(depth_bytes, depth_encoding, pos, vel, quat, mask_bytes)
-
-    def _navigate_yopo(self, depth_bytes, depth_encoding, pos, vel, quat, mask_bytes=None):
         """Stateful YOPO inference.
 
         Mirrors the original two-thread architecture:
@@ -935,6 +514,22 @@ class YOPOServer:
             self.last_yaw = float(R.from_quat(quat_ros).as_euler('ZYX', degrees=False)[0])
             self.desire_init = True
 
+        # ── 参考状态同步 (plan_from_reference) ──
+        # 原版语义: 新轨迹从上次指令 desire_pos 出发, 保证轨迹连续。
+        # 但当无人机被外力/手动大幅移动(如直接拖到高空), desire_pos 仍是旧
+        # 轨迹参考, 与实际位置严重脱节, 会导致:
+        #   - goal 相对量失真 (目标方向算错, 如明明该下降却看到"目标在头顶")
+        #   - cmd 位置与实际位置相差数百米, 无人机被往错误方向猛拉
+        # 检测到参考偏差超过一个轨迹跨度时, 把参考状态重置为实际 odometry,
+        # 使网络基于"无人机真实位置到目标"的相对量规划, 高度/方向均正确。
+        if self.desire_pos is not None:
+            drift = np.linalg.norm(self.pos - self.desire_pos)
+            if drift > self.traj_time * self.lattice_primitive.vel_max + 5.0:
+                self.desire_pos = self.pos.copy()
+                self.desire_vel = self.vel.copy()
+                self.desire_acc = np.zeros(3)
+                print(f"[参考同步] desire_pos 与实位偏差 {drift:.0f}m, 重置到实际位置")
+
         # ── 2b. Arrival check ──
         dist_to_goal = float(np.linalg.norm(self.pos - self.goal))
 
@@ -950,35 +545,6 @@ class YOPOServer:
                 "yaw": float(self.last_yaw),
                 "yaw_dot": 0.0,
                 "arrived": True,
-                "dist_to_goal": dist_to_goal,
-                "ctrl_time": 0.0,
-            }
-
-        # ── 深度异常: 悬停等待深度数据恢复稳定, 不乱飞 ──
-        # 深度不可靠(DA360 高空/远景误报近距)时, 网络基于垃圾输入会乱飞
-        # (α在±165°间乱跳, 永远到不了目标)。此时跳过推理直接悬停, 深度
-        # 恢复正常(_depth_anomaly=False)后网络自动接管。
-        # 兜底: 若持续异常且远高于目标(高空深度不会自行恢复), 悬停超时后
-        # 慢速垂直下降, 直到深度恢复稳定。低空异常仅悬停, 不干预。
-        if getattr(self, '_depth_anomaly', False):
-            self._anomaly_frames = getattr(self, '_anomaly_frames', 0) + 1
-            self.desire_pos = self.pos.copy()
-            self.desire_vel = np.zeros(3)
-            self.desire_acc = np.zeros(3)
-            self._last_end_xy = None  # 恢复后直接朝目标, 不带旧方向惯性
-            alt_above = float(self.pos[1] - self.goal[1])
-            vy = 0.0
-            mode = "悬停"
-            if self._anomaly_frames > 10 and alt_above > 5.0:
-                vy = -1.5  # 慢速下降, 找深度正常的高度
-                mode = "慢速下降"
-            print(f"[深度异常{mode}] 帧#{self._anomaly_frames} alt_above={alt_above:.0f}m → 等待深度恢复")
-            return {
-                "position": {"x": float(self.pos[0]), "y": float(self.pos[1]), "z": float(self.pos[2])},
-                "velocity": {"x": 0.0, "y": float(vy), "z": 0.0},
-                "acceleration": {"x": 0.0, "y": 0.0, "z": 0.0},
-                "yaw": float(self.last_yaw),
-                "yaw_dot": 0.0,
                 "dist_to_goal": dist_to_goal,
                 "ctrl_time": 0.0,
             }
@@ -1052,12 +618,6 @@ class YOPOServer:
         return cmd
 
     def control_update(self, pos, vel, quat):
-        """High-frequency control update. Dispatches to simple avoidance or YOPO."""
-        if USE_SIMPLE_AVOIDANCE:
-            return self._control_update_simple(pos, vel, quat)
-        return self._control_update_yopo(pos, vel, quat)
-
-    def _control_update_yopo(self, pos, vel, quat):
         """High-frequency control update without depth/inference.
 
         Mirrors original control_pub() in test_yopo_ros.py: advances
@@ -1143,45 +703,16 @@ class YOPOServer:
             depth_map = self._last_depth_input[0, 0].cpu().numpy()  # (H,W) norm[0,1]
             self._last_depth_map = depth_map  # 诊断端点用
             H, W = depth_map.shape
-            fwd_patch = depth_map[H//2-6:H//2+7, W//2-12:W//2+13]
+            # 前向检测 patch 加宽: 原 ±12列/±6行 只覆盖很窄的正前方, 斜前方/
+            # 侧向近障不触发减速 → 全速撞。扩展到 ±30列/±14行(前向扇形),
+            # 让更多方向的近障都能进入减速判定。
+            fwd_patch = depth_map[H//2-14:H//2+15, W//2-30:W//2+31]
             fwd_dist = float(fwd_patch.min()) * self.max_dis if fwd_patch.size else self.max_dis
         self.last_fwd_obstacle_dist = fwd_dist
 
-        # ── 目标方向软引导 (用户反馈: 到不了目标点, 指向性不明显) ──
-        # 纯 argmin(score) 时 score 主要反映碰撞代价, 对"朝目标"引导弱, 长距离
-        # 下轨迹选择偏侧向 → 到不了目标点。叠加小权重方向惩罚(不硬过滤, 不覆盖避障):
-        #   penalty = 1 - cos(轨迹终点方向, 目标方向) ∈ [0,2], 机体系计算。
-        # 碰撞代价(score 差异 100+) 仍主导选择, 避障行为不变。
-        score_all = score.copy()
-        if GOAL_GUIDE_WEIGHT > 0:
-            from scipy.spatial.transform import Rotation as _R
-            quat_ros = self._quat_mc_to_ros(self.quat)
-            _Rotation_wb = _R.from_quat(quat_ros).as_matrix()
-            _Rotation_wc = np.dot(_Rotation_wb, self.Rotation_bc)
-            _Rotation_cw = _Rotation_wc.T
-            if PLAN_FROM_REFERENCE and self.desire_pos is not None:
-                goal_w = self._vec_mc_to_ros(self.goal - self.desire_pos)
-            else:
-                goal_w = self._vec_mc_to_ros(self.goal - self.pos)
-            goal_c = np.dot(_Rotation_cw, goal_w)
-            gn = np.linalg.norm(goal_c)
-            goal_c = goal_c / (gn + 1e-6)
-
-            # 所有候选轨迹终点方向(机体系), grid 顺序 i → lattice N-1-i
-            lattice_ids = torch.arange(N - 1, -1, -1, dtype=torch.long)
-            endstate_all = self.state_transform.pred_to_endstate_cpu(endstate_pred, lattice_ids)
-            traj_dir = endstate_all[:, 0:3]
-            tn = np.linalg.norm(traj_dir, axis=1, keepdims=True)
-            traj_dir = traj_dir / (tn + 1e-6)
-            align = np.sum(traj_dir * goal_c[None, :], axis=1)
-            penalty = 1.0 - np.clip(align, -1.0, 1.0)
-            score_all = score + GOAL_GUIDE_WEIGHT * penalty
-            if self.count < 8 or self.count % 20 == 0:
-                print(f"  [目标引导] 最优朝目标偏角={np.degrees(np.arccos(np.clip(align[int(np.argmin(score_all))], -1, 1))):5.0f}° "
-                      f"(raw_min={float(score.min()):.1f})")
-
         # 原版 L302: action_id = argmin(score); lattice_id = traj_num-1-action_id
-        action_id = int(np.argmin(score_all))
+        # 目标代价已由网络 score 内含(训练时 wg=0.15), 不再叠加任何外部引导项。
+        action_id = int(np.argmin(score))
         lattice_id = N - 1 - action_id
         endstate = self.state_transform.pred_to_endstate_cpu(
             endstate_pred[action_id:action_id+1, :], lattice_id
@@ -1280,22 +811,8 @@ class YOPOServer:
         vx, vy, vz = vel_mc
         ax, ay, az = acc_mc
 
-        # ── 碰撞预警减速 ──
-        # 前方障碍越近, 指令速度越低(给网络更多转向时间 + 减小撞击)。
-        # 同时缩放 position offset(相对当前 pos), 避免客户端 PD 因位置误差
-        # 反向抵消减速。方向仍由网络 argmin(score) 决定, 不干预。
-        fwd = self.last_fwd_obstacle_dist
-        if fwd is not None and fwd < COLLISION_WARN_DIST:
-            fwd_c = max(fwd, 0.0)
-            denom = max(COLLISION_WARN_DIST - COLLISION_STOP_DIST, 1e-3)
-            ramp = (fwd_c - COLLISION_STOP_DIST) / denom
-            scale = COLLISION_MIN_SCALE + (1.0 - COLLISION_MIN_SCALE) * min(max(ramp, 0.0), 1.0)
-            vx, vy, vz = vx * scale, vy * scale, vz * scale
-            px = float(self.pos[0] + (px - self.pos[0]) * scale)
-            py = float(self.pos[1] + (py - self.pos[1]) * scale)
-            pz = float(self.pos[2] + (pz - self.pos[2]) * scale)
-            if self.verbose:
-                print(f"[碰撞预警] fwd={fwd:.1f}m scale={scale:.2f}")
+        # 严格对齐原版: 不做任何碰撞减速/速度缩放。
+        # 避障完全由网络 argmin(score) 选出的轨迹保证。
 
         self.last_position_cmd = {
             "position": {"x": float(px), "y": float(py), "z": float(pz)},
@@ -1330,7 +847,7 @@ def status():
         "device": srv.device,
         "traj_time": srv.traj_time,
         "inference_count": srv.count,
-        "mode": "simple_avoidance" if USE_SIMPLE_AVOIDANCE else "yopo",
+        "mode": "yopo",
     }
     if srv.lattice_primitive is not None:
         resp["traj_num"] = srv.lattice_primitive.traj_num

@@ -983,7 +983,9 @@ function setupYOPOUI() {
         drone.flightMode = 'yopo_nav';
         drone.yopoNavActive = true;
         if (panoramaSensor) {
-            panoramaSensor.depthSuppress = true;  // 抑制 UI 深度, 导航环独占 DA360
+            // 导航时不再抑制 UI 深度请求, 这样 da360 depth 窗口会随导航环
+            // 持续刷新(之前 depthSuppress=true 会让窗口冻结在最后一张图)。
+            panoramaSensor.depthSuppress = false;
             panoramaSensor.captureIntervalOverride = 100;  // 10Hz 全景, 释放 GPU 给深度管线
         }
         drone.yopoArrived = false;
@@ -1159,10 +1161,13 @@ async function confirmYOPOTarget(x, y, z) {
     // Auto-start navigation
     drone.flightMode = 'yopo_nav';
     drone.yopoNavActive = true;
-    if (panoramaSensor) {
-        panoramaSensor.depthSuppress = true;  // 抑制 UI 深度, 导航环独占 DA360
-        panoramaSensor.captureIntervalOverride = 100;  // 10Hz 全景, 释放 GPU 给深度管线
-    }
+                if (panoramaSensor) {
+                    // 不要把 depthSuppress 设回 true: 否则 UI 的 da360 深度窗口会
+                    // 在设目标点起开始导航后冻结(见 setGoal 路径同理)。保持 false
+                    // 让窗口随导航环的 RGB 刷新持续请求深度图。
+                    panoramaSensor.depthSuppress = false;
+                    panoramaSensor.captureIntervalOverride = 100;  // 10Hz 全景, 释放 GPU 给深度管线
+                }
     drone.yopoArrived = false;
     drone.yopoInferenceCount = 0;
     drone.yopoCmdPos = null;
