@@ -154,6 +154,13 @@ export class Drone {
         this.yopoArrived = false;         // 是否到达目标
         this.yopoDistToGoal = 0;          // 到目标距离
         this.arriveThreshold = 2.0;       // 到达判定半径 (米), matches test_yopo_ros.py L132
+        // 终点接管距离: 网络在 goal_length (2*radio_range=10m) 内目标观测被归一化
+        // 缩小, lattice 又全是巡航型轨迹, 接近目标时 argmin(score) 反复选出过冲/
+        // 回头轨迹 → 速度/位置来回波动、到不了目标。距目标 12m 内不再跟随 YOPO
+        // 轨迹, 改为直接对目标点做 PD 收敛(位置P+速度阻尼D+按距离限速)。
+        this.yopoFinalApproachDist = 12.0; // 距目标 12m 内终点接管 (m)
+        this.yopoArriveHoldM = 3.5;        // 客户端到达锁定的距离阈值 (m)
+        this.yopoArriveHoldV = 1.0;        // 客户端到达锁定的速度阈值 (m/s)
         this.yopoCmdPos = null;           // {x, y, z} 当前指令位置
         this.yopoCmdVel = null;           // {x, y, z} 当前指令速度
         this.yopoCmdAcc = null;           // {x, y, z} 当前指令加速度
@@ -163,6 +170,25 @@ export class Drone {
         this.yopoDepthUnavailable = false; // DA360 深度不可用 → 悬停等待(不回退射线检测)
         this.yopoInferenceCount = 0;      // 推理计数
         this.yopoServerUrl = 'http://localhost:5689'; // YOPO 服务器地址
+
+        // ---- 几何反应式避障 (势场法, 基于 Cesium 真值射线) ----
+        // 与深度无关: 直接用 world.pickLocalRay 探测水平面 8 方向障碍距离 +
+        // 地面/屋顶间隙, 生成排斥/切向绕行/近障刹车。仅当障碍进入
+        // yopoAvoidRange 内才生效, 路径通畅时输出为零 → 不影响导航到目标点。
+        this.yopoAvoidEnabled = true;
+        this.yopoAvoidRays = [
+            { x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 },
+            { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 },
+            { x: 0.7071, y: 0, z: 0.7071 }, { x: -0.7071, y: 0, z: 0.7071 },
+            { x: 0.7071, y: 0, z: -0.7071 }, { x: -0.7071, y: 0, z: -0.7071 },
+        ];
+        this.yopoAvoidRange = 10.0;   // 障碍探测/排斥作用半径 (m)
+        this.yopoAvoidStop = 2.5;     // 该距离内几乎完全刹车 (m)
+        this.yopoAvoidGain = 3.0;     // 排斥/切向速度增益 (m/s)
+        this.yopoAvoidQueryMs = 70;   // 射线探测节流 (ms)
+        this.yopoMinAlt = 2.5;        // 地面/屋顶最小净空 (m)
+        this._avoidProbe = null;      // 最近一次射线探测缓存
+        this._collisionProvider = null; // 供 world.pickLocalRay 访问 (update 注入)
 
         this.collisionRadius = 0.3;
         this.bounceDamping   = 0.3;
@@ -326,6 +352,9 @@ export class Drone {
 
     update(dt, input, collisionProvider) {
         dt = Math.min(dt, 0.05);
+
+        // 记录碰撞提供者: 几何避障通过它访问 world.pickLocalRay / sampleHeightAtLocal
+        if (collisionProvider) this._collisionProvider = collisionProvider;
 
         // 0. Handle flight-mode transitions (M key, RC channel, or dropdown).
         // readSettings() has already copied the latest dropdown value into
@@ -1090,10 +1119,33 @@ export class Drone {
         const yawActive   = Math.abs(input.yaw) > 0.05;
         const stickActive = horizActive || vertActive || yawActive;
 
-        // ---- 0b. 到达目标 → 在目标点位置悬停（高增益位置环）----
-        // 到达后不再跟随YOPO轨迹（网络在目标附近规划不稳定），
-        // 改为直接位置悬停到目标点。
-        const yopoArrivedHold = this.yopoArrived && this.yopoNavTarget && !stickActive;
+        // ---- 0b. 目标点距离 + 终点接管判定 ----
+        // 网络在 goal_length (2*radio_range=10m) 内目标观测被按 10m 归一化缩小,
+        // lattice 又全是巡航型轨迹(端点速度可达 vel_max≈6m/s), 因此接近目标时
+        // argmin(score) 会反复选出过冲/回头的轨迹; 叠加 plan_from_reference 下
+        // 参考点一旦越过目标, 目标方向观测翻转 → 速度/位置来回波动、到不了目标。
+        // 距目标 12m 内不再跟随 YOPO 轨迹, 改为直接对目标点做 PD 收敛并按距离
+        // 限制最大速度形成平滑减速斜坡, 保证最终进入到达圈。
+        let distGoal = Number.POSITIVE_INFINITY;
+        if (this.yopoNavTarget) {
+            const gdx = this.yopoNavTarget.x - this.x;
+            const gdy = this.yopoNavTarget.y - this.y;
+            const gdz = this.yopoNavTarget.z - this.z;
+            distGoal = Math.sqrt(gdx * gdx + gdy * gdy + gdz * gdz);
+        }
+        this.yopoDistToGoal = distGoal;
+
+        // 客户端到达锁定 (兜底): 目标 3.5m 内且速度 < 1 m/s → 视为到达。
+        // server 的 2m 到达判定是异步返回的, 若轨迹在 2m 圈外轻微滞留,
+        // 该兜底确保客户端切换到终点悬停, 避免"永远差一步"。
+        if (this.yopoNavTarget && distGoal < this.yopoArriveHoldM) {
+            const spdNow = Math.sqrt(this.vx*this.vx + this.vy*this.vy + this.vz*this.vz);
+            if (spdNow < this.yopoArriveHoldV) this.yopoArrived = true;
+        }
+
+        const yopoNearGoalHold =
+            this.yopoNavTarget && !stickActive &&
+            (this.yopoArrived || distGoal < this.yopoFinalApproachDist);
 
         // ---- 1. Diagnostic logging ----
         if (this.yopoInferenceCount < 5 || this.yopoInferenceCount % 120 === 0) {
@@ -1126,14 +1178,17 @@ export class Drone {
         let pilotCmdX = 0, pilotCmdZ = 0;
         let useAccFeedforward = false;
 
-        if (yopoArrivedHold) {
-            // 到达目标 → PD 悬停收敛到目标点（位置 P + 速度阻尼 D）
-            // 对齐 SO3 的 kx*posErr + kv*(0-vel) 行为（des_vel=0 时自然减速）
-            // 纯 P 会在到达 goal 时速度不为 0 → 过冲 → 拉回 → 晃动
+        if (yopoNearGoalHold) {
+            // 终点接管: 位置 P + 速度阻尼 D 直接收敛到目标点。
+            // 最大速度随距离递减 → 自然减速斜坡: 12m→~3m/s, 5m→~1.75m/s,
+            // 1m→~0.8m/s(下限), 配合 -holdKd*v 阻尼, 平滑停在目标点。
+            // 撞墙/贴地时压到低速, 避免顶着障碍来回顶撞。
             const gErrX = this.yopoNavTarget.x - this.x;
             const gErrZ = this.yopoNavTarget.z - this.z;
             const gErrY = this.yopoNavTarget.y - this.y;
-            const holdKp = 1.5, holdAltKp = 2.5, holdKd = 1.5, holdMaxV = 2.0;
+            const holdKp = 1.5, holdAltKp = 2.5, holdKd = 1.5;
+            const collideStall = this.isColliding ? 0.35 : 1.0;
+            const holdMaxV = Math.max(0.3, Math.min(3.0, distGoal * 0.35)) * collideStall;
             velTargetX = holdKp * gErrX - holdKd * this.vx;
             velTargetZ = holdKp * gErrZ - holdKd * this.vz;
             velTargetY = holdAltKp * gErrY - holdKd * this.vy;
@@ -1196,6 +1251,24 @@ export class Drone {
             // 无 YOPO 指令 → 悬停（不直线飞向目标，避免绕过避障）
             velTargetX = 0; velTargetZ = 0;
             velTargetY = 0;
+        }
+
+        // ---- 3.5 几何反应式避障 (势场法) ----
+        // 基于 Cesium 真值射线: 探测水平 8 方向障碍距离 + 地面/屋顶间隙,
+        // 生成排斥速度、切向绕行与近障刹车。仅在障碍进入 yopoAvoidRange 内
+        // 才生效, 路径通畅时输出为零 → 不影响导航到目标点的最终目标。
+        // 摇杆抢占 / 已到达(终点悬停)时不干预, 避免与人工控制/到达保持打架。
+        let avoidAccScale = 1;
+        if (this.yopoAvoidEnabled && this.yopoNavTarget &&
+            !stickActive && !this.yopoArrived) {
+            this._updateAvoidProbe();
+            const avoid = this._avoidanceVelocity(velTargetX, velTargetZ);
+            if (avoid) {
+                velTargetX = velTargetX * avoid.brake + avoid.repX + avoid.tanX;
+                velTargetZ = velTargetZ * avoid.brake + avoid.repZ + avoid.tanZ;
+                velTargetY = velTargetY * avoid.brake + avoid.upPush;
+                avoidAccScale = avoid.brake;
+            }
         }
 
         // 速度目标限幅
@@ -1270,6 +1343,8 @@ export class Drone {
             } else if (cmdAgeMs > 80) {
                 ffScale = 1.0 - (cmdAgeMs - 80) / 120;
             }
+            // 避障刹车时衰减加速度前馈: 否则多项式 ffAcc 仍会把无人机"顶向"障碍
+            ffScale *= avoidAccScale;
             aDesX += this.yopoCmdAcc.x * ffScale;
             aDesY += (this.yopoCmdAcc.y || 0) * ffScale;
             aDesZ += this.yopoCmdAcc.z * ffScale;
@@ -1322,8 +1397,8 @@ export class Drone {
             // 摇杆控制偏航
             const droneYawMax = this.droneMaxYawRate;
             targetYawRate = input.yaw * droneYawMax;
-        } else if (yopoArrivedHold) {
-            // 到达后保持当前偏航，不旋转
+        } else if (yopoNearGoalHold) {
+            // 终点接管: 保持当前偏航，不旋转
             targetYawRate = 0;
         } else if (this.yopoCmdYaw !== null) {
             // 跟踪 YOPO 偏航指令（P 控制 + yaw_dot 前馈）
@@ -1357,6 +1432,133 @@ export class Drone {
     }
 
     // ---- Collision ----
+
+    // ---- 几何反应式避障 (势场法) 辅助 ----
+
+    /** 节流更新射线探测缓存: 60Hz 控制环下每 yopoAvoidQueryMs 探测一次。 */
+    _updateAvoidProbe() {
+        const now = performance.now();
+        const p = this._avoidProbe;
+        if (p && now - p.time < this.yopoAvoidQueryMs) return;
+        // 位置变化很小也可复用, 减少 Cesium pickFromRay 开销
+        if (p) {
+            const moved = Math.hypot(this.x - p.x, this.z - p.z);
+            if (moved < 0.25 && now - p.time < 500) return;
+        }
+        this._avoidProbe = this._computeAvoidProbe();
+    }
+
+    /** 探测水平 8 方向障碍距离 + 地面/屋顶间隙 (世界系, 单位 m)。 */
+    _computeAvoidProbe() {
+        const provider = this._collisionProvider;
+        const w = provider ? provider.world : null;
+        if (!w || !w.ready || typeof w.pickLocalRay !== 'function') return null;
+
+        const dirs = this.yopoAvoidRays;
+        const R = this.yopoAvoidRange;
+        const dists = new Array(dirs.length);
+        const origin = { x: this.x, y: this.y, z: this.z };
+        for (let i = 0; i < dirs.length; i++) {
+            const hit = w.pickLocalRay(origin, dirs[i], R);
+            dists[i] = (hit && Number.isFinite(hit.distance) && hit.distance > 0.04)
+                ? hit.distance : R;
+        }
+
+        let groundGap = Number.POSITIVE_INFINITY;
+        if (typeof w.sampleHeightAtLocal === 'function') {
+            const gy = w.sampleHeightAtLocal(this.x, this.z, 0.6);
+            if (Number.isFinite(gy)) groundGap = this.y - gy;
+        }
+
+        return {
+            dists,
+            groundGap,
+            x: this.x, y: this.y, z: this.z,
+            time: performance.now(),
+        };
+    }
+
+    /**
+     * 势场避障速度: 返回 {repX, repZ, tanX, tanZ, brake, upPush}。
+     *   - 排斥(rep): 障碍越近越大, 方向远离障碍簇;
+     *   - 切向绕行(tan): 垂直于排斥方向, 取更靠近目标/期望方向的一侧,
+     *     让无人机贴着障碍滑向目标, 避免势场局部极小;
+     *   - 刹车(brake): 前进方向威胁越近越慢 (0..1);
+     *   - upPush: 地面/屋顶净空不足时上推。
+     * 仅当障碍进入 yopoAvoidRange 内有非零输出; 路径通畅时 brake=1 且
+     * rep/tan=0, 完全不影响导航到目标点的最终目标。
+     */
+    _avoidanceVelocity(velTargetX, velTargetZ) {
+        const p = this._avoidProbe;
+        if (!p) return null;
+        const R = this.yopoAvoidRange;
+        const dirs = this.yopoAvoidRays;
+        const dists = p.dists;
+        if (!dists || dists.length !== dirs.length) return null;
+
+        let repX = 0, repZ = 0;
+        let dMin = R;        // 整体最近障碍 (排斥/切向强度)
+        let dAhead = R;      // 前进方向威胁 (刹车用)
+        let openDirX = 0, openDirZ = 0, openMax = -1;
+
+        const des = Math.hypot(velTargetX, velTargetZ);
+        let udx = 0, udz = 0;
+        if (des > 0.3) { udx = velTargetX / des; udz = velTargetZ / des; }
+
+        for (let i = 0; i < dirs.length; i++) {
+            const d = dists[i];
+            if (!Number.isFinite(d) || d <= 0) continue;
+            if (d < dMin) dMin = d;
+            if (d > openMax) { openMax = d; openDirX = dirs[i].x; openDirZ = dirs[i].z; }
+            if (d < R) {
+                const w = 1 - d / R;
+                repX -= dirs[i].x * w;
+                repZ -= dirs[i].z * w;
+            }
+            // 前进方向威胁: 期望速度方向附近的障碍计入刹车
+            const dot = dirs[i].x * udx + dirs[i].z * udz;
+            if (des > 0.3 ? (dot > 0.5 && d < dAhead) : (d < dAhead)) dAhead = d;
+        }
+
+        // 地面/屋顶间隙不足 → 上推 + 参与刹车
+        let upPush = 0;
+        if (Number.isFinite(p.groundGap) && p.groundGap < this.yopoMinAlt) {
+            upPush = (this.yopoMinAlt - p.groundGap) * this.yopoAvoidGain * 0.5;
+            if (p.groundGap < dAhead) dAhead = p.groundGap;
+        }
+
+        // 近障刹车
+        let brake = 1;
+        if (dAhead <= this.yopoAvoidStop) {
+            brake = Math.max(0, dAhead / this.yopoAvoidStop);
+        } else if (dAhead < R) {
+            brake = 0.55 + 0.45 * (dAhead - this.yopoAvoidStop) / (R - this.yopoAvoidStop);
+        }
+
+        const repMag = Math.hypot(repX, repZ);
+        // 排斥强度限幅
+        if (repMag > 1e-6) {
+            const s = Math.min(1, this.yopoAvoidGain / repMag);
+            repX *= s; repZ *= s;
+        }
+
+        // 切向绕行: 垂直排斥方向, 取与"期望方向+开阔方向"更对齐的一侧
+        let tanX = 0, tanZ = 0;
+        if (repMag > 0.05 && dMin < R) {
+            const nx = repX / repMag, nz = repZ / repMag;
+            const t1x = -nz, t1z = nx;
+            const t2x = nz, t2z = -nx;
+            let dx = udx, dz = udz;
+            if (des <= 0.3) { dx = openDirX; dz = openDirZ; }
+            const s1 = dx * t1x + dz * t1z + 0.3 * (openDirX * t1x + openDirZ * t1z);
+            const s2 = dx * t2x + dz * t2z + 0.3 * (openDirX * t2x + openDirZ * t2z);
+            const t = this.yopoAvoidGain * (1 - dMin / R) * 0.8;
+            if (s1 >= s2) { tanX = t1x * t; tanZ = t1z * t; }
+            else          { tanX = t2x * t; tanZ = t2z * t; }
+        }
+
+        return { repX, repZ, tanX, tanZ, brake, upPush };
+    }
 
     _handleCollisions(collisionProvider, previousPosition = null, dt = 0.016) {
         this.isColliding = false;

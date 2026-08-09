@@ -98,6 +98,13 @@ MAX_DIS = 20.0
 MIN_DIS = 0.04
 CTRL_DT = 0.02  # 50 Hz control loop (matches original YOPO)
 ARRIVE_THRESHOLD = 2.0  # metres (matches test_yopo_ros.py L132: norm(pos-goal)<2.0)
+# 终点接管距离: 网络在 goal_length (2*radio_range=10m) 内目标观测被按 goal_length
+# 归一化缩小(state_transform.normalize_obs), lattice 又全是巡航型轨迹(端点速度可
+# 达 vel_max≈6m/s), 接近目标时 argmin(score) 反复选出过冲/回头轨迹; 叠加
+# plan_from_reference 下参考点越过目标会使目标方向观测翻转 → 目标附近速度/位置
+# 来回波动、到不了目标。距目标 FINAL_APPROACH_DIST 内不再用网络推理, 直接规划
+# 一条"终端速度/加速度=0、平滑减速停到目标点"的五次多项式。
+FINAL_APPROACH_DIST = 12.0  # metres (与客户端 yopoFinalApproachDist 一致)
 # YOPO 轨迹选择: 严格对齐 YOPO_360 test_yopo_ros.py (process_output L297-L310)
 #   直接 argmin(score) 选最优轨迹, 不做任何额外干预。
 #   目标代价与安全代价均已包含在网络输出的 score 中(训练时的 score_label),
@@ -166,6 +173,7 @@ class YOPOServer:
         self.optimal_poly_y = None
         self.optimal_poly_z = None
         self.last_position_cmd = None
+        self.poly_duration = None  # 当前多项式的时长(s): 网络轨迹=traj_time, 终点接管=规划时长T
         self.last_nav_time = None
         self.last_control_time = None
         self.last_fwd_obstacle_dist = None
@@ -410,6 +418,52 @@ class YOPOServer:
             self.traj_time
         )
         self.ctrl_time = 0.0
+        self.poly_duration = self.traj_time
+
+    def _plan_final_approach(self):
+        """终点接管: 距目标较近时, 不用网络推理, 直接规划一条从当前参考状态
+        (desire_pos/vel/acc) 到目标点、终端速度/加速度为 0 的五次多项式。
+
+        目的: 消除网络在 goal_length=2*radio_range=10m 内的近目标失稳(目标观测
+        被归一化缩小 + 巡航型 lattice 无停车轨迹 → 过冲/回头振荡)。终点多项式
+        保证平滑减速并精确停在目标点, 无人机进入 ARRIVE_THRESHOLD(2m) 后由
+        arrive 判定接管。
+
+        与 _build_polynomial 保持一致: 多项式建立在 ROS 系, 由 _compute_command
+        统一转回 MindCloud 系; 时长 T 由剩余距离和 vel_max 决定, 并写入
+        poly_duration 供 ctrl_time 封顶使用(否则 60Hz 控制环会在 traj_time
+        处截断, 终点多项式到不了目标)。
+        """
+        if self.desire_pos is None:
+            start_pos_mc = self.pos.copy()
+            start_vel_mc = self.vel.copy()
+            start_acc_mc = np.zeros(3)
+        else:
+            start_pos_mc = self.desire_pos.copy()
+            start_vel_mc = self.desire_vel.copy() if self.desire_vel is not None else np.zeros(3)
+            start_acc_mc = self.desire_acc.copy() if self.desire_acc is not None else np.zeros(3)
+
+        # 时长: 平均速度 ≤ vel_max 且留出减速时间, 夹在 [0.8, 3.0]s
+        dist = float(np.linalg.norm(self.goal - start_pos_mc))
+        vel_max = float(self.lattice_primitive.vel_max)
+        T = float(np.clip(1.2 * dist / max(vel_max, 0.1), 0.8, 3.0))
+
+        start_pos_ros = self._vec_mc_to_ros(start_pos_mc)
+        start_vel_ros = self._vec_mc_to_ros(start_vel_mc)
+        start_acc_ros = self._vec_mc_to_ros(start_acc_mc)
+        end_pos_ros = self._vec_mc_to_ros(self.goal)
+
+        self.optimal_poly_x = Poly5Solver(
+            start_pos_ros[0], start_vel_ros[0], start_acc_ros[0],
+            end_pos_ros[0], 0.0, 0.0, T)
+        self.optimal_poly_y = Poly5Solver(
+            start_pos_ros[1], start_vel_ros[1], start_acc_ros[1],
+            end_pos_ros[1], 0.0, 0.0, T)
+        self.optimal_poly_z = Poly5Solver(
+            start_pos_ros[2], start_vel_ros[2], start_acc_ros[2],
+            end_pos_ros[2], 0.0, 0.0, T)
+        self.ctrl_time = 0.0
+        self.poly_duration = T
 
     def _preprocess_depth(self, depth_raw, mask_raw=None):
         """Normalize depth to [0,1], build validity mask, return (1, C, H, W) array.
@@ -549,6 +603,21 @@ class YOPOServer:
                 "ctrl_time": 0.0,
             }
 
+        # ── 2c. Final approach: 距目标较近时跳过慢推理, 直接多项式减速到目标 ──
+        # 原理见 FINAL_APPROACH_DIST 注释。多项式终点=目标且终端速度/加速度=0,
+        # 由 60Hz control_update 持续推进, 进入 ARRIVE_THRESHOLD 后置 arrive。
+        if dist_to_goal < FINAL_APPROACH_DIST:
+            with self._lock:
+                self._plan_final_approach()
+                self.last_control_time = now
+                cmd = self._compute_command()
+            cmd["arrived"] = bool(self.arrive)
+            cmd["dist_to_goal"] = dist_to_goal
+            self.count += 1
+            if self.count < 5 or self.count % 30 == 0:
+                print(f"[YOPO 终点接管 #{self.count}] dist={dist_to_goal:.1f}m → 直接减速到目标点")
+            return cmd
+
         # ── 3. Prepare network input ──
         depth_input = torch.from_numpy(depth).to(self.device, non_blocking=True)
         obs_norm, Rotation_wc = self._process_odom()
@@ -672,10 +741,13 @@ class YOPOServer:
                 }
 
             # Advance ctrl_time by real dt, capped at CTRL_DT (matches
-            # original 50Hz fixed-step; prevents dangerous jumps on stalls)
+            # original 50Hz fixed-step; prevents dangerous jumps on stalls).
+            # 封顶用 poly_duration: 终点接管多项式的时长可能大于 lattice
+            # traj_time, 若仍按 traj_time 封顶会在中途截断, 到不了目标点。
             dt = now - self.last_control_time if self.last_control_time else 0.0
             dt = min(max(dt, 0.0), CTRL_DT)
-            self.ctrl_time = min(self.ctrl_time + dt, self.traj_time)
+            cap = self.poly_duration if self.poly_duration else self.traj_time
+            self.ctrl_time = min(self.ctrl_time + dt, cap)
             self.last_control_time = now
 
             cmd = self._compute_command()
@@ -748,7 +820,7 @@ class YOPOServer:
                 "yaw_dot": 0.0,
             }
 
-        t = min(self.ctrl_time, self.traj_time)
+        t = min(self.ctrl_time, self.poly_duration if self.poly_duration else self.traj_time)
 
         # Evaluate polynomial in ROS frame
         pos_ros = np.array([

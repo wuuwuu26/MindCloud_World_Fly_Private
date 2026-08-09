@@ -950,22 +950,7 @@ function setupYOPOUI() {
     // 选取目标点 button: enter keyboard-driven target selection mode.
     // Target starts at the drone's current position; user moves it with
     // arrow keys and presses Enter to confirm (which also auto-starts nav).
-    selectTargetBtn.addEventListener('click', () => {
-        if (mode !== 'flight' || !drone) return;
-        if (yopoTargetSelectMode) return; // already selecting
-        yopoTargetSelectMode = true;
-        // Initialise target at the drone's current position
-        const x = drone.x;
-        const y = drone.y;
-        const z = drone.z;
-        document.getElementById('yopo-target-x').value = x.toFixed(1);
-        document.getElementById('yopo-target-y').value = y.toFixed(1);
-        document.getElementById('yopo-target-z').value = z.toFixed(1);
-        createYOPOTargetMarker(x, y, z);
-        document.getElementById('yopo-status-text').textContent =
-            '状态: 目标选择模式 (小键盘8/2/4/6/9/3移动, 5确认, 0取消)';
-        console.log('YOPO target select mode: starting at drone pos', { x, y, z });
-    });
+    selectTargetBtn.addEventListener('click', enterYOPOTargetSelectMode);
 
     // Start Navigation button (manual fallback — normally Enter in select mode)
     startNavBtn.addEventListener('click', async () => {
@@ -973,6 +958,11 @@ function setupYOPOUI() {
             document.getElementById('yopo-status-text').textContent = '状态: 请先设置目标点';
             return;
         }
+        // 确保目标点标记可见: 第一次导航到达/停止后标记可能已被移除,
+        // 直接"开始导航"(第二次导航)时重建标记, 让目标点始终可见。
+        createYOPOTargetMarker(
+            drone.yopoNavTarget.x, drone.yopoNavTarget.y, drone.yopoNavTarget.z
+        );
         // Check YOPO server connectivity
         const status = await yopoNavigator.getStatus();
         if (!status) {
@@ -1002,28 +992,78 @@ function setupYOPOUI() {
     });
 
     // Stop Navigation button
-    stopNavBtn.addEventListener('click', () => {
-        drone.yopoNavActive = false;
-        if (panoramaSensor) {
-            panoramaSensor.depthSuppress = false;  // 恢复 UI 深度显示
-            panoramaSensor.captureIntervalOverride = 0;  // 恢复 60Hz 全景
-        }
-        drone.yopoCmdPos = null;
-        drone.yopoCmdVel = null;
-        drone.yopoCmdTime = 0;
-        // Switch back to simpleflight or drone mode
-        drone.flightMode = 'simpleflight';
-        const modeSelect = document.getElementById('flight-mode-select');
-        if (modeSelect) modeSelect.value = 'simpleflight';
-        document.getElementById('yopo-status-text').textContent = '状态: 已停止';
-        document.getElementById('yopo-start-nav-btn').textContent = '开始导航';
-        removeYOPOTargetMarker();
-    });
+    stopNavBtn.addEventListener('click', stopYOPONavigation);
 }
 
 // ── YOPO target selection helpers ───────────────────────────────
 
 const YOPO_TARGET_STEP = 0.5; // metres per key press
+
+/** 进入目标选择模式 (按钮与 T 快捷键共用)。若正在导航, 先停止导航。 */
+function enterYOPOTargetSelectMode() {
+    if (mode !== 'flight' || !drone) return;
+    if (yopoTargetSelectMode) return; // already selecting
+    // 正在导航时先停止, 再进入目标选择
+    if (drone.flightMode === 'yopo_nav' && drone.yopoNavActive) {
+        stopYOPONavigation();
+    }
+    yopoTargetSelectMode = true;
+    // Initialise target at the drone's current position
+    const x = drone.x;
+    const y = drone.y;
+    const z = drone.z;
+    document.getElementById('yopo-target-x').value = x.toFixed(1);
+    document.getElementById('yopo-target-y').value = y.toFixed(1);
+    document.getElementById('yopo-target-z').value = z.toFixed(1);
+    createYOPOTargetMarker(x, y, z);
+    document.getElementById('yopo-status-text').textContent =
+        '状态: 目标选择模式 (小键盘8/2/4/6/9/3移动, 5确认, 0取消)';
+    console.log('YOPO target select mode: starting at drone pos', { x, y, z });
+}
+
+/** 停止导航 (按钮与 X 快捷键共用)。停止后保留目标点标记, 便于再次导航对照。 */
+function stopYOPONavigation() {
+    if (!drone) return;
+    // 未在导航时: 若有目标选择模式, 直接取消选择
+    if (drone.flightMode !== 'yopo_nav' || !drone.yopoNavActive) {
+        if (yopoTargetSelectMode) cancelYOPOTarget();
+        return;
+    }
+    drone.yopoNavActive = false;
+    drone.yopoArrived = false;
+    if (panoramaSensor) {
+        panoramaSensor.depthSuppress = false;  // 恢复 UI 深度显示
+        panoramaSensor.captureIntervalOverride = 0;  // 恢复 60Hz 全景
+    }
+    drone.yopoCmdPos = null;
+    drone.yopoCmdVel = null;
+    drone.yopoCmdTime = 0;
+    // Switch back to simpleflight or drone mode
+    drone.flightMode = 'simpleflight';
+    const modeSelect = document.getElementById('flight-mode-select');
+    if (modeSelect) modeSelect.value = 'simpleflight';
+    document.getElementById('yopo-status-text').textContent = '状态: 已停止';
+    document.getElementById('yopo-start-nav-btn').textContent = '开始导航';
+    // 保留目标点标记: 让"设置的目标点"在停止后依然可见, 再次导航时对照
+}
+
+/**
+ * 以无人机当前朝向计算机头方向(fwd)与其右侧(right)在水平面的单位向量,
+ * 供目标点移动使用: 8/2 沿机头前后, 4/6 沿机头左右(以当前朝向为前方)。
+ * 机头方向取 local -Z(world.getForwardLocal)投影到水平面; 右侧向量
+ * right = forward × up = (-fwd.z, 0, fwd.x), 与 cesium-world 中
+ * getTransformBasisLocal 的 local +X 约定一致。
+ */
+function yopoBodyMoveAxes() {
+    let fwd = { x: 0, z: -1 }; // 默认朝南(-Z), 与 identity 机头方向一致
+    if (world && drone && typeof world.getForwardLocal === 'function') {
+        const f = world.getForwardLocal(drone.getBodyTransform());
+        const fl = Math.hypot(f.x, f.z);
+        if (fl > 1e-4) fwd = { x: f.x / fl, z: f.z / fl };
+    }
+    const right = { x: -fwd.z, z: fwd.x }; // forward × up
+    return { fwd, right };
+}
 
 /** Create (or reuse) a Cesium entity marking the YOPO target position. */
 function createYOPOTargetMarker(x, y, z) {
@@ -1079,11 +1119,14 @@ function removeYOPOTargetMarker() {
  * keydown listener (capture phase) when yopoTargetSelectMode is active.
  * Uses the numeric keypad (e.code so NumLock state does not matter).
  *
- *   Numpad 8/2 = forward/back (north/south, -z/+z)
- *   Numpad 4/6 = left/right   (west/east,  -x/+x)
+ *   Numpad 8/2 = forward/back (沿当前无人机机头方向)
+ *   Numpad 4/6 = left/right   (垂直机头方向左/右)
  *   Numpad 9/3 = up/down      (+y/-y)
  *   Numpad 5   = confirm (start navigation)
  *   Numpad 0   = cancel
+ *
+ * 8/2、4/6 每次按键都以无人机当前朝向为基准(而非世界固定方向),
+ * 这样即使无人机转了向, 小键盘移动目标的方向始终与机头一致。
  *
  * Returns true if the event was consumed.
  */
@@ -1102,12 +1145,19 @@ function handleYOPOKeyDown(e) {
     if (!Number.isFinite(y)) y = 2;
     if (!Number.isFinite(z)) z = 0;
 
+    // 以无人机当前朝向计算前向/右向(水平面单位向量)
+    const { fwd, right } = yopoBodyMoveAxes();
+
     let consumed = true;
     switch (e.code) {
-        case 'Numpad8': case 'NumpadArrowUp':    z -= YOPO_TARGET_STEP; break; // north (-z)
-        case 'Numpad2': case 'NumpadArrowDown':  z += YOPO_TARGET_STEP; break; // south (+z)
-        case 'Numpad4': case 'NumpadArrowLeft':  x -= YOPO_TARGET_STEP; break; // west  (-x)
-        case 'Numpad6': case 'NumpadArrowRight': x += YOPO_TARGET_STEP; break; // east  (+x)
+        case 'Numpad8': case 'NumpadArrowUp': // 机头方向前进
+            x += fwd.x * YOPO_TARGET_STEP; z += fwd.z * YOPO_TARGET_STEP; break;
+        case 'Numpad2': case 'NumpadArrowDown': // 机头反方向后退
+            x -= fwd.x * YOPO_TARGET_STEP; z -= fwd.z * YOPO_TARGET_STEP; break;
+        case 'Numpad4': case 'NumpadArrowLeft': // 机头方向左侧
+            x -= right.x * YOPO_TARGET_STEP; z -= right.z * YOPO_TARGET_STEP; break;
+        case 'Numpad6': case 'NumpadArrowRight': // 机头方向右侧
+            x += right.x * YOPO_TARGET_STEP; z += right.z * YOPO_TARGET_STEP; break;
         case 'Numpad9':                          y += YOPO_TARGET_STEP; break; // up    (+y)
         case 'Numpad3':                          y -= YOPO_TARGET_STEP; break; // down  (-y)
         case 'Numpad5': case 'NumpadEnter':
@@ -1147,6 +1197,8 @@ async function confirmYOPOTarget(x, y, z) {
         return;
     }
     drone.yopoNavTarget = { x, y, z };
+    // 确保目标点标记存在(覆盖"标记曾被移除"的情况, 第二次导航时仍可见)
+    createYOPOTargetMarker(x, y, z);
 
     // Check YOPO server connectivity before starting
     const status = await yopoNavigator.getStatus();
@@ -1214,8 +1266,9 @@ function updateYOPOStatusUI() {
     if (drone.flightMode === 'yopo_nav' && drone.yopoNavActive) {
         if (drone.yopoArrived) {
             statusEl.textContent = '状态: 已到达目标 ✓';
-            // Remove target marker once arrived
-            if (yopoTargetMarker) removeYOPOTargetMarker();
+            // 到达后保留目标点标记: 让"设置的目标点"始终可见,
+            // 第二次导航时也能看到目标位置。标记仅在重新选取/
+            // 取消选择时移除。
         } else {
             statusEl.textContent = '状态: 导航中...';
         }
@@ -1423,6 +1476,18 @@ function setupKeyboard() {
                 enterPlacementMode(false);
             }
         } else if (mode === 'flight') {
+            if (e.code === 'KeyT') {
+                // T: 开始设置导航目标点 (进入目标选择模式)
+                e.preventDefault();
+                enterYOPOTargetSelectMode();
+                return;
+            }
+            if (e.code === 'KeyX') {
+                // X: 停止导航
+                e.preventDefault();
+                stopYOPONavigation();
+                return;
+            }
             if (e.code === 'KeyV') {
                 e.preventDefault();
                 cameraMode = cameraMode === 'third' ? 'first' : 'third';
