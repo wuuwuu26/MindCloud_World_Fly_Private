@@ -99,7 +99,7 @@ echo "YOPO mode:  $MODE"
 MODEL_PATH="$(readlink -f "$MODEL_PATH")"
 MODEL_BASENAME="$(basename "$MODEL_PATH")"
 
-# Local mode: run Python script directly
+# Local mode: run Python script directly (no docker -> 重启最快, 推荐用于调参迭代)
 if [[ "$MODE" == "local" ]]; then
     PYTHON_BIN="${YOPO_PYTHON:-python3}"
     exec "$PYTHON_BIN" "$SCRIPT_DIR/yopo_server.py" \
@@ -170,7 +170,11 @@ run_args=(
     --rm
     --name "$NAME"
     -p "$PORT:5689"
+    -p 5690:5690
     -e "YOPO_NO_WARMUP=${YOPO_NO_WARMUP:-0}"
+    # 转发速度/时间缩放相关环境变量(否则在 docker 模式下设置无效, 只能改 yaml 重启)
+    -e "YOPO_VELOCITY=${YOPO_VELOCITY:-}"
+    -e "YOPO_CTRL_TIME_SCALE=${YOPO_CTRL_TIME_SCALE:-}"
     -v "$MODEL_PATH:/models/$MODEL_BASENAME:ro"
 )
 
@@ -201,4 +205,5 @@ exec docker run "${gpu_args[@]}" "${run_args[@]}" "$IMAGE" \
         --model-path "/models/$MODEL_BASENAME" \
         --host 0.0.0.0 \
         --port 5689 \
+        --ws-port 5690 \
         --verbose

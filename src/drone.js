@@ -53,7 +53,7 @@ const _v3    = new pc.Vec3();
 export class Drone {
     constructor() {
         // ---- Geometry ----
-        this.droneSize = 0.3;
+        this.droneSize = 0.15;
 
         // ---- State ----
         this.x = 0; this.y = 2; this.z = 0;
@@ -142,7 +142,7 @@ export class Drone {
         this.sfPosKp = 1.0;
         this.sfVelKp = 5.0; this.sfVelKi = 0.0; this.sfVelKd = 1.0;
         this.sfAngleKp = 4.5; this.sfAngleKd = 0.1;
-        this.sfRateKp = 0.5; this.sfRateKi = 0.0; this.sfRateKd = 0.0;
+        this.sfRateKp = 0.8; this.sfRateKi = 0.0; this.sfRateKd = 0.0;
         this.sfAltKp = 2.0; this.sfAltKd = 0.5;
         this.sfYawRateKp = 1.0;
         this._sfVelIntMax = 15.0;
@@ -174,23 +174,48 @@ export class Drone {
         // ---- 几何反应式避障 (势场法, 基于 Cesium 真值射线) ----
         // 与深度无关: 直接用 world.pickLocalRay 探测水平面 8 方向障碍距离 +
         // 地面/屋顶间隙, 生成排斥/切向绕行/近障刹车。仅当障碍进入
-        // yopoAvoidRange 内才生效, 路径通畅时输出为零 → 不影响导航到目标点。
-        this.yopoAvoidEnabled = true;
+        // 几何避障安全网(Cesium 真实几何势场)已停用: 仅依赖 YOPO_30 网络自身的
+        // 学习式避障(训练期 safety_loss, wc=8 学到), 不叠加任何额外避障算法。
+        this.yopoAvoidEnabled = false;
         this.yopoAvoidRays = [
             { x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 },
             { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 },
             { x: 0.7071, y: 0, z: 0.7071 }, { x: -0.7071, y: 0, z: 0.7071 },
             { x: 0.7071, y: 0, z: -0.7071 }, { x: -0.7071, y: 0, z: -0.7071 },
         ];
-        this.yopoAvoidRange = 10.0;   // 障碍探测/排斥作用半径 (m)
-        this.yopoAvoidStop = 2.5;     // 该距离内几乎完全刹车 (m)
-        this.yopoAvoidGain = 3.0;     // 排斥/切向速度增益 (m/s)
+        this.yopoAvoidRange = 25.0;   // 障碍探测/排斥作用半径 (m) — 加大到 25m 给 15m/s 巡航足够反应距离
+        this.yopoAvoidStop = 3.5;     // 该距离内几乎完全刹车 (m) — 安全净空, 防止擦碰
+        this.yopoAvoidGain = 8.0;     // 排斥/切向速度增益 (m/s) — 加强以真正推开/绕行
+        this.yopoAvoidDecel = 3.5;    // 安全刹车减速度 (m/s^2) — 用于运动学停车距离计算
         this.yopoAvoidQueryMs = 70;   // 射线探测节流 (ms)
-        this.yopoMinAlt = 2.5;        // 地面/屋顶最小净空 (m)
+        this.yopoMinAlt = 2.5;        // 地面/屋顶最小净空 (m) — 软避障(上推)触发阈值
+        // 硬性地面安全下限 (m): 净空低于此值, 无论 YOPO 轨迹/软避障如何, 一律
+        // 强制向上、禁止继续下降, 绝对防止"快速盲降"撞穿地面。设得比 yopoMinAlt
+        // 低, 以免阻挡合法低目标(如 2m 楼面); 但仍远高于 0, 保留安全余量。
+        this.yopoCrashFloor = 1.0;
+        // 期望加速度安全上限 (m/s²): 远低于物理极角上限 (~15.7, maxAngle=58°).
+        // 重规划(深度环)较慢时, 过大的加速度会让无人机在下一指令到达前冲入障碍.
+        // 对合成期望加速度限幅, 留出刹车/反应余量. 调小=更保守(更不易撞, 但转向更钝).
+        this.yopoAccMax = 8.0;
+        // YOPO 多项式加速度前馈的缩放: 网络给的 cmdAcc 在高速/急转时很大, 直接叠加
+        // 会"猛推"无人机(用户反馈加速度过大). 削到 0.4 让轨迹跟踪更柔和、可修正.
+        this.yopoFFAccScale = 0.4;
+        // 垂直速度前馈: 网络垂直轨迹常过冲(本应爬升却给向下巨速), 直接叠加会盖过
+        // 位置环导致猛扎。先缩放再限幅, 让知道真实高度误差的位置环主导垂直运动。
+        this.yopoFFVelYScale = 0.5;
+        this.yopoFFVelYMax = 3.0;
+        // 扇形射线束: 每个主方向发多条平行射线(中心±两侧偏移), 取最近距离。
+        // 单条中心射线是"针孔"视野, 遇建筑物内凹部分(凹窗/门洞/凹墙面)会穿过
+        // 凹槽误判畅通; 两侧偏移射线能命中凹槽两边的墙沿, 提前感知内凹威胁。
+        // 偏移量单位 m, 需覆盖无人机机体半宽 + 余量。
+        this.yopoAvoidFanHalf = 0.8;  // 射线束半宽 (m)
+        this.yopoAvoidFanRays = 3;    // 每条主方向的平行射线数 (奇数: 中心±两侧)
+        this.yopoAvoidCeilRay = true; // 额外向上探测屋顶/悬挑下沿, 防止钻入矮檐
+        this.yopoAvoidCeilLook = 1.2; // 上仰探测高度 (m)
         this._avoidProbe = null;      // 最近一次射线探测缓存
         this._collisionProvider = null; // 供 world.pickLocalRay 访问 (update 注入)
 
-        this.collisionRadius = 0.3;
+        this.collisionRadius = 0.1;
         this.bounceDamping   = 0.3;
 
         // ---- Output state ----
@@ -945,7 +970,7 @@ export class Drone {
         const vertActive  = Math.abs(input.throttle) > 0.05;
 
         // ---- 2. 位置环 (P) → 速度目标 ----
-        let velTargetX, velTargetZ;
+        let velTargetX, velTargetY, velTargetZ;
         let pilotCmdX = 0, pilotCmdZ = 0;
         if (horizActive) {
             const cmdFwd   = -input.pitch * maxSpd * rates.pitch;
@@ -972,7 +997,6 @@ export class Drone {
         }
 
         // 垂直：摇杆=爬升率，松杆=高度锁定 (PD)
-        let velTargetY;
         if (vertActive) {
             velTargetY = input.throttle * this.droneMaxVSpeed * boost;
             this._targetY = this.y;
@@ -1101,11 +1125,15 @@ export class Drone {
     }
 
     /**
-     * YOPO 导航控制律 — 跟踪 YOPO 后端返回的位置/速度指令。
+     * YOPO 导航控制律 — 仅使用 YOPO 模型输出 (世界系位置/速度/加速度/偏航指令)。
      *
-     * 复用 SimpleFlight 的级联 PID 框架（位置→速度→姿态→角速率），
-     * 将 YOPO 神经网络输出的位置/速度指令作为前馈输入到底层控制器。
-     * 支持摇杆抢占：推动摇杆时临时切换到人工控制，松杆后恢复导航。
+     * 控制器与 YOPO 适配: 轨迹跟踪 = 位置环 P + 速度前馈 + 加速度前馈, 偏航 P + yaw_dot
+     * 前馈; 增益对齐 YOPO_360 SO3 控制器 (Hummingbird: kx=2, kv=1.8, kz=3.5)。
+     * 速度环用 SO3 风格纯 P (无 I/D, 避免 replan 跳变导致积分绕偏/震荡); 姿态/角速率/
+     * 推力级联沿用 SimpleFlight 同一套 PID, 推力做倾斜补偿。
+     * 不叠加任何额外导航算法/修饰: 无几何避障 (yopoAvoidEnabled=false 时势场不生效)。
+     *
+     * 终点 12m 内切换为对 yopoNavTarget 的 PD 收敛 + 距离限幅减速斜坡, 保证进入到达圈。
      */
     _controlYOPO(dt, input) {
         const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -1124,8 +1152,8 @@ export class Drone {
         // lattice 又全是巡航型轨迹(端点速度可达 vel_max≈6m/s), 因此接近目标时
         // argmin(score) 会反复选出过冲/回头的轨迹; 叠加 plan_from_reference 下
         // 参考点一旦越过目标, 目标方向观测翻转 → 速度/位置来回波动、到不了目标。
-        // 距目标 12m 内不再跟随 YOPO 轨迹, 改为直接对目标点做 PD 收敛并按距离
-        // 限制最大速度形成平滑减速斜坡, 保证最终进入到达圈。
+        // 距目标 yopoFinalApproachDist 内不再跟随 YOPO 轨迹, 改为直接对目标点做 PD 收敛,
+        // 保证最终进入到达圈。
         let distGoal = Number.POSITIVE_INFINITY;
         if (this.yopoNavTarget) {
             const gdx = this.yopoNavTarget.x - this.x;
@@ -1135,7 +1163,7 @@ export class Drone {
         }
         this.yopoDistToGoal = distGoal;
 
-        // 客户端到达锁定 (兜底): 目标 3.5m 内且速度 < 1 m/s → 视为到达。
+        // 客户端到达锁定 (兜底): 目标 yopoArriveHoldM 内且速度 < yopoArriveHoldV → 视为到达。
         // server 的 2m 到达判定是异步返回的, 若轨迹在 2m 圈外轻微滞留,
         // 该兜底确保客户端切换到终点悬停, 避免"永远差一步"。
         if (this.yopoNavTarget && distGoal < this.yopoArriveHoldM) {
@@ -1147,7 +1175,7 @@ export class Drone {
             this.yopoNavTarget && !stickActive &&
             (this.yopoArrived || distGoal < this.yopoFinalApproachDist);
 
-        // ---- 1. Diagnostic logging ----
+        // ---- 1. 诊断日志 ----
         if (this.yopoInferenceCount < 5 || this.yopoInferenceCount % 120 === 0) {
             const hasCmd = this.yopoCmdPos ? 'YES' : 'NO';
             const cmdStr = this.yopoCmdPos
@@ -1157,7 +1185,7 @@ export class Drone {
                 `pos=(${this.x.toFixed(1)},${this.y.toFixed(1)},${this.z.toFixed(1)})`);
         }
 
-        // ---- 2. Body-frame forward/right ----
+        // ---- 2. 机体前向/右向 (与 _controlSimpleFlight 同义) ----
         _mat4.setTRS(pc.Vec3.ZERO, this.orientation, pc.Vec3.ONE);
         _mat4.getZ(_v3);
         let fwdX = -_v3.x, fwdZ = -_v3.z;
@@ -1188,7 +1216,7 @@ export class Drone {
             const gErrY = this.yopoNavTarget.y - this.y;
             const holdKp = 1.5, holdAltKp = 2.5, holdKd = 1.5;
             const collideStall = this.isColliding ? 0.35 : 1.0;
-            const holdMaxV = Math.max(0.3, Math.min(3.0, distGoal * 0.35)) * collideStall;
+            const holdMaxV = Math.max(0.3, Math.min(4.0, distGoal * 0.4)) * collideStall;
             velTargetX = holdKp * gErrX - holdKd * this.vx;
             velTargetZ = holdKp * gErrZ - holdKd * this.vz;
             velTargetY = holdAltKp * gErrY - holdKd * this.vy;
@@ -1234,9 +1262,13 @@ export class Drone {
             const ffDecay = cmdAgeS < 3.0 ? 1.0 : Math.max(0, 1.0 - (cmdAgeS - 3.0) / 1.0);
             const ffX = (this.yopoCmdVel ? this.yopoCmdVel.x : 0) * ffDecay;
             const ffZ = (this.yopoCmdVel ? this.yopoCmdVel.z : 0) * ffDecay;
-            const ffY = (this.yopoCmdVel ? (this.yopoCmdVel.y || 0) : 0) * ffDecay;
+            // 垂直速度前馈缩放+限幅: 网络垂直轨迹常过冲(本应爬升却给向下巨速),
+            // 若直接叠加会盖过位置环导致猛扎。限幅后位置环(知道真实高度误差)主导。
+            let ffY = (this.yopoCmdVel ? (this.yopoCmdVel.y || 0) : 0) * ffDecay * this.yopoFFVelYScale;
+            if (ffY > this.yopoFFVelYMax) ffY = this.yopoFFVelYMax;
+            else if (ffY < -this.yopoFFVelYMax) ffY = -this.yopoFFVelYMax;
 
-            const yopoPosKp = 0.7;   // 位置环降低(用户要求): 减弱"拉回旧指令位置"的趋势, 由速度/加速度前馈主导跟踪
+            const yopoPosKp = 1.0;   // 位置环增益: 兼顾"拉回旧指令位置"趋势与巡航速度。配合服务端时间缩放, 让无人机更紧地追上更快的指令。
             const yopoAltKp = 1.2;   // 高度环同步降低, 垂直运动更平滑
             velTargetX = yopoPosKp * posErrX + ffX;
             velTargetZ = yopoPosKp * posErrZ + ffZ;
@@ -1271,6 +1303,31 @@ export class Drone {
             }
         }
 
+        // ── 硬性地面安全下限 (独立于 YOPO 与软避障开关) ──
+        // 解决"快速飞行 + 重规划间隙盲降"撞地: 当净空低于 yopoCrashFloor, 无论
+        // 轨迹指令如何, 强制向上、禁止继续下降。这是最终安全网。注意: 几何避障
+        // (yopoAvoidEnabled) 默认关闭, 故此处不依赖它, 直接采样地形高度判断净空。
+        this._yopoGroundFloorActive = false;
+        let groundGap = Number.POSITIVE_INFINITY;
+        if (this._avoidProbe && Number.isFinite(this._avoidProbe.groundGap) &&
+            performance.now() - this._avoidProbe.time < 300) {
+            groundGap = this._avoidProbe.groundGap;       // 复用新鲜探测
+        } else {
+            // 直接采样地形高度(单次, 廉价), 不依赖势场避障开关
+            const cp = this._collisionProvider;
+            const w = cp ? cp.world : null;
+            if (w && w.ready && typeof w.sampleHeightAtLocal === 'function') {
+                const gy = w.sampleHeightAtLocal(this.x, this.z, 0.6);
+                if (Number.isFinite(gy)) groundGap = this.y - gy;
+            }
+        }
+        if (Number.isFinite(groundGap) && groundGap < this.yopoCrashFloor) {
+            // 越接近地面, 上爬速率越大; 至少 +1 m/s 保证脱离。
+            const climb = (this.yopoCrashFloor - groundGap) * 4.0 + 1.0;
+            if (velTargetY < climb) velTargetY = climb;
+            this._yopoGroundFloorActive = true;
+        }
+
         // 速度目标限幅
         const velTargetH = Math.sqrt(velTargetX * velTargetX + velTargetZ * velTargetZ);
         if (velTargetH > maxSpd) {
@@ -1280,7 +1337,7 @@ export class Drone {
         velTargetY = clamp(velTargetY, -this.droneMaxVSpeed, this.droneMaxVSpeed);
         this.targetGroundSpeed = Math.sqrt(velTargetX * velTargetX + velTargetZ * velTargetZ);
 
-        // Diagnostic: log velocity targets when navigating
+        // 诊断: 记录速度目标
         if (this.yopoInferenceCount < 5 || this.yopoInferenceCount % 120 === 0) {
             console.log(`_controlYOPO velTarget=(${velTargetX.toFixed(2)},${velTargetY.toFixed(2)},${velTargetZ.toFixed(2)}) ` +
                 `stickActive=${stickActive} thrust=${this.thrustOutput.toFixed(0)}`);
@@ -1302,7 +1359,7 @@ export class Drone {
         const maxAngle = this.droneMaxAngle;
         const aMaxHoriz = G * Math.tan(maxAngle * DEG2RAD);
         // YOPO 专用速度环参数(已调低, 补偿柔和)
-        const velKp = useAccFeedforward ? 1.5 : this.sfVelKp;
+        const velKp = useAccFeedforward ? 2.2 : this.sfVelKp;
         const velKi = useAccFeedforward ? 0.0 : this.sfVelKi;
         const velKd = useAccFeedforward ? 0.0 : this.sfVelKd;
         const velErrClamp = aMaxHoriz / Math.max(0.01, velKp);
@@ -1337,7 +1394,7 @@ export class Drone {
         // 衰减：<80ms 全量，80-200ms 线性降至 0，>200ms 关闭。
         if (useAccFeedforward && this.yopoCmdAcc) {
             const cmdAgeMs = this.yopoCmdTime > 0 ? (performance.now() - this.yopoCmdTime) : 999;
-            let ffScale = 1.0;
+            let ffScale = this.yopoFFAccScale;
             if (cmdAgeMs > 200) {
                 ffScale = 0.0;
             } else if (cmdAgeMs > 80) {
@@ -1348,7 +1405,26 @@ export class Drone {
             aDesX += this.yopoCmdAcc.x * ffScale;
             aDesY += (this.yopoCmdAcc.y || 0) * ffScale;
             aDesZ += this.yopoCmdAcc.z * ffScale;
+            // 硬地面下限触发时, 禁止向下加速度前馈(否则会抵消上爬), 并强制 aDesY>=0
+            if (this._yopoGroundFloorActive) {
+                if (this.yopoCmdAcc && this.yopoCmdAcc.y < 0) aDesY -= this.yopoCmdAcc.y * ffScale;
+                if (aDesY < 0) aDesY = 0;
+            }
         }
+
+        // ── 期望加速度安全上限 (防止"加速度过大→下一个指令前撞障碍") ──
+        // 重规划(深度环)较慢时, 过大的合成加速度会让无人机在下一避障指令到达前
+        // 就冲入实体。对水平合成加速度与垂直加速度分别限幅到 yopoAccMax, 留出刹车
+        // 与反应余量(等效最大倾角由 58° 降到 ~atan(8/9.81)≈39°)。
+        const aMaxCmd = this.yopoAccMax;
+        const aH = Math.hypot(aDesX, aDesZ);
+        if (aH > aMaxCmd) {
+            const s = aMaxCmd / aH;
+            aDesX *= s;
+            aDesZ *= s;
+        }
+        if (aDesY > aMaxCmd) aDesY = aMaxCmd;
+        else if (aDesY < -aMaxCmd) aDesY = -aMaxCmd;
 
         // ---- 5. 投影到 body frame → 期望倾斜角 ----
         const aFwd   = aDesX * fwdX + aDesZ * fwdZ;
@@ -1448,7 +1524,13 @@ export class Drone {
         this._avoidProbe = this._computeAvoidProbe();
     }
 
-    /** 探测水平 8 方向障碍距离 + 地面/屋顶间隙 (世界系, 单位 m)。 */
+    /**
+     * 探测水平 8 方向障碍距离 + 地面/屋顶间隙 (世界系, 单位 m)。
+     * 采用"扇形射线束": 每个主方向从机体左右偏移点发出多条平行射线, 取最近距离。
+     * 单条中心射线在遇建筑物内凹部分(凹窗/门洞/凹墙面)时, 会穿过凹槽而漏检,
+     * 两侧偏移射线能命中凹槽两边的墙沿, 从而把"凹进去的墙"当作障碍感知,
+     * 避免无人机误以为前方畅通而撞上凹槽侧壁/后壁。
+     */
     _computeAvoidProbe() {
         const provider = this._collisionProvider;
         const w = provider ? provider.world : null;
@@ -1457,11 +1539,41 @@ export class Drone {
         const dirs = this.yopoAvoidRays;
         const R = this.yopoAvoidRange;
         const dists = new Array(dirs.length);
-        const origin = { x: this.x, y: this.y, z: this.z };
+        const nFan = this.yopoAvoidFanRays;
+        const half = this.yopoAvoidFanHalf;
+        // 平行射线在垂直于主方向的平面内的横向偏移 (归一化法向量 n)
+        // n = 主方向在水平面逆时针旋转 90°: dir=(dx,dz) → n=(dz,-dx) 归一代
+
+        // 屋顶/悬挑下沿探测: 向上看是否存在遮挡, 防止钻入低矮檐口/凹槽顶
+        let ceilHit = false;
+        if (this.yopoAvoidCeilRay) {
+            const oUp = { x: this.x, y: this.y + this.yopoAvoidCeilLook, z: this.z };
+            for (let i = 0; i < dirs.length; i++) {
+                const h = w.pickLocalRay(oUp, dirs[i], Math.min(R, 6));
+                if (h && Number.isFinite(h.distance) && h.distance > 0.04) { ceilHit = true; break; }
+            }
+        }
+
         for (let i = 0; i < dirs.length; i++) {
-            const hit = w.pickLocalRay(origin, dirs[i], R);
-            dists[i] = (hit && Number.isFinite(hit.distance) && hit.distance > 0.04)
-                ? hit.distance : R;
+            const d = dirs[i];
+            const dlen = Math.hypot(d.x, d.z) || 1e-6;
+            // 主方向法向 (水平面内垂直向量, 归一化)
+            const nx = d.z / dlen, nz = -d.x / dlen;
+            let dNear = R;
+            // 扇束: 奇数条平行射线, 偏移 -half..+half
+            for (let k = 0; k < nFan; k++) {
+                const off = (nFan === 1) ? 0 : (2 * k / (nFan - 1) - 1) * half;
+                const o = {
+                    x: this.x + nx * off,
+                    y: this.y,
+                    z: this.z + nz * off,
+                };
+                const hit = w.pickLocalRay(o, d, R);
+                const hd = (hit && Number.isFinite(hit.distance) && hit.distance > 0.04)
+                    ? hit.distance : R;
+                if (hd < dNear) dNear = hd;
+            }
+            dists[i] = dNear;
         }
 
         let groundGap = Number.POSITIVE_INFINITY;
@@ -1473,6 +1585,7 @@ export class Drone {
         return {
             dists,
             groundGap,
+            ceilHit,
             x: this.x, y: this.y, z: this.z,
             time: performance.now(),
         };
@@ -1527,12 +1640,25 @@ export class Drone {
             if (p.groundGap < dAhead) dAhead = p.groundGap;
         }
 
-        // 近障刹车
+        // 屋顶/悬挑下沿遮挡: 表明头顶上方存在内凹顶/檐口, 先别急着前进钻入。
+        // 通过降低前进速度留出反应时间, 同时加一点上/后退趋势, 避免撞上凹槽顶。
+        if (p.ceilHit) {
+            const eff = Math.max(2.0, R * 0.35); // 视为中近距离威胁
+            if (eff < dAhead) dAhead = eff;
+        }
+
+        // 近障刹车 (运动学安全速度): 保证在该距离内一定刹停, 不再"全速冲到 10m 才减速"。
+        // v_safe = sqrt(2*a*(d - standoff)) 是仍能停下的纵向速度; 若期望速度超过它,
+        // 按比例收油, 使无人机渐近停在 standoff 净空处, 物理上不可能撞上墙。
         let brake = 1;
-        if (dAhead <= this.yopoAvoidStop) {
-            brake = Math.max(0, dAhead / this.yopoAvoidStop);
+        const aDecel = this.yopoAvoidDecel;
+        const standoff = this.yopoAvoidStop;
+        const spdFwd = Math.hypot(velTargetX, velTargetZ);
+        if (dAhead <= standoff) {
+            brake = 0;  // 已进入安全净空 → 完全停止前进
         } else if (dAhead < R) {
-            brake = 0.55 + 0.45 * (dAhead - this.yopoAvoidStop) / (R - this.yopoAvoidStop);
+            const vSafe = Math.sqrt(2 * aDecel * (dAhead - standoff));
+            brake = spdFwd > 1e-3 ? Math.min(1, vSafe / spdFwd) : 0;
         }
 
         const repMag = Math.hypot(repX, repZ);

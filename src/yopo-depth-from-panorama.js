@@ -48,6 +48,13 @@ export class YOPODepthFromPanorama {
         this.scaleConfidence = 0;
         this._erpFrameCount = 0;       // ERP 帧计数（标定降频用）
         this._calibrateInterval = 20;  // 每 N 帧做一次 Cesium 标定（9 raycast 较慢, scale 变化慢）
+        // ── 预测式深度缓存 (降低延迟用) ──
+        // 深度刷新(打 DA360)在后台异步进行, 导航环每帧直接复用最近一次
+        // 已处理好的 ERP 深度, 把 DA360 的 140ms 等待"藏"到后台, 使深度环
+        // 周期从 ~230ms(DA360+YOPO) 降到 ≈YOPO 推理时间, 控制更跟手。
+        this._depthCache = null;       // {depth, mask, scale, confidence, time}
+        this._refreshing = false;      // 是否有 DA360 刷新在途
+        this._depthCacheTtlMs = 150;   // 缓存新鲜度阈值; 超过则本帧同步等真实深度
     }
 
     /**
@@ -79,7 +86,7 @@ export class YOPODepthFromPanorama {
             : canvas;
 
         const blob = await this.panoramaSensor._canvasToJpegBlob(uploadCanvas);
-        const headers = { 'X-DA360-Raw-Depth': '1' };
+        const headers = { 'X-DA360-Raw-Depth': '1', 'X-DA360-Raw-Binary': '1' };
         let body;
         if (blob) {
             headers['Content-Type'] = blob.type || 'image/jpeg';
@@ -101,6 +108,30 @@ export class YOPODepthFromPanorama {
                 signal: controller.signal,
             });
             if (!response.ok) throw new Error(`DA360 HTTP ${response.status}`);
+
+            // ── Binary fast path: DA360 returns raw float32 bytes directly
+            //    (no .npy/base64 round-trip) → skip the ~1.2MB atob decode. ──
+            if (response.headers.get('Content-Type') === 'application/octet-stream') {
+                const buf = await response.arrayBuffer();
+                const shapeStr = response.headers.get('X-DA360-Raw-Depth-Shape') || '';
+                const shape = shapeStr.split(/\s+/).filter(Boolean).map(Number);
+                const depth = new Float32Array(buf);
+                const scaleHdr = response.headers.get('X-DA360-Depth-Scale');
+                const scale = scaleHdr ? JSON.parse(scaleHdr) : { relative_to_nearest: 1 };
+                if (!this._da360OkLogged) {
+                    this._da360OkLogged = true;
+                    console.log(`YOPO fetchRawDepth: DA360 returned binary depth ${depth.length} floats`
+                        + (shape.length ? ` shape [${shape}]` : ''));
+                }
+                return {
+                    depth,
+                    width: shape.length === 2 ? shape[1] : 384,
+                    height: shape.length === 2 ? shape[0] : 192,
+                    scale,
+                };
+            }
+
+            // ── Legacy JSON+base64 fallback ──
             const payload = await response.json();
             if (!payload || !payload.raw_depth || !payload.raw_depth_shape) {
                 throw new Error('DA360 response missing raw_depth');
@@ -399,13 +430,74 @@ export class YOPODepthFromPanorama {
      *          scale: number, confidence: number}|null>}
      */
     async captureYOPODepthERP(cameraTransform, options = {}) {
+        // ── 预测式深度流水线 (降低延迟) ──
+        // 触发/维持一次后台 DA360 刷新(写入 _depthCache)。本帧只要缓存存在就
+        // 直接复用(零等待), 把 DA360 的 ~1.6s 推理完全"藏"到后台。导航环因此
+        // 以 YOPO 推理频率(而非 DA360+YOPO 串行)运行, 命令重规划 ≈5Hz 而非 ≈0.4Hz。
+        //
+        // 关键修正: 前台绝不每帧重复打 DA360。早期实现里前台在缓存过期(>150ms)
+        // 时同步 await 一次真实深度, 而缓存 TTL(150ms) 远小于一个导航周期
+        // (≥ depth+navigate), 导致每个周期都走"过期→同步等"分支, 与后台刷新
+        // 同时打 DA360——双重请求挤占 GPU, 既没省到延迟(深度仍 1654ms), 还把
+        // YOPO 推理拖到 830ms。现在: 只要有过缓存就用缓存; 仅在"从无到有"的首帧
+        // 等一次真实深度, 且复用后台那个请求(不另开第二个)。
+        this._maybeRefreshDepth(cameraTransform, options);
+
+        if (this._depthCache) {
+            const c = this._depthCache;
+            const now = performance.now();
+            if (!this._erpOkLogged) {
+                this._erpOkLogged = true;
+                console.log(`captureYOPODepthERP: cache ${c.width}x${c.height}, ` +
+                    `scale=${c.scale.toFixed(4)} (conf=${c.confidence.toFixed(2)}), ` +
+                    `cached=${(now - c.time).toFixed(0)}ms, ` +
+                    `fetch_ms=${c.fetchMs ? c.fetchMs.toFixed(0) : '-'}`);
+            }
+            return { depth: c.depth, mask: c.mask, encoding: '32FC1', scale: c.scale, confidence: c.confidence, source: 'da360' };
+        }
+
+        // 首帧: 缓存尚未建立。等"正在进行的那一次"后台刷新完成即可(单请求,
+        // 不另开第二个), 避免双请求抢 GPU。绝不悬停靠猜。
+        if (this._refreshing && this._refreshPromise) {
+            await this._refreshPromise;
+        } else {
+            await this._refreshDepth(cameraTransform, options);
+        }
+        const c = this._depthCache;
+        if (!c) return null;
+        const now = performance.now();
+        if (!this._erpFirstLogged) {
+            this._erpFirstLogged = true;
+            console.log(`captureYOPODepthERP(first): cache ${c.width}x${c.height}, ` +
+                `scale=${c.scale.toFixed(4)} (conf=${c.confidence.toFixed(2)}), ` +
+                `fetch_ms=${c.fetchMs ? c.fetchMs.toFixed(0) : '-'}`);
+        }
+        return { depth: c.depth, mask: c.mask, encoding: '32FC1', scale: c.scale, confidence: c.confidence, source: 'da360' };
+    }
+
+    // 触发后台 DA360 刷新(若当前无刷新在途), 并返回该 Promise 供首帧 await。
+    // 同一时刻最多一个在途请求 → 绝不会对 DA360 发双重请求。
+    _maybeRefreshDepth(cameraTransform, options) {
+        if (this._refreshing) return this._refreshPromise;
+        this._refreshing = true;
+        this._refreshPromise = this._refreshDepth(cameraTransform, options).finally(() => {
+            this._refreshing = false;
+        });
+        return this._refreshPromise;
+    }
+
+    // 打 DA360 取原始深度 → ERP 后处理 → 写入 this._depthCache。
+    // 同时承担标定降频逻辑(原 captureYOPODepthERP 内的 Cesium raycast)。
+    async _refreshDepth(cameraTransform, options) {
         const width = Math.max(16, options.width || DEFAULT_WIDTH_ERP);
         const height = Math.max(16, options.height || DEFAULT_HEIGHT_ERP);
         const maxDistance = options.maxDistance || DEFAULT_MAX_DISTANCE;
         const calibrate = options.calibrate !== false;
 
+        const tFetchStart = performance.now();
         const raw = await this.fetchRawDepth(options.timeoutMs);
         if (!raw) return null;
+        const tFetchMs = performance.now() - tFetchStart;
 
         const rawDepth = raw.depth;
         const rawW = raw.width;
@@ -463,20 +555,15 @@ export class YOPODepthFromPanorama {
         // Scale to metres and clamp. Invalid pixels become maxDistance; the
         // server's _preprocess_depth will additionally mean-fill them using
         // the mask we send as channel 1.
+        // (flip 与 scale 合并为一趟遍历, 省去一次 73728 像素的单独遍历。)
         for (let i = 0; i < depth.length; i++) {
             let d = depth[i] * scale;
             if (!Number.isFinite(d) || d <= 0) d = maxDistance;
             depth[i] = Math.min(d, maxDistance);
         }
 
-        if (!this._erpOkLogged) {
-            this._erpOkLogged = true;
-            console.log(`captureYOPODepthERP: raw ${rawH}x${rawW} -> ${height}x${width}, ` +
-                `scale=${scale.toFixed(4)} (conf=${confidence.toFixed(2)}), ` +
-                `valid=${this._countValid(rawMask)}/${rawMask.length}`);
-        }
-
-        return { depth, mask, encoding: '32FC1', scale, confidence };
+        this._depthCache = { depth, mask, scale, confidence, width, height, time: performance.now(), fetchMs: tFetchMs };
+        return this._depthCache;
     }
 
     _countValid(mask) {

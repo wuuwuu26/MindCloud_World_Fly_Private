@@ -88,7 +88,11 @@ fi
 if [ "$DO_YOPO" = "1" ]; then
     echo "[2/3] 重启 YOPO 避障后端 ..."
     stop_wait "$YOPO_NAME"
-    YOPO_DETACH=1 ./scripts/start_yopo_api.sh >/tmp/restart_yopo.log 2>&1 &
+    # 默认部署 YOPO_40 (wc=8, 学习式避障)。
+    # 如需切回其他模型, 将下方 YOPO_MODEL_PATH 改为对应 checkpoint 即可。
+    YOPO_DETACH=1 \
+        YOPO_MODEL_PATH="$SCRIPT_DIR/YOPO_360/YOPO/saved/YOPO_40/epoch50.pth" \
+        ./scripts/start_yopo_api.sh >/tmp/restart_yopo.log 2>&1 &
     YOPO_PID=$!
     wait_health "http://127.0.0.1:5689/yopo/status" 120 YOPO || true
 fi

@@ -13,8 +13,10 @@ Key design decisions (aligned with original test_yopo_ros.py):
       desire 状态开始, 控制端逐帧评估多项式并更新 desire。
     - Replan on every request (each carries a new depth frame), matching
       YOPO_360's 30Hz depth-callback replan rate.
-    - ctrl_time advanced by real dt (capped at CTRL_DT=0.02s) in the
-      high-freq /yopo/control endpoint; navigate resets it to 0 on replan.
+    - ctrl_time advanced by real dt (capped at CTRL_DT=0.02s, then scaled by
+      CTRL_TIME_SCALE) in the high-freq /yopo/control endpoint; navigate
+      resets it to 0 on replan. Time-scaling makes the drone traverse the same
+      planned (collision-avoiding) path faster without altering its shape.
     - Yaw uses calculate_yaw() blending velocity + goal direction.
     - Camera pitch angle is configurable (original default: 0).
 
@@ -61,6 +63,15 @@ try:
 except ImportError:
     CORS = None
 
+# WebSocket transport (efficient persistent alternative to per-call HTTP).
+# Optional: if `websockets` is not installed the WS server is simply skipped
+# and the client transparently falls back to plain HTTP.
+try:
+    import websockets
+    HAVE_WEBSOCKETS = True
+except Exception:
+    HAVE_WEBSOCKETS = False
+
 # ── YOPO imports (after sys.path manipulation) ────────────────────
 YOPO_AVAILABLE = False
 try:
@@ -75,6 +86,7 @@ except Exception as _yopo_import_err:
 
 # ── Constants ─────────────────────────────────────────────────────
 DEFAULT_PORT = 5689
+DEFAULT_WS_PORT = 5690  # WebSocket transport port (0 = disabled)
 DEFAULT_MODEL = os.path.join(
     YOPO_DIR, 'saved', 'YOPO_18', 'epoch20.pth'
 )
@@ -97,6 +109,12 @@ DEPTH_WIDTH = 384
 MAX_DIS = 20.0
 MIN_DIS = 0.04
 CTRL_DT = 0.02  # 50 Hz control loop (matches original YOPO)
+# 时间缩放(可选微调): 让 ctrl_time 以 >1 倍速推进, 无人机沿同一条(网络规划的、
+# 已避障的)空间轨迹更快走完 -> 巡航速度 ≈ vel_max * CTRL_TIME_SCALE。默认 1.0。
+# 真正决定规划速度的是 cfg["velocity"] (见 YOPO_VELOCITY), 本项仅作叠加微调。
+# Guard against an empty env string (shell exports "") which would crash float("").
+_env_tscale = os.environ.get("YOPO_CTRL_TIME_SCALE")
+CTRL_TIME_SCALE = float(_env_tscale) if _env_tscale else 1.0
 ARRIVE_THRESHOLD = 2.0  # metres (matches test_yopo_ros.py L132: norm(pos-goal)<2.0)
 # 终点接管距离: 网络在 goal_length (2*radio_range=10m) 内目标观测被按 goal_length
 # 归一化缩小(state_transform.normalize_obs), lattice 又全是巡航型轨迹(端点速度可
@@ -105,11 +123,11 @@ ARRIVE_THRESHOLD = 2.0  # metres (matches test_yopo_ros.py L132: norm(pos-goal)<
 # 来回波动、到不了目标。距目标 FINAL_APPROACH_DIST 内不再用网络推理, 直接规划
 # 一条"终端速度/加速度=0、平滑减速停到目标点"的五次多项式。
 FINAL_APPROACH_DIST = 12.0  # metres (与客户端 yopoFinalApproachDist 一致)
-# YOPO 轨迹选择: 严格对齐 YOPO_360 test_yopo_ros.py (process_output L297-L310)
-#   直接 argmin(score) 选最优轨迹, 不做任何额外干预。
-#   目标代价与安全代价均已包含在网络输出的 score 中(训练时的 score_label),
-#   任何外部启发式(目标引导/碰撞减速/紧急脱离)都会破坏这一代价场的平衡,
-#   曾导致互相打架的抖动, 已全部移除。
+
+# ── YOPO 轨迹选择 ──
+# 严格遵循 YOPO_360 test_yopo_ros.py: 直接 argmin(score) 选最优轨迹, 不做任何
+# 额外的几何避障干预。避障完全由网络在训练期 safety_loss 中学到的 score 提供
+# ("学习式避障"), 而非部署端叠加的几何碰撞代价, 与官方部署实现完全一致。
 # plan_from_reference=True: 新轨迹从上次指令(desire_pos/vel/acc)出发, 在衔接点
 #   与旧轨迹重合 -> 轨迹连续。原版 test settings L440 即 True。
 PLAN_FROM_REFERENCE = True
@@ -143,6 +161,16 @@ class YOPOServer:
         if not YOPO_AVAILABLE:
             raise RuntimeError(f"YOPO imports failed: {_yopo_import_err_msg}")
         yopo_cfg["train"] = False
+        # Test-time planned speed (modifiable). NOTE: vel_max_train MUST stay
+        # fixed so the network's input normalisation matches training — raising
+        # `velocity` only scales the *physical* trajectory faster (see
+        # policy/primitive.py: vel_max = velocity, normalisation uses vel_max_train).
+        # This is the real knob for "fly faster"; override via YOPO_VELOCITY.
+        # NOTE: when the env var is unset the shell may export an empty string;
+        # guard against float("") by falling back to the config value in that case.
+        _env_vel = os.environ.get("YOPO_VELOCITY")
+        if _env_vel:
+            yopo_cfg["velocity"] = float(_env_vel)
         self.height = yopo_cfg['image_height']
         self.width = yopo_cfg['image_width']
         self.in_channels = int(yopo_cfg['image_channels'])
@@ -183,6 +211,7 @@ class YOPOServer:
         self._depth_anomaly = False
         self._last_obs_input = None
 
+
         # ── Simple avoidance state ──
         # last_cmd_dir: 3D unit vector in MC world (horizontal) from last avoid() call
         # last_cruise_speed: scalar m/s
@@ -213,7 +242,13 @@ class YOPOServer:
         self.policy.load_state_dict(state_dict)
         self.policy = self.policy.to(self.device)
         self.policy.eval()
-        self._warm_up()
+        # Warmup does one dummy forward pass so the first real inference isn't
+        # penalised by lazy CUDA/JIT init. Skippable via YOPO_NO_WARMUP=1 to
+        # make restarts faster (first navigate will pay the small init cost).
+        if os.environ.get("YOPO_NO_WARMUP", "0") == "1":
+            print("Skipping YOPO warmup (YOPO_NO_WARMUP=1).")
+        else:
+            self._warm_up()
         print(f"YOPO model loaded. Traj time: {self.traj_time:.2f}s, "
               f"Traj num: {self.lattice_primitive.traj_num}, "
               f"vel_max: {self.lattice_primitive.vel_max:.1f}, "
@@ -307,10 +342,10 @@ class YOPOServer:
     def _process_odom(self):
         """Build normalised observation vector from odometry + goal.
 
-        Mirrors original process_odom() in test_yopo_ros.py:
-          - vel_w uses desire_vel when plan_from_reference=True
-          - acc_w uses desire_acc
-          - goal is relative to desire_pos when plan_from_reference=True
+        条件状态必须与多项式起点一致(都用真实里程计), 否则网络预测的末端
+        位移(相对量)会从"它以为的起点(desire_*)"算起, 而多项式却从真实起点
+        起步 → 衔接错位。故 vel/goal 均用 self.vel/self.pos (真实), acc 用
+        self.desire_acc(与多项式起点加速度一致)。
         """
         from scipy.spatial.transform import Rotation as R
 
@@ -320,23 +355,17 @@ class YOPOServer:
         Rotation_wc = np.dot(Rotation_wb, self.Rotation_bc)
         Rotation_cw = Rotation_wc.T
 
-        # Velocity: use desire_vel when plan_from_reference (original YOPO behavior)
-        if PLAN_FROM_REFERENCE and self.desire_vel is not None:
-            vel_w = self._vec_mc_to_ros(self.desire_vel)
-        else:
-            vel_w = self._vec_mc_to_ros(self.vel)
+        # Velocity: 真实当前速度(与多项式起点一致)
+        vel_w = self._vec_mc_to_ros(self.vel)
 
-        # Acceleration: always from desired (polynomial output)
+        # Acceleration: 最近指令加速度(=多项式起点加速度估计)
         if self.desire_acc is not None:
             acc_w = self._vec_mc_to_ros(self.desire_acc)
         else:
             acc_w = np.zeros(3)
 
-        # Goal: relative to desire_pos when plan_from_reference
-        if PLAN_FROM_REFERENCE and self.desire_pos is not None:
-            goal_w = self._vec_mc_to_ros(self.goal - self.desire_pos)
-        else:
-            goal_w = self._vec_mc_to_ros(self.goal - self.pos)
+        # Goal: 相对真实当前位置
+        goal_w = self._vec_mc_to_ros(self.goal - self.pos)
 
         vel_c = np.dot(Rotation_cw, vel_w)
         acc_c = np.dot(Rotation_cw, acc_w)
@@ -377,24 +406,27 @@ class YOPOServer:
             (垂直锚点 β 与 z 轴 PVA 由网络根据深度场景选择, 支持上/下避障)
           - 三轴 Poly5Solver, 无任何缩放/平滑/速度干预
         """
-        # Start from desire_pos/vel when plan_from_reference, else actual odom
-        if PLAN_FROM_REFERENCE and self.desire_pos is not None:
-            start_pos_ros = self._vec_mc_to_ros(self.desire_pos)
-            start_vel_ros = self._vec_mc_to_ros(self.desire_vel)
-        else:
-            start_pos_ros = self._vec_mc_to_ros(self.pos)
-            start_vel_ros = self._vec_mc_to_ros(self.vel)
-
+        # 连续性(关键): 新轨迹必须从上一条轨迹"当前真实状态"平滑接出。
+        # 深度推理慢(1-2s)时, 两次规划之间 ctrl_time 触顶、无人机沿旧轨迹末端
+        # 直线滑行, 参考状态 desire_* 会冻结在旧轨迹末端并滞后于真实位置。
+        # 若仍从 desire_* 起步, 新指令会猛拉回滞后点 → 衔接处跳动/不连续。
+        # 故起点用无人机【真实里程计状态】self.pos/self.vel, 保证规划前后
+        # 位置 C0、速度 C1 连续; 加速度取最近指令加速度(self.desire_acc,
+        # 飞行/滑行期间≈真实加速度)作为 C2 估计。
+        start_pos_ros = self._vec_mc_to_ros(self.pos)
+        start_vel_ros = self._vec_mc_to_ros(self.vel)
         start_acc_ros = self._vec_mc_to_ros(self.desire_acc) if self.desire_acc is not None else np.zeros(3)
 
-        # 强制 z 轴终点到固定巡航高度 (对齐原版 test_yopo_ros.py L240:
-        #   endstate_w[:, 2, 0] = fixed_height - start_pos[2])
-        # 原版为水平导航: 网络只负责水平(x,y)方向规划, 高度方向强制保持
-        # fixed_height(即目标高度), 不被网络不可靠的垂直输出(β锚点)带飞。
-        # MindCloud 之前"完全信任网络 z 终端状态"会导致无人机被网络垂直输出
-        # 猛拉(如飞到 160m 高空、β=±75° 乱跳), 无法保持目标高度水平推进。
+        # 目标高度由 yopo target 决定(用户设置的导航目标高度), 整条轨迹终点高度
+        # 强制等于 goal[1]。
         fixed_height = float(self.goal[1])  # MC y=up = 目标高度(ROS z 一致)
         endstate_w_ros[0, 2, 0] = fixed_height - start_pos_ros[2]
+        # 强制终点垂直速度/加速度=0: 否则网络预测的"向下终点速度"会让无人机到达
+        # 目标高度时仍带向下速度 → 过冲下坠(在二次导航/已接近低目标时最明显),
+        # 表现为持续的"向下运动趋势"。终点接管段本就令终端 vel/acc=0, 此处对齐;
+        # 高度已由 fixed_height 锁定为目标高度, 不影响"目标高度由 yopo target 决定"。
+        endstate_w_ros[0, 2, 1] = 0.0
+        endstate_w_ros[0, 2, 2] = 0.0
 
         self.optimal_poly_x = Poly5Solver(
             start_pos_ros[0], start_vel_ros[0], start_acc_ros[0],
@@ -420,6 +452,30 @@ class YOPOServer:
         self.ctrl_time = 0.0
         self.poly_duration = self.traj_time
 
+    def _make_final_approach_polys(self):
+        """构建终点接管(到目标点的五次多项式), 返回 (px, py, pz, T, start_pos_ros)。"""
+        # 与 _build_polynomial 一致: 起点用【真实里程计状态】, 保证与上一阶段
+        # (网络规划)轨迹在衔接处 C0/C1/C2 连续, 不出现拉回式跳动。
+        start_pos_mc = self.pos.copy()
+        start_vel_mc = self.vel.copy()
+        start_acc_mc = self.desire_acc.copy() if self.desire_acc is not None else np.zeros(3)
+
+        # 时长: 平均速度 ≤ vel_max 且留出减速时间, 夹在 [0.8, 3.0]s
+        dist = float(np.linalg.norm(self.goal - start_pos_mc))
+        vel_max = float(self.lattice_primitive.vel_max)
+        T = float(np.clip(1.2 * dist / max(vel_max, 0.1), 0.8, 3.0))
+        self._fa_T = T
+
+        start_pos_ros = self._vec_mc_to_ros(start_pos_mc)
+        start_vel_ros = self._vec_mc_to_ros(start_vel_mc)
+        start_acc_ros = self._vec_mc_to_ros(start_acc_mc)
+        end_pos_ros = self._vec_mc_to_ros(self.goal)
+
+        px = Poly5Solver(start_pos_ros[0], start_vel_ros[0], start_acc_ros[0], end_pos_ros[0], 0.0, 0.0, T)
+        py = Poly5Solver(start_pos_ros[1], start_vel_ros[1], start_acc_ros[1], end_pos_ros[1], 0.0, 0.0, T)
+        pz = Poly5Solver(start_pos_ros[2], start_vel_ros[2], start_acc_ros[2], end_pos_ros[2], 0.0, 0.0, T)
+        return px, py, pz, T, start_pos_ros
+
     def _plan_final_approach(self):
         """终点接管: 距目标较近时, 不用网络推理, 直接规划一条从当前参考状态
         (desire_pos/vel/acc) 到目标点、终端速度/加速度为 0 的五次多项式。
@@ -434,34 +490,8 @@ class YOPOServer:
         poly_duration 供 ctrl_time 封顶使用(否则 60Hz 控制环会在 traj_time
         处截断, 终点多项式到不了目标)。
         """
-        if self.desire_pos is None:
-            start_pos_mc = self.pos.copy()
-            start_vel_mc = self.vel.copy()
-            start_acc_mc = np.zeros(3)
-        else:
-            start_pos_mc = self.desire_pos.copy()
-            start_vel_mc = self.desire_vel.copy() if self.desire_vel is not None else np.zeros(3)
-            start_acc_mc = self.desire_acc.copy() if self.desire_acc is not None else np.zeros(3)
-
-        # 时长: 平均速度 ≤ vel_max 且留出减速时间, 夹在 [0.8, 3.0]s
-        dist = float(np.linalg.norm(self.goal - start_pos_mc))
-        vel_max = float(self.lattice_primitive.vel_max)
-        T = float(np.clip(1.2 * dist / max(vel_max, 0.1), 0.8, 3.0))
-
-        start_pos_ros = self._vec_mc_to_ros(start_pos_mc)
-        start_vel_ros = self._vec_mc_to_ros(start_vel_mc)
-        start_acc_ros = self._vec_mc_to_ros(start_acc_mc)
-        end_pos_ros = self._vec_mc_to_ros(self.goal)
-
-        self.optimal_poly_x = Poly5Solver(
-            start_pos_ros[0], start_vel_ros[0], start_acc_ros[0],
-            end_pos_ros[0], 0.0, 0.0, T)
-        self.optimal_poly_y = Poly5Solver(
-            start_pos_ros[1], start_vel_ros[1], start_acc_ros[1],
-            end_pos_ros[1], 0.0, 0.0, T)
-        self.optimal_poly_z = Poly5Solver(
-            start_pos_ros[2], start_vel_ros[2], start_acc_ros[2],
-            end_pos_ros[2], 0.0, 0.0, T)
+        px, py, pz, T, _ = self._make_final_approach_polys()
+        self.optimal_poly_x, self.optimal_poly_y, self.optimal_poly_z = px, py, pz
         self.ctrl_time = 0.0
         self.poly_duration = T
 
@@ -607,6 +637,9 @@ class YOPOServer:
         # 原理见 FINAL_APPROACH_DIST 注释。多项式终点=目标且终端速度/加速度=0,
         # 由 60Hz control_update 持续推进, 进入 ARRIVE_THRESHOLD 后置 arrive。
         if dist_to_goal < FINAL_APPROACH_DIST:
+            # 终点接管: 距目标较近时跳过网络推理, 直接对目标点规划一条终端速度/
+            # 加速度为 0 的五次多项式, 平滑减速停到目标点(解决近目标 argmin 过冲
+            # 造成的 40m 波动)。不做任何几何避障干预 —— 严格遵循 YOPO 的学习式避障。
             with self._lock:
                 self._plan_final_approach()
                 self.last_control_time = now
@@ -740,12 +773,13 @@ class YOPOServer:
                     "ctrl_time": 0.0,
                 }
 
-            # Advance ctrl_time by real dt, capped at CTRL_DT (matches
-            # original 50Hz fixed-step; prevents dangerous jumps on stalls).
-            # 封顶用 poly_duration: 终点接管多项式的时长可能大于 lattice
-            # traj_time, 若仍按 traj_time 封顶会在中途截断, 到不了目标点。
+            # Advance ctrl_time by real dt (capped at CTRL_DT), then scale by
+            # CTRL_TIME_SCALE so the planned trajectory is traversed faster.
+            # 路径本身(空间形状/避障)完全不变, 只是时间上"快进", 巡航速度
+            # ≈ vel_max * CTRL_TIME_SCALE。封顶用 poly_duration: 终点接管多项式
+            # 时长可能大于 lattice traj_time, 若按 traj_time 封顶会中途截断。
             dt = now - self.last_control_time if self.last_control_time else 0.0
-            dt = min(max(dt, 0.0), CTRL_DT)
+            dt = min(max(dt, 0.0), CTRL_DT) * CTRL_TIME_SCALE
             cap = self.poly_duration if self.poly_duration else self.traj_time
             self.ctrl_time = min(self.ctrl_time + dt, cap)
             self.last_control_time = now
@@ -758,44 +792,38 @@ class YOPOServer:
         return cmd
 
     def _process_output(self, endstate_pred, score_pred):
-        """Select best trajectory: 严格对齐 YOPO_360 test_yopo_ros.py process_output (L297-L310).
+        """选择最优轨迹: 严格遵循 YOPO_360 test_yopo_ros.py, 直接 argmin(score)。
 
-        直接 argmin(score) 选最优轨迹, 不做任何额外干预
-        (无碰撞过滤器/3D方向连续性/高度引导——这些都是本项目后来加的,
-         会干扰网络原生的避障决策, 现按用户要求移除)。
-        仅保留前方障碍距离计算用于诊断日志, 不参与选择。
+        不做任何几何避障干预 —— 避障完全由网络在训练期 safety_loss 中学到的
+        score 提供(学习式避障), 与官方部署实现完全一致。
         """
-        endstate_pred = endstate_pred.reshape(9, self.lattice_primitive.traj_num).T
-        score = score_pred.reshape(self.lattice_primitive.traj_num)
         N = self.lattice_primitive.traj_num
+        raw = endstate_pred.reshape(9, N).T          # [N, 9] 原始网络输出
+        score = score_pred.reshape(N)
 
-        # ── 前方障碍距离 (仅诊断, 不参与选择) ──
+        # ── 前方障碍距离 (仅诊断, 不参与轨迹选择) ──
         fwd_dist = self.max_dis
         if self._last_depth_input is not None:
             depth_map = self._last_depth_input[0, 0].cpu().numpy()  # (H,W) norm[0,1]
             self._last_depth_map = depth_map  # 诊断端点用
             H, W = depth_map.shape
-            # 前向检测 patch 加宽: 原 ±12列/±6行 只覆盖很窄的正前方, 斜前方/
-            # 侧向近障不触发减速 → 全速撞。扩展到 ±30列/±14行(前向扇形),
-            # 让更多方向的近障都能进入减速判定。
             fwd_patch = depth_map[H//2-14:H//2+15, W//2-30:W//2+31]
             fwd_dist = float(fwd_patch.min()) * self.max_dis if fwd_patch.size else self.max_dis
         self.last_fwd_obstacle_dist = fwd_dist
 
-        # 原版 L302: action_id = argmin(score); lattice_id = traj_num-1-action_id
-        # 目标代价已由网络 score 内含(训练时 wg=0.15), 不再叠加任何外部引导项。
         action_id = int(np.argmin(score))
+
         lattice_id = N - 1 - action_id
         endstate = self.state_transform.pred_to_endstate_cpu(
-            endstate_pred[action_id:action_id+1, :], lattice_id
+            raw[action_id:action_id+1, :], lattice_id
         )
 
         # ── Logging ──
-        if self.count < 8 or self.count % 20 == 0:
+        if self.verbose or self.count < 8 or self.count % 20 == 0:
             angles = self._angles_np
             chosen_alpha = float(angles[lattice_id, 0]) * 180.0 / np.pi
             chosen_beta = float(angles[lattice_id, 1]) * 180.0 / np.pi
-            print(f"[YOPO避障] argmin(score)=#{action_id} α={chosen_alpha:+5.0f}° "
+            print(f"[YOPO轨迹] action_id=#{action_id} α={chosen_alpha:+5.0f}° "
                   f"β={chosen_beta:+5.0f}° score={float(score[action_id]):.3f} "
                   f"前方障碍={fwd_dist:5.1f}m")
 
@@ -1070,6 +1098,135 @@ def control():
         return jsonify({"error": str(e)}), 500
 
 
+# ── WebSocket transport ───────────────────────────────────────────
+# A persistent WS connection removes per-call HTTP handshake/header/base64
+# overhead. The browser client sends control/navigate messages and the server
+# replies with the same PositionCommand JSON. Binary navigate frames carry raw
+# depth bytes (no base64) for maximum efficiency.
+def _ws_odom_from(obj):
+    pos = obj.get("position", {})
+    vel = obj.get("velocity", {})
+    orient = obj.get("orientation", {})
+    position = np.array([pos.get("x", 0), pos.get("y", 2), pos.get("z", 0)], dtype=np.float64)
+    velocity = np.array([vel.get("x", 0), vel.get("y", 0), vel.get("z", 0)], dtype=np.float64)
+    quat = np.array([
+        orient.get("x", 0), orient.get("y", 0),
+        orient.get("z", 0), orient.get("w", 1)
+    ], dtype=np.float64)
+    return position, velocity, quat
+
+
+def _ws_handle_message(raw):
+    """Process one WS message. Returns a JSON-serialisable dict."""
+    srv = yopo_server
+    if srv is None:
+        return {"error": "server not initialised"}
+
+    # Binary navigate frame: [uint32 BE header_len][utf8 json][depth bytes][mask bytes]
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            import struct
+            if len(raw) < 4:
+                return {"error": "binary frame too short"}
+            hdr_len = struct.unpack(">I", raw[:4])[0]
+            hdr = json.loads(raw[4:4 + hdr_len].decode("utf-8"))
+            off = 4 + hdr_len
+            H, W = hdr["depth_shape"]
+            enc = hdr.get("depth_encoding", "32FC1")
+            dsize = H * W * (4 if enc == "32FC1" else 2)
+            depth_bytes = bytes(raw[off:off + dsize])
+            off += dsize
+            mask_bytes = None
+            if hdr.get("mask"):
+                msize = H * W  # mono8 (uint8)
+                if len(raw) >= off + msize:
+                    mask_bytes = bytes(raw[off:off + msize])
+            position, velocity, quat = _ws_odom_from(hdr)
+            cmd = srv.navigate(depth_bytes, enc, position, velocity, quat,
+                               mask_bytes=mask_bytes)
+            cmd["id"] = hdr.get("id")
+            return cmd
+        except Exception as e:
+            return {"error": f"ws navigate failed: {e}"}
+
+    # Text JSON
+    try:
+        msg = json.loads(raw)
+    except Exception as e:
+        return {"error": f"json parse failed: {e}"}
+    t = msg.get("type")
+    if t == "control":
+        position, velocity, quat = _ws_odom_from(msg)
+        cmd = srv.control_update(position, velocity, quat)
+        cmd["id"] = msg.get("id")
+        return cmd
+    elif t == "navigate":
+        # JSON navigate (depth as base64) — fallback path
+        depth_b64 = msg.get("depth", "")
+        if not depth_b64:
+            return {"error": "missing depth"}
+        try:
+            depth_bytes = base64.b64decode(depth_b64)
+        except Exception as e:
+            return {"error": f"depth base64 decode failed: {e}"}
+        enc = msg.get("depth_encoding", "32FC1")
+        shape = msg.get("depth_shape", [DEPTH_HEIGHT, DEPTH_WIDTH])
+        expected = shape[0] * shape[1] * (4 if enc == "32FC1" else 2)
+        if len(depth_bytes) != expected:
+            return {"error": f"depth size mismatch: got {len(depth_bytes)} expected {expected}"}
+        mask_bytes = None
+        mask_b64 = msg.get("mask", "")
+        if mask_b64:
+            try:
+                mask_bytes = base64.b64decode(mask_b64)
+            except Exception:
+                mask_bytes = None
+        position, velocity, quat = _ws_odom_from(msg)
+        try:
+            cmd = srv.navigate(depth_bytes, enc, position, velocity, quat,
+                               mask_bytes=mask_bytes)
+            cmd["id"] = msg.get("id")
+            return cmd
+        except Exception as e:
+            return {"error": str(e)}
+    else:
+        return {"error": f"unknown ws message type: {t}"}
+
+
+async def _ws_handler(websocket):
+    remote = getattr(websocket, "remote_address", "unknown")
+    print(f"[WS] client connected {remote}")
+    try:
+        async for raw in websocket:
+            try:
+                resp = _ws_handle_message(raw)
+            except Exception as e:
+                resp = {"error": str(e)}
+            try:
+                await websocket.send(json.dumps(resp))
+            except Exception:
+                break
+    except Exception:
+        pass
+    finally:
+        print(f"[WS] client disconnected {remote}")
+
+
+def _run_ws_server(port):
+    if not HAVE_WEBSOCKETS:
+        print(f"[WS] 'websockets' not installed; skipping ws://0.0.0.0:{port} "
+              f"(client will fall back to HTTP)")
+        return
+    import asyncio
+    async def _serve():
+        async with websockets.serve(_ws_handler, "0.0.0.0", port, max_size=None):
+            await asyncio.get_event_loop().create_future()
+    try:
+        asyncio.run(_serve())
+    except Exception as e:
+        print(f"[WS] failed to start on {port}: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="YOPO navigation server")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Server port")
@@ -1083,6 +1240,9 @@ def main():
                         default=DEFAULT_LOCK_YAW,
                         help="Lock yaw to initial heading (ERP/360° default true). "
                              "Pass 'false' to let yaw follow the goal direction.")
+    parser.add_argument("--ws-port", type=int, default=DEFAULT_WS_PORT,
+                        help="WebSocket transport port (0 = disabled). More efficient "
+                             "than per-call HTTP for the 60Hz control / depth stream.")
     args = parser.parse_args()
 
     global yopo_server
@@ -1092,6 +1252,12 @@ def main():
         camera_pitch_deg=args.camera_pitch,
         lock_yaw=args.lock_yaw,
     )
+
+    # Start the WebSocket transport in a background thread (shares yopo_server).
+    if args.ws_port and args.ws_port > 0:
+        tws = threading.Thread(target=_run_ws_server, args=(args.ws_port,), daemon=True)
+        tws.start()
+        print(f"YOPO websocket transport starting on ws://0.0.0.0:{args.ws_port}")
 
     print(f"YOPO server starting on {args.host}:{args.port}")
     app.run(host=args.host, port=args.port, threaded=True)

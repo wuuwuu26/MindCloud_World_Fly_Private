@@ -1195,8 +1195,8 @@ export class CesiumWorld {
             ), false),
             model: {
                 uri: CESIUM_DRONE_MODEL_URI,
-                scale: 1.35,
-                minimumPixelSize: 44,
+                scale: 0.6,
+                minimumPixelSize: 18,
                 maximumScale: 18,
                 runAnimations: true,
                 incrementallyLoadTextures: false,

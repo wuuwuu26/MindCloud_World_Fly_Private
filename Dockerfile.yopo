@@ -37,7 +37,8 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
         scipy \
         flask \
         flask-cors \
-        ruamel.yaml
+        ruamel.yaml \
+        websockets
 
 # Clear proxy env so the running container doesn't inherit it
 ENV HTTP_PROXY=

@@ -102,8 +102,8 @@ const DEFAULT_BUTTON_MAPPING = {
 const KEYBOARD_MAP = {
     'KeyW':       { action: 'throttle', value: 1 },
     'KeyS':       { action: 'throttle', value: -1 },
-    'KeyA':       { action: 'yaw',      value: 1 },
-    'KeyD':       { action: 'yaw',      value: -1 },
+    'KeyA':       { action: 'yaw',      value: -1 },
+    'KeyD':       { action: 'yaw',      value: 1 },
     'ArrowUp':    { action: 'pitch',    value: -1 },
     'ArrowDown':  { action: 'pitch',    value: 1 },
     'ArrowLeft':  { action: 'roll',     value: -1 },

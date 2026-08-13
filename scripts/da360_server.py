@@ -21,7 +21,7 @@ except ImportError as exc:
     ) from exc
 
 try:
-    from flask import Flask, jsonify, request
+    from flask import Flask, jsonify, request, make_response
 except ImportError as exc:
     raise SystemExit("Missing Flask. Install with: pip install flask flask-cors") from exc
 
@@ -318,7 +318,7 @@ def create_app(runner):
     def add_cors_headers(response):
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-DA360-Raw-Depth"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-DA360-Raw-Depth, X-DA360-Raw-Binary"
         return response
 
     @app.route("/health", methods=["GET"])
@@ -364,6 +364,22 @@ def create_app(runner):
             timings["encode_ms"] = (time.time() - mark) * 1000.0
 
             include_raw = request.headers.get("X-DA360-Raw-Depth", "0") in {"1", "true", "yes"}
+            # Binary raw-depth fast path: return raw float32 bytes directly
+            # (no base64/JSON round-trip). Front-end reads arrayBuffer() and
+            # wraps it in a Float32Array — avoids the ~1.2MB base64 encode/decode.
+            if include_raw and request.headers.get("X-DA360-Raw-Binary", "0") in {"1", "true", "yes"}:
+                resp = make_response(pred_depth.astype("<f4").tobytes())
+                resp.headers["Content-Type"] = "application/octet-stream"
+                resp.headers["X-DA360-Raw-Depth-Shape"] = " ".join(
+                    str(s) for s in pred_depth.shape
+                )
+                resp.headers["X-DA360-Raw-Depth-Dtype"] = "float32"
+                resp.headers["X-DA360-Depth-Scale"] = str(depth_scale)
+                resp.headers["X-DA360-Latency-Ms"] = "%.1f" % (
+                    (time.time() - started) * 1000.0
+                )
+                return resp
+
             response_payload = {
                 "depth_image": depth_image,
                 "depth_scale": depth_scale,

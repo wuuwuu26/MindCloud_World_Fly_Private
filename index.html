@@ -1005,7 +1005,51 @@
         <div style="font-size:12px;color:#aaa;line-height:1.6;margin-top:4px;">
             <span id="yopo-status-text">状态: 未激活</span><br>
             <span id="yopo-dist-text">到目标距离: --</span><br>
-            <span id="yopo-count-text">推理计数: 0</span>
+            <span id="yopo-count-text">推理计数: 0</span><br>
+            <span id="yopo-avoid-text">深度: --</span>
+        </div>
+
+        <h3>Cesium 数据集采集</h3>
+        <div style="font-size:12px;color:#8aa;margin:-2px 0 8px;line-height:1.4;">
+            在 Cesium 真实世界采集训练样本, 落盘格式与合成 Simulator 一致, 可直接 train_yopo.py。
+            每个 map 区域请保持较小 (radius ≤ 15m, 因 ESDF 体素 0.2m)。需先启动 cesium_dataset_server.py (:8003)。
+        </div>
+        <div class="setting-row">
+            <label>采集模式</label>
+            <div class="controls">
+                <select id="cds-mode" style="width:auto;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+                    <option value="da360" selected>DA360 (与运行时一致)</option>
+                    <option value="raycast">Cesium 射线 (离线快速)</option>
+                </select>
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>区域数</label>
+            <div class="controls"><input type="number" id="cds-num-maps" value="4" min="1" max="50" style="width:70px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;"></div>
+        </div>
+        <div class="setting-row">
+            <label>每区样本</label>
+            <div class="controls"><input type="number" id="cds-samples" value="300" min="1" max="5000" style="width:70px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;"></div>
+        </div>
+        <div class="setting-row">
+            <label>半径(m)</label>
+            <div class="controls"><input type="number" id="cds-radius" value="12" min="1" max="50" style="width:70px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;"></div>
+        </div>
+        <div class="setting-row">
+            <label>最大深度(m)</label>
+            <div class="controls"><input type="number" id="cds-max-depth" value="20" min="1" max="100" style="width:70px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;"></div>
+        </div>
+        <div class="setting-row">
+            <label>服务地址</label>
+            <div class="controls"><input type="text" id="cds-server" value="http://localhost:8003" style="width:160px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;"></div>
+        </div>
+        <div style="display:flex;gap:8px;margin:8px 0;">
+            <button class="assign-btn" id="cds-set-region-btn" style="flex:1;">以当前机位为中心</button>
+            <button class="assign-btn" id="cds-start-btn" style="flex:1;background:#285e28;">开始采集</button>
+            <button class="assign-btn" id="cds-stop-btn" style="flex:1;background:#5e2828;">停止</button>
+        </div>
+        <div style="font-size:12px;color:#aaa;line-height:1.6;margin-top:4px;">
+            <span id="cds-status">状态: 空闲</span>
         </div>
 
         <h3>Physics</h3>
@@ -1043,15 +1087,15 @@
         <div class="setting-row">
             <label>Drone Size (m)</label>
             <div class="controls">
-                <input type="range" id="phys-drone-size" min="0.1" max="1.0" value="0.3" step="0.05">
-                <input type="number" id="phys-drone-size-num" min="0.1" max="1.0" step="0.05" value="0.3" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+                <input type="range" id="phys-drone-size" min="0.1" max="1.0" value="0.15" step="0.05">
+                <input type="number" id="phys-drone-size-num" min="0.1" max="1.0" step="0.05" value="0.15" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
             </div>
         </div>
         <div class="setting-row">
             <label>Collision Radius (m)</label>
             <div class="controls">
-                <input type="range" id="phys-collision-radius" min="0.05" max="2.0" value="0.15" step="0.05">
-                <input type="number" id="phys-collision-radius-num" min="0.05" max="2.0" step="0.05" value="0.15" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+                <input type="range" id="phys-collision-radius" min="0.05" max="2.0" value="0.1" step="0.05">
+                <input type="number" id="phys-collision-radius-num" min="0.05" max="2.0" step="0.05" value="0.1" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
             </div>
         </div>
 

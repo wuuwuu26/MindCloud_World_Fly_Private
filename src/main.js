@@ -32,6 +32,7 @@ import { OSD } from './osd.js';
 import { PanoramaSensor } from './panorama-sensor.js';
 import { YOPONavigator } from './yopo-navigator.js';
 import { YOPODepthFromPanorama } from './yopo-depth-from-panorama.js';
+import { CesiumYOPODataset } from './yopo-cesium-dataset.js';
 import { reportUserError } from './error-report.js';
 
 let world = null;
@@ -228,7 +229,13 @@ function initSubsystems() {
 
     setupDisplaySettingsListeners();
     setupYOPOUI();
+    setupCesiumDatasetUI();
     yopoDepthFromPanorama = null;
+
+    // 无头训练采集: 自动进入 tiles 模式, 随后由 startTilesMode 内部触发采集
+    if (new URLSearchParams(location.search).get('autocollect') === '1') {
+        setTimeout(() => { if (typeof startTilesMode === 'function') startTilesMode(); }, 300);
+    }
 }
 
 export async function startTilesMode() {
@@ -258,6 +265,16 @@ export async function startTilesMode() {
         await enterPlacementMode(true);
         warmPanoramaViewerInBackground();
         document.getElementById('loading-overlay')?.classList.remove('visible');
+
+        // 暴露给无头自动采集脚本 (?autocollect=1)
+        window.world = world;
+        window.drone = drone;
+        window.yopoDepthFromPanorama = yopoDepthFromPanorama;
+        window.runAutoCollect = runAutoCollect;
+        window.startTilesMode = startTilesMode;
+        if (new URLSearchParams(location.search).get('autocollect') === '1') {
+            runAutoCollect();
+        }
 
         if (!loopStarted) {
             loopStarted = true;
@@ -781,7 +798,7 @@ function updateFlight(dt) {
                     const cameraTransform = drone.getCameraTransform();
                     let depthResult = null;
 
-                    // Prefer DA360 ERP panoramic depth (YOPO_360 native input).
+                    // DA360 估计深度(经稀疏 Cesium 射线标定尺度)喂给 YOPO。
                     if (yopoDepthFromPanorama) {
                         depthResult = await yopoDepthFromPanorama.captureYOPODepthERP(cameraTransform, {
                             width: 384,   // YOPO_360 ERP image_width  (columns)
@@ -809,6 +826,9 @@ function updateFlight(dt) {
                     }
                     drone.yopoDepthUnavailable = false;
 
+                    // 记录当前深度源(真值射线 / DA360 估计), 由 updateYOPOStatusUI 渲染
+                    drone.yopoDepthSource = depthResult.source;
+
                     if (!depthResult || !depthResult.depth) {
                         throw new Error('depth capture failed');
                     }
@@ -823,7 +843,9 @@ function updateFlight(dt) {
                     );
                     const t2 = performance.now();
                     if (drone.yopoInferenceCount < 5 || drone.yopoInferenceCount % 20 === 0) {
-                        console.log(`YOPO timing: depth=${(t1-t0).toFixed(0)}ms navigate=${(t2-t1).toFixed(0)}ms total=${(t2-t0).toFixed(0)}ms`);
+                        const navMs = t2 - t1;
+                        const navCached = navMs < 30;   // <30ms 即客户端 33ms 节流命中, 返回缓存命令而非真打服务器
+                        console.log(`YOPO timing: depth=${(t1-t0).toFixed(0)}ms navigate=${navMs.toFixed(0)}ms total=${(t2-t0).toFixed(0)}ms${navCached ? ' [nav-cache]' : ''} src=${depthResult.source}`);
                     }
 
                     if (cmd && !cmd.error) {
@@ -995,6 +1017,109 @@ function setupYOPOUI() {
     stopNavBtn.addEventListener('click', stopYOPONavigation);
 }
 
+// ── Cesium → YOPO_360 数据集采集 UI ─────────────────────────────
+function setupCesiumDatasetUI() {
+    const modeSel = document.getElementById('cds-mode');
+    const numMapsEl = document.getElementById('cds-num-maps');
+    const samplesEl = document.getElementById('cds-samples');
+    const radiusEl = document.getElementById('cds-radius');
+    const maxDepthEl = document.getElementById('cds-max-depth');
+    const serverEl = document.getElementById('cds-server');
+    const setRegionBtn = document.getElementById('cds-set-region-btn');
+    const startBtn = document.getElementById('cds-start-btn');
+    const stopBtn = document.getElementById('cds-stop-btn');
+    const statusEl = document.getElementById('cds-status');
+    if (!startBtn || !stopBtn) return;
+
+    let collector = null;
+
+    const setStatus = (s) => { if (statusEl) statusEl.textContent = '状态: ' + s; };
+
+    if (setRegionBtn) {
+        setRegionBtn.addEventListener('click', () => {
+            if (!collector) collector = new CesiumYOPODataset(world, drone, yopoDepthFromPanorama, {});
+            if (collector.setRegionFromDrone()) {
+                const c = collector.regionCenter;
+                setStatus(`区域中心已设为机位 (${c.x.toFixed(1)}, ${c.y.toFixed(1)}, ${c.z.toFixed(1)})`);
+            } else {
+                setStatus('无法获取机位');
+            }
+        });
+    }
+
+    startBtn.addEventListener('click', async () => {
+        if (!world || !drone) { setStatus('世界未就绪'); return; }
+        if (!yopoDepthFromPanorama && (modeSel.value === 'da360')) {
+            setStatus('DA360 深度未就绪 (请稍候或切到 Cesium 射线模式)');
+            return;
+        }
+        const opts = {
+            mode: modeSel.value,
+            numMaps: parseInt(numMapsEl.value, 10) || 4,
+            samplesPerMap: parseInt(samplesEl.value, 10) || 300,
+            radius: parseFloat(radiusEl.value) || 12,
+            maxDepth: parseFloat(maxDepthEl.value) || 20,
+            serverUrl: serverEl.value || 'http://localhost:8003',
+        };
+        collector = new CesiumYOPODataset(world, drone, yopoDepthFromPanorama, opts);
+        if (!collector.regionCenter) collector.setRegionFromDrone();
+        collector.onProgress = (info) => {
+            if (info.skipped) {
+                setStatus(`map ${info.map} 样本 ${info.sample}: 跳过(深度获取失败)`);
+            } else {
+                setStatus(`采集中 map ${info.map + 1}/${opts.numMaps} 样本 ${info.sample + 1}/${info.total} · 点云 ${info.pts} 点 · 模式 ${info.mode}`);
+            }
+        };
+        startBtn.disabled = true;
+        setStatus('采集中...');
+        try {
+            const res = await collector.collect();
+            setStatus(res.done ? `完成 (中心 ${JSON.stringify(res.center)})` : '已停止');
+        } catch (e) {
+            console.error('Cesium dataset collect failed', e);
+            setStatus('失败: ' + (e && e.message ? e.message : e));
+        } finally {
+            startBtn.disabled = false;
+        }
+    });
+
+    stopBtn.addEventListener('click', () => {
+        if (collector) collector.stop();
+        setStatus('正在停止...');
+    });
+}
+
+// ── 无头自动采集 (?autocollect=1): 供 Playwright 等无头脚本驱动 ──
+function runAutoCollect() {
+    const p = new URLSearchParams(location.search);
+    const opts = {
+        mode: p.get('mode') || 'da360',
+        numMaps: parseInt(p.get('numMaps') || '2', 10),
+        samplesPerMap: parseInt(p.get('samples') || '50', 10),
+        radius: parseFloat(p.get('radius') || '12'),
+        maxDepth: parseFloat(p.get('maxDepth') || '20'),
+        serverUrl: p.get('server') || 'http://localhost:8003',
+    };
+    window.__cdsStatus = { running: true, done: false, error: null, info: null, opts };
+    try {
+        const collector = new CesiumYOPODataset(window.world, window.drone, window.yopoDepthFromPanorama, opts);
+        if (!collector.regionCenter) collector.setRegionFromDrone();
+        collector.onProgress = (info) => { window.__cdsStatus.info = info; };
+        collector.collect().then((res) => {
+            window.__cdsStatus.running = false;
+            window.__cdsStatus.done = res.done;
+            window.__cdsStatus.center = res.center;
+        }).catch((e) => {
+            window.__cdsStatus.running = false;
+            window.__cdsStatus.error = (e && e.message) ? e.message : String(e);
+            console.error('autocollect failed', e);
+        });
+    } catch (e) {
+        window.__cdsStatus.running = false;
+        window.__cdsStatus.error = (e && e.message) ? e.message : String(e);
+    }
+}
+
 // ── YOPO target selection helpers ───────────────────────────────
 
 const YOPO_TARGET_STEP = 0.5; // metres per key press
@@ -1154,10 +1279,10 @@ function handleYOPOKeyDown(e) {
             x += fwd.x * YOPO_TARGET_STEP; z += fwd.z * YOPO_TARGET_STEP; break;
         case 'Numpad2': case 'NumpadArrowDown': // 机头反方向后退
             x -= fwd.x * YOPO_TARGET_STEP; z -= fwd.z * YOPO_TARGET_STEP; break;
-        case 'Numpad4': case 'NumpadArrowLeft': // 机头方向左侧
-            x -= right.x * YOPO_TARGET_STEP; z -= right.z * YOPO_TARGET_STEP; break;
-        case 'Numpad6': case 'NumpadArrowRight': // 机头方向右侧
+        case 'Numpad4': case 'NumpadArrowLeft': // 机头方向右侧 (与原始 4=左 交换)
             x += right.x * YOPO_TARGET_STEP; z += right.z * YOPO_TARGET_STEP; break;
+        case 'Numpad6': case 'NumpadArrowRight': // 机头方向左侧 (与原始 6=右 交换)
+            x -= right.x * YOPO_TARGET_STEP; z -= right.z * YOPO_TARGET_STEP; break;
         case 'Numpad9':                          y += YOPO_TARGET_STEP; break; // up    (+y)
         case 'Numpad3':                          y -= YOPO_TARGET_STEP; break; // down  (-y)
         case 'Numpad5': case 'NumpadEnter':
@@ -1248,7 +1373,20 @@ function updateYOPOStatusUI() {
     const statusEl = document.getElementById('yopo-status-text');
     const distEl = document.getElementById('yopo-dist-text');
     const countEl = document.getElementById('yopo-count-text');
+    const avoidEl = document.getElementById('yopo-avoid-text');
     if (!statusEl || !distEl || !countEl) return;
+
+    // 深度源状态: 显示当前用的是真值射线还是 DA360 估计深度(便于 A/B 对照)
+    if (avoidEl) {
+        const src = drone.yopoDepthSource;
+        if (src === 'true') {
+            avoidEl.innerHTML = '深度: <span style="color:#7fd07f">真值(射线)</span>';
+        } else if (src === 'da360') {
+            avoidEl.innerHTML = '深度: <span style="color:#f6b93b">DA360</span>';
+        } else {
+            avoidEl.textContent = '深度: --';
+        }
+    }
 
     // Show distance during target selection mode too (compute from inputs,
     // NOT from drone.yopoNavTarget which is not set until confirmation).
@@ -1546,6 +1684,11 @@ function initializeAppShell() {
     setupSpawnAltitudeControls();
     setProgress('');
     window.googleTilesFlightStart = startTilesMode;
+    window.startTilesMode = startTilesMode;
+    window.runAutoCollect = runAutoCollect;
+    if (new URLSearchParams(location.search).get('autocollect') === '1') {
+        setTimeout(() => { if (typeof window.startTilesMode === 'function') window.startTilesMode(); }, 300);
+    }
 }
 
 if (document.readyState === 'loading') {
