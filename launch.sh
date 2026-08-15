@@ -7,7 +7,6 @@ NAME="${NAME:-google-tiles-flight}"
 PORT="${PORT:-8080}"
 DETACH="${DETACH:-0}"
 MODE="docker"
-OPEN_BROWSER=1
 LOOPBACK_HOST="127.0.0.1"
 YOPO_ENABLE=0
 YOPO_PORT="${YOPO_PORT:-5689}"
@@ -22,8 +21,7 @@ _CLEANED=0
 usage() {
     cat <<EOF
 Usage:
-  ./launch.sh                 Build/run Docker, then open the browser
-  ./launch.sh --no-open       Start the server only
+  ./launch.sh                 Build/run Docker
   ./launch.sh --local         Use scripts/serve.py for local development
   ./launch.sh --yopo          Also start the YOPO navigation backend service
   ./launch.sh --setup-input   Install Linux udev rules for RC/WebHID access
@@ -33,7 +31,6 @@ Options:
   --docker                    Use Docker mode (default)
   --local                     Use local Python server
   --yopo                      Start YOPO navigation backend service (port $YOPO_PORT)
-  --no-open, no-open          Do not open Chrome/Chromium
   --detach                    Keep Docker container running in the background
   --port PORT                 Host port, same as PORT=18081 ./launch.sh
   --image IMAGE               Docker image name
@@ -45,8 +42,6 @@ Options:
 Environment:
   PORT=18081 ./launch.sh
   DETACH=1 ./launch.sh
-  CHROME_BIN=/path/to/chrome ./launch.sh
-  USE_NVIDIA=1 ./launch.sh
 EOF
 }
 
@@ -373,56 +368,6 @@ EOF
     echo "Reconnect the RC transmitter/gamepad. If group membership changed, log out and back in."
 }
 
-find_browser() {
-    if [[ -n "${CHROME_BIN:-}" ]]; then
-        [[ -x "$CHROME_BIN" || -n "$(command -v "$CHROME_BIN" 2>/dev/null)" ]] && echo "$CHROME_BIN"
-        return 0
-    fi
-
-    local candidate
-    for candidate in /opt/google/chrome/chrome google-chrome google-chrome-stable chromium chromium-browser; do
-        if command -v "$candidate" >/dev/null 2>&1; then
-            command -v "$candidate"
-            return 0
-        elif [[ -x "$candidate" ]]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-}
-
-open_browser() {
-    local url="$1"
-    [[ "$OPEN_BROWSER" == "1" ]] || {
-        echo "Browser launch skipped. Open $url"
-        return 0
-    }
-
-    local browser
-    browser="$(find_browser || true)"
-    if [[ -z "$browser" ]]; then
-        echo "Chrome/Chromium was not found. Open $url manually."
-        return 0
-    fi
-
-    echo "Opening $url"
-    if truthy "${USE_NVIDIA:-0}" || [[ -e /proc/driver/nvidia/version ]] || command -v nvidia-smi >/dev/null 2>&1; then
-        __NV_PRIME_RENDER_OFFLOAD=1 \
-        __GLX_VENDOR_LIBRARY_NAME=nvidia \
-        __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json \
-            nohup "$browser" \
-                --enable-gpu-rasterization \
-                --ignore-gpu-blocklist \
-                "$url" >/dev/null 2>&1 &
-    else
-        nohup "$browser" \
-            --enable-gpu-rasterization \
-            --ignore-gpu-blocklist \
-            "$url" >/dev/null 2>&1 &
-    fi
-    disown || true
-}
-
 run_docker() {
     command -v docker >/dev/null 2>&1 || die "Docker is not installed."
     docker info >/dev/null 2>&1 || die "Cannot access Docker daemon. Start Docker or run with sudo if your setup requires it."
@@ -487,8 +432,6 @@ run_docker() {
         fi
     fi
 
-    open_browser "$url"
-
     cat <<EOF
 
 Simulator: $url
@@ -544,8 +487,6 @@ run_local() {
     sleep 0.4
     kill -0 "$LOCAL_PID" 2>/dev/null || die "Local server failed to start."
 
-    open_browser "$url"
-
     cat <<EOF
 
 Simulator: $url
@@ -569,9 +510,6 @@ while (($# > 0)); do
             ;;
         --local|local)
             MODE="local"
-            ;;
-        --no-open|no-open)
-            OPEN_BROWSER=0
             ;;
         --detach)
             DETACH=1

@@ -11,7 +11,6 @@
 #     ./restart_all.sh --no-main          # 只重启 DA360 + YOPO (主飞行保留)
 #     ./restart_all.sh --no-da360         # 只重启 YOPO + 主飞行 (DA360 保留)
 #     ./restart_all.sh --no-yopo          # 只重启 DA360 + 主飞行 (YOPO 保留)
-#     OPEN_BROWSER=1 ./restart_all.sh     # 重启后自动打开浏览器
 #
 #   说明:
 #     - 两个后端容器都以只读挂载各自的 server 脚本, 改完 Python 后
@@ -101,8 +100,8 @@ fi
 if [ "$DO_MAIN" = "1" ]; then
     echo "[3/3] 重启主飞行进程 ..."
     stop_wait "$MAIN_NAME"
-    DETACH=1 OPEN_BROWSER=0 \
-        nohup bash "$SCRIPT_DIR/launch.sh" --no-open --detach >/tmp/restart_main.log 2>&1 &
+    DETACH=1 \
+        nohup bash "$SCRIPT_DIR/launch.sh" --detach >/tmp/restart_main.log 2>&1 &
     sleep 4
     wait_health "http://127.0.0.1:8080/" 60 主飞行 || true
 fi
@@ -116,9 +115,3 @@ docker ps --format '  {{.Names}}\t{{.Status}}\t{{.Ports}}' \
     | grep -E "$MAIN_NAME|$DA360_NAME|$YOPO_NAME" || echo "  (无容器运行)"
 echo " 模拟器: http://127.0.0.1:8080  (请 Ctrl+F5 强刷加载最新前端)"
 echo "==============================================="
-
-# 可选: 自动打开浏览器
-if [ "${OPEN_BROWSER:-0}" = "1" ]; then
-    ( command -v xdg-open >/dev/null && nohup xdg-open http://127.0.0.1:8080 >/dev/null 2>&1 & ) || true
-    ( command -v google-chrome >/dev/null && nohup google-chrome http://127.0.0.1:8080 >/dev/null 2>&1 & ) || true
-fi

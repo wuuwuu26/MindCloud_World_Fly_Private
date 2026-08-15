@@ -24,7 +24,6 @@ cd MindCloud_World_Fly_Private
 ```bash
 # 常用方式
 PORT=18081 ./restart_all.sh        # 指定主进程端口
-./restart_all.sh --no-open         # 只启动服务，不自动打开浏览器
 ./restart_all.sh --detach          # Docker 后台运行
 docker rm -f google-tiles-flight da360-api yopo-api   # 停止全部后台容器
 ```
@@ -130,9 +129,6 @@ http://127.0.0.1:8080
 ```bash
 # 端口被占用时
 PORT=18081 ./launch.sh
-
-# 只启动服务，不自动打开浏览器
-./launch.sh --no-open
 
 # Docker 后台运行
 ./launch.sh --detach
