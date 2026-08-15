@@ -29,13 +29,13 @@ export class OSD {
         this.ctx = this.canvas ? this.canvas.getContext('2d') : null;
         this.enabled = true;
 
-        // Colors
-        this.color = '#00ff00';
-        this.dimColor = 'rgba(0,255,0,0.4)';
+        // Colors (blue/white palette only)
+        this.color = '#9fb5ff';
+        this.dimColor = 'rgba(120,170,255,0.4)';
         this.bgColor = 'rgba(0,0,0,0.25)';
         this.warnColor = '#ff4444';
         this.skyColor = 'rgba(50,120,220,0.15)';
-        this.groundColor = 'rgba(120,80,30,0.15)';
+        this.groundColor = 'rgba(90,110,150,0.15)';
     }
 
     setEnabled(val) {

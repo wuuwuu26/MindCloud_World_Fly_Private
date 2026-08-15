@@ -106,8 +106,8 @@ const KEYBOARD_MAP = {
     'KeyD':       { action: 'yaw',      value: 1 },
     'ArrowUp':    { action: 'pitch',    value: -1 },
     'ArrowDown':  { action: 'pitch',    value: 1 },
-    'ArrowLeft':  { action: 'roll',     value: -1 },
-    'ArrowRight': { action: 'roll',     value: 1 },
+    'ArrowLeft':  { action: 'roll',     value: 1 },
+    'ArrowRight': { action: 'roll',     value: -1 },
     'KeyQ':       { action: 'cameraTilt', value: 1 },
     'KeyE':       { action: 'cameraTilt', value: -1 },
 };
@@ -1180,13 +1180,13 @@ export class Controller {
 
         const dialog = document.createElement('div');
         Object.assign(dialog.style, {
-            background: 'rgba(14,18,28,0.98)', border: '1px solid #f80',
+            background: 'rgba(14,18,28,0.98)', border: '1px solid #4272F5',
             borderRadius: '12px', padding: '24px', width: '460px',
             color: '#ddd', userSelect: 'none',
         });
 
         const titleEl = document.createElement('h3');
-        Object.assign(titleEl.style, { color: '#f80', margin: '0 0 6px', fontSize: '1.1em' });
+        Object.assign(titleEl.style, { color: '#9fb5ff', margin: '0 0 6px', fontSize: '1.1em' });
         titleEl.textContent = '● Recording Calibration…';
 
         const instrEl = document.createElement('p');
@@ -1209,8 +1209,8 @@ export class Controller {
         const saveBtn = document.createElement('button');
         saveBtn.textContent = 'Stop & Save';
         Object.assign(saveBtn.style, {
-            padding: '7px 22px', background: '#f80', border: 'none',
-            borderRadius: '6px', color: '#000', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold',
+            padding: '7px 22px', background: '#4272F5', border: 'none',
+            borderRadius: '6px', color: '#fff', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold',
         });
 
         btnRow.appendChild(cancelBtn);
@@ -1239,7 +1239,7 @@ export class Controller {
                 const range = Math.max(1, mx - mn);
                 const pct = Math.max(0, Math.min(100, ((raw - mn) / range) * 100));
                 const active = (mx - mn) > 10;
-                const barColor = active ? '#f80' : '#334';
+                const barColor = active ? '#4272F5' : '#334';
                 html += `<div style="display:flex;align-items:center;gap:4px;margin-bottom:2px;">` +
                     `<span style="width:32px;text-align:right;color:${active ? '#aaa' : '#445'};">CH${i+1}</span>` +
                     `<div style="flex:1;height:8px;background:#1a2030;border-radius:2px;overflow:hidden;">` +
@@ -1621,31 +1621,31 @@ export class Controller {
             statusHtml += `<div style="margin-bottom:8px;">
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
                     <input type="checkbox" id="disable-gamepad-api" ${disabledChecked}>
-                    <span style="color:#fa0;">Disable Gamepad API (use Chrome WebHID)</span>
+                    <span style="color:#9fb5ff;">Disable Gamepad API (use Chrome WebHID)</span>
                 </label>
             </div>`;
             
             if (this._hidConnected) {
-                statusHtml += `<span style="color:#4f4;">HID Connected: ${this._hidDeviceName}</span>` +
-                    `<button id="disconnect-hid-btn" style="margin-left:12px;padding:4px 12px;background:#533;border:1px solid #f44;color:#f44;border-radius:4px;cursor:pointer;font-size:12px;">Disconnect</button>`;
+                statusHtml += `<span style="color:#9fb5ff;">HID Connected: ${this._hidDeviceName}</span>` +
+                    `<button id="disconnect-hid-btn" style="margin-left:12px;padding:4px 12px;background:#334;border:1px solid #4272F5;color:#9fb5ff;border-radius:4px;cursor:pointer;font-size:12px;">Disconnect</button>`;
             } else if (this.connected && !this._gamepadApiDisabled) {
-                statusHtml += `<span style="color:#4af;">Gamepad: ${this.gamepadName}</span>`;
+                statusHtml += `<span style="color:#cfe;">Gamepad: ${this.gamepadName}</span>`;
             } else if (this._gamepadApiDisabled) {
-                statusHtml += `<span style="color:#fa0;">Gamepad API disabled - use Chrome WebHID</span>`;
+                statusHtml += `<span style="color:#9fb5ff;">Gamepad API disabled - use Chrome WebHID</span>`;
             } else {
                 statusHtml += `<span style="color:#888;">No gamepad detected</span>`;
             }
             
             // Always show Connect HID button if not HID connected
             if (!this._hidConnected) {
-                statusHtml += `<button id="connect-hid-btn" style="margin-left:12px;padding:4px 12px;background:#335;border:1px solid #4f4;color:#4f4;border-radius:4px;cursor:pointer;font-size:12px;">Connect HID</button>`;
+                statusHtml += `<button id="connect-hid-btn" style="margin-left:12px;padding:4px 12px;background:#335;border:1px solid #4272F5;color:#9fb5ff;border-radius:4px;cursor:pointer;font-size:12px;">Connect HID</button>`;
             }
 
             // Calibration status + buttons (only when HID connected)
             if (this._hidConnected) {
                 const calStatus = this._hasCalibration()
-                    ? `<span style="color:#4f4;font-size:12px;">✓ Calibrated</span>`
-                    : `<span style="color:#fa0;font-size:12px;">⚠ Not calibrated (using defaults)</span>`;
+                    ? `<span style="color:#9fb5ff;font-size:12px;">✓ Calibrated</span>`
+                    : `<span style="color:#9fb5ff;font-size:12px;">⚠ Not calibrated (using defaults)</span>`;
                 statusHtml += `<div style="margin-top:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">` +
                     calStatus +
                     `<button id="calibrate-hid-btn" style="padding:4px 12px;background:#223;border:1px solid #4272F5;color:#4272F5;border-radius:4px;cursor:pointer;font-size:12px;">Calibrate…</button>` +
@@ -1695,7 +1695,7 @@ export class Controller {
         const RATE_EXPO_AXES = ['roll', 'pitch', 'throttle', 'yaw'];
         const RATE_AXES = ['roll', 'pitch', 'yaw']; // throttle has no rate
         const AXIS_COLORS = {
-            roll: '#4af', pitch: '#f44', throttle: '#4f4', yaw: '#fa4'
+            roll: '#9fb5ff', pitch: '#f44', throttle: '#6a7a88', yaw: '#cfe'
         };
 
         for (const action of RATE_EXPO_AXES) {
@@ -1807,7 +1807,7 @@ export class Controller {
 
     _drawExpoCurve(action) {
         const AXIS_COLORS = {
-            roll: '#4af', pitch: '#f44', throttle: '#4f4', yaw: '#fa4'
+            roll: '#9fb5ff', pitch: '#f44', throttle: '#6a7a88', yaw: '#cfe'
         };
         const canvas = document.getElementById(`expo-curve-${action}`);
         if (!canvas) return;
@@ -1821,7 +1821,7 @@ export class Controller {
         ctx.clearRect(0, 0, W, H);
 
         // Title
-        ctx.fillStyle = AXIS_COLORS[action] || '#4af';
+        ctx.fillStyle = AXIS_COLORS[action] || '#9fb5ff';
         ctx.font = 'bold 11px sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText(action.charAt(0).toUpperCase() + action.slice(1), W / 2, 14);
@@ -1862,7 +1862,7 @@ export class Controller {
         const m = this.mapping[action];
         const expo = m.expo || 0;
 
-        ctx.strokeStyle = AXIS_COLORS[action] || '#4af';
+        ctx.strokeStyle = AXIS_COLORS[action] || '#9fb5ff';
         ctx.lineWidth = 2;
         ctx.beginPath();
         for (let px = 0; px <= plotW; px++) {
@@ -1890,7 +1890,7 @@ export class Controller {
                 `<span style="width:24px;text-align:right;color:#aaa;">A${i}</span>` +
                 `<div style="flex:1;height:10px;background:#223;border-radius:3px;overflow:hidden;position:relative;">` +
                 `<div style="position:absolute;left:50%;top:0;width:1px;height:100%;background:#444;"></div>` +
-                `<div style="width:${pct}%;height:100%;background:#4af;border-radius:3px;transition:width 0.05s;"></div>` +
+                `<div style="width:${pct}%;height:100%;background:#4272F5;border-radius:3px;transition:width 0.05s;"></div>` +
                 `</div>` +
                 `<span style="width:40px;text-align:right;font-size:10px;">${val.toFixed(2)}</span>` +
                 `</div>`;
@@ -1900,7 +1900,7 @@ export class Controller {
         for (let i = 0; i < numBtns; i++) {
             const val = gp.buttons[i].value;
             const pct = val * 100;
-            const color = gp.buttons[i].pressed ? '#4af' : '#335';
+            const color = gp.buttons[i].pressed ? '#4272F5' : '#335';
             html += `<div style="display:flex;align-items:center;gap:4px;margin-bottom:2px;">` +
                 `<span style="width:24px;text-align:right;color:#aaa;">B${i}</span>` +
                 `<div style="flex:1;height:10px;background:#223;border-radius:3px;overflow:hidden;">` +
@@ -1916,7 +1916,7 @@ export class Controller {
         const el = document.getElementById('gamepad-axes-display');
         if (!el) return;
 
-        let html = '<div style="color:#4f4;margin-bottom:8px;font-size:12px;">WebHID Mode - Full Precision</div>';
+        let html = '<div style="color:#9fb5ff;margin-bottom:8px;font-size:12px;">WebHID Mode - Full Precision</div>';
         // Show all HID channels with high precision
         const numChannels = Math.min(hidAxes.length, 8);
         for (let i = 0; i < numChannels; i++) {
@@ -1925,14 +1925,14 @@ export class Controller {
             const pct = ((val + 1) / 2) * 100;
             // Color based on magnitude
             const mag = Math.abs(val);
-            const barColor = mag > 0.01 ? '#4f4' : '#335';
+            const barColor = mag > 0.01 ? '#4272F5' : '#335';
             html += `<div style="display:flex;align-items:center;gap:4px;margin-bottom:3px;">` +
                 `<span style="width:30px;text-align:right;color:#aaa;">CH${i + 1}</span>` +
                 `<div style="flex:1;height:12px;background:#223;border-radius:3px;overflow:hidden;position:relative;">` +
                 `<div style="position:absolute;left:50%;top:0;width:1px;height:100%;background:#555;"></div>` +
                 `<div style="position:absolute;left:${Math.min(pct, 50)}%;width:${Math.abs(pct - 50)}%;height:100%;background:${barColor};"></div>` +
                 `</div>` +
-                `<span style="width:70px;text-align:right;font-size:11px;font-family:monospace;color:${mag > 0.01 ? '#4f4' : '#666'};">${val >= 0 ? '+' : ''}${val.toFixed(4)}</span>` +
+                `<span style="width:70px;text-align:right;font-size:11px;font-family:monospace;color:${mag > 0.01 ? '#9fb5ff' : '#666'};">${val >= 0 ? '+' : ''}${val.toFixed(4)}</span>` +
                 `</div>`;
         }
         el.innerHTML = html;

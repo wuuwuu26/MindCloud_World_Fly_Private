@@ -126,7 +126,7 @@ export function editPath({ octree, bounds, spawnPoint, initialPath, gateSize, cl
         const header = document.createElement('div');
         header.style.cssText = 'max-width: 92%; text-align: center; font-size: 13px; line-height: 1.5; color: #aac;';
         header.innerHTML = `
-            <div style="font-size: 16px; font-weight: bold; color: #4df; margin-bottom: 4px;">Edit Gate Path</div>
+            <div style="font-size: 16px; font-weight: bold; color: #9fb5ff; margin-bottom: 4px;">Edit Gate Path</div>
             <div>
                 <b>L-click</b> add / select &nbsp;·&nbsp;
                 <b>drag</b> move XZ &nbsp;·&nbsp;
@@ -170,7 +170,7 @@ export function editPath({ octree, bounds, spawnPoint, initialPath, gateSize, cl
             return b;
         };
         const cancelBtn = mkBtn('Cancel', '#444', () => finish(null));
-        const acceptBtn = mkBtn('Accept', '#2a7a3a', () => {
+        const acceptBtn = mkBtn('Accept', '#285e6e', () => {
             if (points.length < MIN_GATES) return;
             finish({
                 closed:    true,
@@ -377,7 +377,7 @@ export function editPath({ octree, bounds, spawnPoint, initialPath, gateSize, cl
             // Spawn marker.
             if (spawnPoint) {
                 const s = worldToCanvas(spawnPoint.x, spawnPoint.z);
-                ctx.fillStyle = '#4af';
+                ctx.fillStyle = '#9fb5ff';
                 ctx.beginPath();
                 ctx.arc(s.x, s.y, 5, 0, Math.PI * 2);
                 ctx.fill();
@@ -385,7 +385,7 @@ export function editPath({ octree, bounds, spawnPoint, initialPath, gateSize, cl
                 ctx.lineWidth = 1;
                 ctx.stroke();
                 ctx.font = 'bold 11px system-ui';
-                ctx.fillStyle = '#4af';
+                ctx.fillStyle = '#9fb5ff';
                 ctx.textAlign = 'left';
                 ctx.fillText('spawn', s.x + 7, s.y - 7);
             }

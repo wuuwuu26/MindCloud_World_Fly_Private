@@ -130,7 +130,7 @@ export class HUD {
         if (this.altitudeEl) this.altitudeEl.textContent = drone.y.toFixed(1);
         if (this.vspeedEl) {
             this.vspeedEl.textContent = drone.verticalSpeed.toFixed(1);
-            this.vspeedEl.style.color = drone.verticalSpeed < -2 ? '#f80' : '#0f0';
+            this.vspeedEl.style.color = drone.verticalSpeed < -2 ? '#f44' : '#9fb5ff';
         }
         const groundSpeed = Number.isFinite(drone.groundSpeed) ? drone.groundSpeed : drone.speed;
         const airSpeed = Number.isFinite(drone.airSpeed) ? drone.airSpeed : groundSpeed;
@@ -184,7 +184,7 @@ export class HUD {
                 this.controllerEl.title = name;
             } else {
                 this.controllerEl.textContent = 'Keyboard';
-                this.controllerEl.style.color = '#0f0';
+                this.controllerEl.style.color = '#9fb5ff';
                 this.controllerEl.title = 'Keyboard';
             }
         }
@@ -296,10 +296,10 @@ export class HUD {
                     if (this._raceFlashTimer > 0) {
                         this._raceFlashTimer -= dt;
                         const t = Math.max(0, this._raceFlashTimer) / 400;
-                        // Blend white (idle) → cyan (#4dfcff) at peak.
-                        const r = Math.round(255 + (77  - 255) * t);
-                        const g = Math.round(255 + (252 - 255) * t);
-                        const b = 255;
+                        // Blend white (idle) → soft blue (#9fb5ff) at peak.
+                        const r = Math.round(255 + (159 - 255) * t);
+                        const g = Math.round(255 + (181 - 255) * t);
+                        const b = Math.round(255 + (255 - 255) * t);
                         this.hrpGateProgEl.style.color     = `rgb(${r}, ${g}, ${b})`;
                         this.hrpGateProgEl.style.transform = `scale(${1 + 0.18 * t})`;
                     } else {

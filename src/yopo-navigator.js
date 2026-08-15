@@ -7,7 +7,7 @@
  */
 
 const YOPO_DEFAULT_SERVER = 'http://localhost:5689';
-// YOPO_360 ERP panorama resolution (192x384, 2 channels: depth + validity mask).
+// YOPO 原版 ERP panorama resolution (192x384, 2 channels: depth + validity mask).
 const YOPO_DEPTH_HEIGHT = 192;
 const YOPO_DEPTH_WIDTH = 384;
 
@@ -20,7 +20,7 @@ export class YOPONavigator {
         this.lastCmd = null;       // {position, velocity, acceleration, yaw, yaw_dot}
         this.inferenceCount = 0;
         this._lastRequestTime = 0;
-        this._requestInterval = 33; // ms (~30 Hz)
+        this._requestInterval = 10; // ms (~100 Hz) — higher depth/replan rate for smoother, more continuous flight
 
         // ── WebSocket transport (efficient alternative to per-call HTTP) ──
         // Derive ws:// URL from the HTTP server URL (same host, port 5690).
@@ -130,7 +130,9 @@ export class YOPONavigator {
         const hdrBytes = enc.encode(JSON.stringify(header));
         const hdrLen = new Uint8Array(4);
         new DataView(hdrLen.buffer).setUint32(0, hdrBytes.length, false);
-        const depthBuf = depthData.buffer; // Float32Array raw bytes
+        // 发送 Float32Array 视图本身(而非底层 .buffer): 若 depthData 是某大缓冲区的
+        // view, .buffer 会把整块(可能数 MB)发出去, 而视图只取其 288KB 范围, 传输更小更快。
+        const depthBuf = depthData; // 384x192 Float32 = 288KB
         const blob = new Blob([hdrLen, hdrBytes, depthBuf]);
         return this._wsSendBinary(header, blob);
     }

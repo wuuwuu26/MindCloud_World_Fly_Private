@@ -74,8 +74,8 @@ const DEFAULT_OPTS = {
 //   upcoming   → any other gate within the horizon window (cyan)
 // Gate 0 (start) carries a checker-flag texture instead of a solid
 // colour — see `getCheckerTexture` below.
-const COL_NEXT     = { r: 1.00, g: 0.84, b: 0.00 }; // yellow
-const COL_UPCOMING = { r: 0.00, g: 0.75, b: 1.00 }; // cyan
+const COL_NEXT     = { r: 0.62, g: 0.71, b: 1.00 }; // soft blue (next gate)
+const COL_UPCOMING = { r: 0.81, g: 0.88, b: 1.00 }; // pale blue (upcoming gates)
 
 // How many gates ahead of `nextGateIdx` remain visible (inclusive of
 // the next gate itself). Gates behind the drone naturally fall outside

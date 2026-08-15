@@ -40,6 +40,7 @@ const DEFAULT_VIEW = {
 const CESIUM_DRONE_MODEL_URI = 'asset/models/CesiumDrone.glb';
 const HEIGHT_CACHE_TTL_MS = 140;
 const HEIGHT_CACHE_LIMIT = 256;
+const PICK_CACHE_TTL_MS = 400;   // pickLocalRay 方向分桶缓存有效期: 覆盖 ~24 帧@60fps, 飞行中(每帧移动~0.08m)可跨多帧命中
 const PANORAMA_FACE_DEFS = [
     { name: 'front', dir: { x: 0, y: 0, z: -1 }, up: { x: 0, y: 1, z: 0 } },
     { name: 'right', dir: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 } },
@@ -339,6 +340,30 @@ function getTransformBasisLocal(transform) {
     }
 
     const q = transform.orientation;
+    // 防御: 四元数含 NaN/零向量 → rotateVectorByQuat 产出 NaN, normalize3 对 NaN 长度
+    // 会返回 NaN(而非回退), 进而让 basis 含 NaN 触发 Cesium "position has a NaN component"。
+    // 这里显式回退到单位竖直姿态, 杜绝该路径产生 NaN。
+    // 关键修复: 额外拦截"模长≈0 的非单位四元数"(如数值漂移出的 1e-40 量级退化姿态),
+    // 否则 rotateVectorByQuat 输出近零向量 → normalize3 返回零向量轴 →
+    // Cesium.Quaternion.fromRotationMatrix 对退化矩阵产出 NaN 四元数 →
+    // camera.setView 触发 "position has a NaN component"。之前的所有分量有限性检查
+    // 都拦不住这种退化态, 这是报错反复出现的真正根因。
+    const qLen = Math.hypot(q.x, q.y, q.z, q.w);
+    if (!Number.isFinite(q.x) || !Number.isFinite(q.y) || !Number.isFinite(q.z) || !Number.isFinite(q.w) ||
+        qLen < 1e-6 || !Number.isFinite(qLen) ||
+        (q.x === 0 && q.y === 0 && q.z === 0 && q.w === 0)) {
+        const right = { x: 1, y: 0, z: 0 };
+        const up = { x: 0, y: 1, z: 0 };
+        const back = { x: 0, y: 0, z: 1 };
+        return {
+            right,
+            left: negate3(right),
+            up,
+            down: negate3(up),
+            back,
+            forward: negate3(back),
+        };
+    }
     const right = normalize3(rotateVectorByQuat(q, { x: 1, y: 0, z: 0 }));
     const up = normalize3(rotateVectorByQuat(q, { x: 0, y: 1, z: 0 }));
     const back = normalize3(rotateVectorByQuat(q, { x: 0, y: 0, z: 1 }));
@@ -365,6 +390,35 @@ function rotateXZ(v, radians) {
         x: v.x * c - v.z * s,
         z: v.x * s + v.z * c,
     };
+}
+
+// ---- NaN 防御: transform 含非有限 position/orientation/rotation 即视为非法, 调用方
+// 应跳过, 避免 Cesium 抛 "position has a NaN component" 致命崩溃(根因可能在物理环/避障,
+// 这里兜底保证渲染循环永不因单个坏帧中断, 下一帧状态复位后自动恢复)。
+function _tfFinite(t) {
+    if (!t || !t.position ||
+        !Number.isFinite(t.position.x) || !Number.isFinite(t.position.y) || !Number.isFinite(t.position.z) ||
+        !t.orientation ||
+        !Number.isFinite(t.orientation.x) || !Number.isFinite(t.orientation.y) ||
+        !Number.isFinite(t.orientation.z) || !Number.isFinite(t.orientation.w) ||
+        !t.rotation ||
+        !Number.isFinite(t.rotation.x) || !Number.isFinite(t.rotation.y) || !Number.isFinite(t.rotation.z)) {
+        return false;
+    }
+    // 额外拦截退化四元数(模长≈0): 分量有限但姿态非法, 会让 Cesium 抛
+    // "position has a NaN component"。与 getTransformBasisLocal 的兜底一致。
+    const qLen = Math.hypot(t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w);
+    return Number.isFinite(qLen) && qLen >= 1e-6;
+}
+let _nanReportAt = 0;
+function _reportNan(where, t) {
+    const now = Date.now();
+    if (now - _nanReportAt > 5000) {
+        _nanReportAt = now;
+        let bad = {};
+        try { bad = JSON.parse(JSON.stringify(t)); } catch (e) { bad = String(t); }
+        console.error('[NaN-guard] skipped Cesium update in', where, 'transform=', bad);
+    }
 }
 
 export class CesiumWorld {
@@ -437,6 +491,7 @@ export class CesiumWorld {
         this._tileLoadProcessing = null;
         this._lastPickWarning = 0;
         this._heightSampleCache = new Map();
+        this._pickRayCache = new Map();   // pickLocalRay 方向分桶缓存(键见 pickLocalRay)
         this._flightPerformanceMode = false;
     }
 
@@ -466,6 +521,8 @@ export class CesiumWorld {
             fullscreenButton: false,
             scene3DOnly: true,
             shouldAnimate: true,
+            // Hide the default Google/Cesium data-attribution watermark (bottom-right credit).
+            creditContainer: document.createElement('div'),
             globe: false,
             skyAtmosphere: new Cesium.SkyAtmosphere(),
             requestRenderMode: false,
@@ -970,6 +1027,11 @@ export class CesiumWorld {
 
     localToCartesian(local) {
         const Cesium = this.Cesium;
+        // 防御: position 含 NaN 时直接返回原点 Cartesian, 避免 Cesium 抛
+        // "position has a NaN component"。上层调用方已尽量拦截, 这里兜底保证绝不崩。
+        if (!local || !Number.isFinite(local.x) || !Number.isFinite(local.y) || !Number.isFinite(local.z)) {
+            return new Cesium.Cartesian3(0, 0, 0);
+        }
         const enu = new Cesium.Cartesian3(local.x, local.z, local.y);
         return Cesium.Matrix4.multiplyByPoint(this.enuToFixed, enu, new Cesium.Cartesian3());
     }
@@ -1215,7 +1277,7 @@ export class CesiumWorld {
     }
 
     updateAircraftFromDroneTransform(transform) {
-        if (!this.viewer || !transform || !transform.orientation) return;
+        if (!this.viewer || !_tfFinite(transform)) { _reportNan('updateAircraftFromDroneTransform', transform); return; }
         this._ensureAircraft();
         const Cesium = this.Cesium;
         this._aircraftModelPosition = this.localToCartesian(transform.position);
@@ -1288,6 +1350,13 @@ export class CesiumWorld {
         if (firstKey !== undefined) this._heightSampleCache.delete(firstKey);
     }
 
+    _rememberPick(key, hit, time) {
+        this._pickRayCache.set(key, { hit, time });
+        if (this._pickRayCache.size <= HEIGHT_CACHE_LIMIT) return;
+        const firstKey = this._pickRayCache.keys().next().value;
+        if (firstKey !== undefined) this._pickRayCache.delete(firstKey);
+    }
+
     pickLocalRay(originLocal, directionLocal, maxDistance) {
         if (!this.viewer || !this.ready) return null;
         const Cesium = this.Cesium;
@@ -1308,6 +1377,21 @@ export class CesiumWorld {
         const dir = normalize3(directionLocal);
         if (Math.hypot(dir.x, dir.y, dir.z) < 1e-6) return null;
 
+        // 方向分桶缓存: 同一束射线(来源量化到 ~0.5m + 方向量化到 ~5°)在 PICK_CACHE_TTL_MS
+        // 内直接命中缓存, 跳过 scene.pickFromRay 这条昂贵的 GPU 拾取。量化到 0.5m 是关键:
+        // 无人机以 5m/s 飞行时每帧仅移动 ~0.08m, 一次探测后约 6 帧内起点仍落在同一桶 → 缓存命中,
+        // 把每帧数十次 GPU 拾取砍掉大半。命中返回的是真实墙体绝对位置(仅"距离"可能陈旧≤0.5m),
+        // 对几何避障/硬碰撞兜底这类安全网足够安全; 主轨迹仍由 YOPO 决定。这是缓解导航帧率低的
+        // 关键手段(瓦片拾取抖动主因), 帧率恢复后第二个小地图 viewer 的渲染也会随之恢复。
+        const nowP = performance.now();
+        const oKey = `${Math.round(originLocal.x / 0.5)}:${Math.round(originLocal.y / 0.5)}:${Math.round(originLocal.z / 0.5)}`;
+        const dKey = `${Math.round(dir.x * 36)}:${Math.round(dir.y * 36)}:${Math.round(dir.z * 36)}`;
+        const pKey = `${oKey}|${dKey}|${Math.round((maxDistance || 0) * 4)}`;
+        const pCached = this._pickRayCache.get(pKey);
+        if (pCached && nowP - pCached.time <= PICK_CACHE_TTL_MS) {
+            return pCached.hit;   // 命中: 直接返回缓存结果(含 null/未命中), 零 GPU 拾取
+        }
+
         const origin = this.localToCartesian(originLocal);
         const direction = this.localDirectionToFixed(dir);
         const ray = new Cesium.Ray(origin, direction);
@@ -1320,10 +1404,17 @@ export class CesiumWorld {
                 key: 'scene-pick-from-ray-collision',
                 intervalMs: 10000,
             });
+            this._rememberPick(pKey, null, nowP);
             return null;
         }
-        if (!hit || !Cesium.defined(hit.position)) return null;
-        if (this._isExcludedCollisionHit(hit)) return null;
+        if (!hit || !Cesium.defined(hit.position)) {
+            this._rememberPick(pKey, null, nowP);
+            return null;
+        }
+        if (this._isExcludedCollisionHit(hit)) {
+            this._rememberPick(pKey, null, nowP);
+            return null;
+        }
 
         const local = this.cartesianToLocal(hit.position);
         const dx = local.x - originLocal.x;
@@ -1335,7 +1426,7 @@ export class CesiumWorld {
     }
 
     setCameraFromDroneTransform(transform, hfovDeg) {
-        if (!this.viewer || !this.ready || !transform || !transform.orientation) return;
+        if (!this.viewer || !this.ready || !_tfFinite(transform)) { _reportNan('setCameraFromDroneTransform', transform); return; }
         const Cesium = this.Cesium;
         const aspect = Math.max(0.1, this.viewer.canvas.clientWidth / Math.max(1, this.viewer.canvas.clientHeight));
         const hfov = Cesium.Math.toRadians(Math.max(30, Math.min(140, hfovDeg || 100)));
@@ -1377,7 +1468,7 @@ export class CesiumWorld {
     }
 
     setThirdPersonCamera(transform, state = {}) {
-        if (!this.viewer || !this.ready || !transform || !transform.position) return;
+        if (!this.viewer || !this.ready || !_tfFinite(transform)) { _reportNan('setThirdPersonCamera', transform); return; }
         const Cesium = this.Cesium;
         const distance = Math.max(2.0, Math.min(120.0, state.distance || 16.0));
         const pitch = Math.max(-1.1, Math.min(1.15, state.pitch ?? 0.28));
@@ -1557,6 +1648,8 @@ export class CesiumWorld {
             fullscreenButton: false,
             scene3DOnly: true,
             shouldAnimate: false,
+            // Hide the default Google/Cesium data-attribution watermark (bottom-right credit).
+            creditContainer: document.createElement('div'),
             globe: false,
             skyAtmosphere: new Cesium.SkyAtmosphere(),
             requestRenderMode: true,
@@ -1789,97 +1882,4 @@ export class CesiumWorld {
         ].join(' | ');
     }
 
-    /**
-     * Capture a forward-facing depth map from the drone's perspective.
-     * Uses raycasting on a sparse grid and bilinear interpolation to
-     * produce the 192×384 depth image expected by the YOPO_360 network.
-     * Serves as a degraded fallback when DA360 ERP depth is unavailable.
-     *
-     * @param {object} transform  - Drone camera transform {position, orientation}
-     * @param {object} [options]  - {width, height, gridCols, gridRows, hfovDeg, maxDistance}
-     * @returns {{depth: Float32Array, encoding: string}} depth map + encoding metadata
-     */
-    captureForwardDepth(transform, options = {}) {
-        const width = Math.max(16, options.width || 384);
-        const height = Math.max(16, options.height || 192);
-        const gridCols = Math.max(4, Math.min(width, options.gridCols || 12));
-        const gridRows = Math.max(4, Math.min(height, options.gridRows || 20));
-        const hfovDeg = options.hfovDeg || 90;
-        const maxDistance = options.maxDistance || 20.0;
-
-        if (!transform || !transform.position || !transform.orientation) {
-            return { depth: new Float32Array(height * width).fill(maxDistance), encoding: '32FC1' };
-        }
-
-        const pos = transform.position;
-        const basis = getTransformBasisLocal(transform);
-        const forward = basis.forward;
-        const right = basis.right;
-        const up = basis.up;
-
-        const hfovRad = hfovDeg * Math.PI / 180;
-        const vfovRad = hfovRad * (height / width);
-        const tanHalfH = Math.tan(hfovRad * 0.5);
-        const tanHalfV = Math.tan(vfovRad * 0.5);
-
-        // Sample depth on a sparse grid
-        // Image convention: row 0 = top (up/sky), row max = bottom (down/ground)
-        // col 0 = left, col max = right
-        const depthGrid = new Float32Array(gridRows * gridCols);
-        let hitCount = 0;
-        for (let r = 0; r < gridRows; r++) {
-            // v: +1 = up (row 0), -1 = down (row max) → standard image orientation
-            const v = gridRows > 1 ? 1.0 - (r / (gridRows - 1)) * 2.0 : 0;
-            for (let c = 0; c < gridCols; c++) {
-                const u = gridCols > 1 ? (c / (gridCols - 1)) * 2 - 1 : 0;
-
-                const dir = {
-                    x: forward.x + u * tanHalfH * right.x + v * tanHalfV * up.x,
-                    y: forward.y + u * tanHalfH * right.y + v * tanHalfV * up.y,
-                    z: forward.z + u * tanHalfH * right.z + v * tanHalfV * up.z,
-                };
-                const norm = Math.hypot(dir.x, dir.y, dir.z);
-                if (norm > 1e-9) { dir.x /= norm; dir.y /= norm; dir.z /= norm; }
-
-                const hit = this.pickLocalRay(pos, dir, maxDistance);
-                if (hit && hit.distance < maxDistance) hitCount++;
-                depthGrid[r * gridCols + c] = hit ? Math.min(hit.distance, maxDistance) : maxDistance;
-            }
-        }
-        if (!this._depthCaptureLogged) {
-            this._depthCaptureLogged = true;
-            console.log(`captureForwardDepth: ${gridRows}x${gridCols} grid, ${hitCount}/${gridRows*gridCols} hits, ` +
-                `output ${height}x${width}, pos=(${pos.x?.toFixed(1)},${pos.y?.toFixed(1)},${pos.z?.toFixed(1)})`);
-        }
-
-        // Bilinear interpolation to full resolution
-        const depth = new Float32Array(height * width);
-        const xScale = (gridCols - 1) / (width - 1 || 1);
-        const yScale = (gridRows - 1) / (height - 1 || 1);
-
-        for (let py = 0; py < height; py++) {
-            const gy = py * yScale;
-            const gy0 = Math.min(Math.floor(gy), gridRows - 2);
-            const gy1 = gy0 + 1;
-            const fy = gy - gy0;
-
-            for (let px = 0; px < width; px++) {
-                const gx = px * xScale;
-                const gx0 = Math.min(Math.floor(gx), gridCols - 2);
-                const gx1 = gx0 + 1;
-                const fx = gx - gx0;
-
-                const v00 = depthGrid[gy0 * gridCols + gx0];
-                const v10 = depthGrid[gy0 * gridCols + gx1];
-                const v01 = depthGrid[gy1 * gridCols + gx0];
-                const v11 = depthGrid[gy1 * gridCols + gx1];
-
-                const top = v00 + (v10 - v00) * fx;
-                const bot = v01 + (v11 - v01) * fx;
-                depth[py * width + px] = top + (bot - top) * fy;
-            }
-        }
-
-        return { depth, encoding: '32FC1' };
-    }
 }

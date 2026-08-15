@@ -32,7 +32,14 @@ import { OSD } from './osd.js';
 import { PanoramaSensor } from './panorama-sensor.js';
 import { YOPONavigator } from './yopo-navigator.js';
 import { YOPODepthFromPanorama } from './yopo-depth-from-panorama.js';
-import { CesiumYOPODataset } from './yopo-cesium-dataset.js';
+// 数据集采集模块 (yopo-cesium-dataset.js) 为可选模块: 当前环境未包含该文件。
+// 改用动态 import 容错加载, 避免静态 import 缺失模块导致整个 main.js 加载失败、
+// 连导航与 UI 都无法启动。缺失时采集功能不可用, 但导航等其他功能照常工作。
+let CesiumYOPODataset = null;
+(async () => {
+  try { ({ CesiumYOPODataset } = await import('./yopo-cesium-dataset.js')); }
+  catch (e) { console.warn('[main] yopo-cesium-dataset.js 未加载, 数据集采集功能不可用', e); }
+})();
 import { reportUserError } from './error-report.js';
 
 let world = null;
@@ -177,7 +184,7 @@ function updateViewChoiceHint() {
     const warnings = flightStartWarnings
         .map(message => escapeHtml(message))
         .join('<br>');
-    el.innerHTML = `${VIEW_CHOICE_HINT_HTML}<br><span style="color:#fbbf24">Preload warning: ${warnings}. Tiles may continue loading after takeoff.</span>`;
+    el.innerHTML = `${VIEW_CHOICE_HINT_HTML}<br><span style="color:#9fb5ff">Preload warning: ${warnings}. Tiles may continue loading after takeoff.</span>`;
 }
 
 function showError(error) {
@@ -685,6 +692,187 @@ function getCameraHFov(now = performance.now()) {
     return cachedHFov;
 }
 
+// ---------------------------------------------------------------------------
+// YOPO 小地图 (真正的 3D Cesium viewer, 完整镜像 placement mode 主 world) —— 原本在
+// 用户未提交的 main.js 里(initYOPOMinimapViewer), 被一次误回退覆盖后按主 world 配置重建。
+// 关键: 小地图 viewer 通过 window.world 访问主世界实例(window.world.token /
+// window.world.assetId / window.world.localToCartesian)。之前黑屏的真正根因是
+// window.world 未被赋值(主 world 用 let 局部变量没有挂到 window)导致 init 第一行就
+// return、viewer 从未创建; 现 main.js 已暴露 window.world = world, 此处可正常初始化。
+// 必须镜像主 world 的 globe:false + requestRenderMode:false(连续渲染), 否则 3D Tiles
+// 流式加载不逐帧绘制 → 恒黑。
+// ---------------------------------------------------------------------------
+let yopoMinimapViewer = null;
+let yopoMinimapWorld = null; // 小地图对应的 CesiumWorld 实例(与主 world 同类, 保证渲染一致)
+let yopoMinimapDroneEntity = null;
+let yopoMinimapTargetEntity = null;
+let _yopoMiniInitPromise = null;
+let _yopoMiniRange = null; // 平滑后的 lookAt 距离(缩放)
+let _yopoMiniStop = false; // 小地图更新出错后停用, 避免每帧抛错拖垮主循环
+
+async function initYOPOMinimapViewer() {
+    // window.world 未就绪/已创建则跳过 (根因: 之前 !window.world 恒为真 → 永远 return)
+    if (yopoMinimapViewer || !window.world || !window.world.ready) return;
+    const Cesium = window.world.Cesium;
+    const host = document.getElementById('yopo-minimap');
+    if (!host) return;
+    // HUD 尚未显示时容器尺寸为 0, 延迟到可见后再创建 viewer (每帧重试)
+    if (host.clientWidth < 2 || host.clientHeight < 2) return;
+
+    // 沿用主 world 同款 CesiumWorld 类来创建小地图: 与主图(placement mode)渲染完全一致,
+    // globe 隐藏 / Google 3D Tiles 加载 / setOrigin / 相机等内部已正确处理, 不会出现默认地球。
+    const mini = new CesiumWorld('yopo-minimap', {
+        token: window.world.token,
+        assetId: window.world.assetId,
+    });
+    await mini.init();
+    yopoMinimapWorld = mini;
+    yopoMinimapViewer = mini.viewer;
+    const scene = yopoMinimapViewer.scene;
+    scene.screenSpaceCameraController.enableInputs = false; // 小地图只读, 禁止用户交互
+    // 隐藏主图控件(小地图不需要): 搜索框/主页按钮/帮助等
+    ['geocoder', 'homeButton', 'navigationHelpButton', 'baseLayerPicker',
+     'fullscreenButton', 'timeline', 'animation', 'selectionIndicator', 'infoBox'].forEach((n) => {
+        const w = yopoMinimapViewer[n];
+        if (w && w.container && w.container.style) w.container.style.display = 'none';
+    });
+
+    // 无人机(蓝)/目标(黄) 点, 始终绘制在最前
+    const alwaysFront = Number.POSITIVE_INFINITY;
+    yopoMinimapDroneEntity = yopoMinimapViewer.entities.add({
+        point: { pixelSize: 14, color: Cesium.Color.fromCssColorString('#39a0ff'),
+            outlineColor: Cesium.Color.WHITE, outlineWidth: 2,
+            disableDepthTestDistance: alwaysFront },
+        label: {
+            text: 'UAV', fillColor: Cesium.Color.WHITE,
+            font: '12px sans-serif', pixelOffset: new Cesium.Cartesian2(0, -18),
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE, outlineWidth: 2,
+            outlineColor: Cesium.Color.BLACK, showBackground: true,
+            backgroundColor: Cesium.Color.fromCssColorString('#39a0ff').withAlpha(0.6),
+            disableDepthTestDistance: alwaysFront,
+        },
+    });
+    yopoMinimapTargetEntity = yopoMinimapViewer.entities.add({
+        point: { pixelSize: 12, color: Cesium.Color.fromCssColorString('#ffd23a'),
+            outlineColor: Cesium.Color.WHITE, outlineWidth: 1,
+            disableDepthTestDistance: alwaysFront },
+        label: {
+            text: 'TARGET', fillColor: Cesium.Color.WHITE,
+            font: '12px sans-serif', pixelOffset: new Cesium.Cartesian2(0, -18),
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE, outlineWidth: 2,
+            outlineColor: Cesium.Color.BLACK, showBackground: true,
+            backgroundColor: Cesium.Color.fromCssColorString('#ffd23a').withAlpha(0.6),
+            disableDepthTestDistance: alwaysFront,
+        },
+    });
+
+    // 初始相机就位: 用主世界 W.localToCartesian 统一坐标框架(小地图帧未随放置模式重设原点, 会错位), 俯视(-89.9°)。
+    const initialLocal = { x: 0, y: 0, z: 0 };
+    const initialRange = 500;
+    const initPitch = Cesium.Math.toRadians(-89.9); // 近垂直俯视
+    const initEyeLocal = {
+        x: initialLocal.x,
+        y: initialLocal.y + initialRange * Math.sin(-initPitch),
+        z: initialLocal.z - initialRange * Math.cos(initPitch),
+    };
+    yopoMinimapViewer.scene.camera.setView({
+        destination: window.world.localToCartesian(initEyeLocal),
+        orientation: {
+            heading: Cesium.Math.toRadians(0),
+            pitch: initPitch,
+            roll: 0,
+        },
+    });
+}
+
+function _getYOPOMinimapTarget() {
+    if (drone && drone.yopoNavTarget) {
+        return { x: drone.yopoNavTarget.x, y: drone.yopoNavTarget.y, z: drone.yopoNavTarget.z };
+    }
+    if (yopoTargetSelectMode) {
+        const tx = parseFloat(document.getElementById('yopo-target-x')?.value);
+        const ty = parseFloat(document.getElementById('yopo-target-y')?.value);
+        const tz = parseFloat(document.getElementById('yopo-target-z')?.value);
+        if (Number.isFinite(tx) && Number.isFinite(ty) && Number.isFinite(tz)) {
+            return { x: tx, y: ty, z: tz };
+        }
+    }
+    return null;
+}
+
+function updateYOPOMinimap() {
+    if (!window.world || !window.world.ready) return;
+    if (_yopoMiniStop) return; // 之前出错已停用, 不再每帧抛错
+    // 懒初始化: 首次窗口就绪时创建小地图 viewer (异步, 不阻塞主循环)
+    if (!yopoMinimapViewer) {
+        if (!_yopoMiniInitPromise) {
+            _yopoMiniInitPromise = initYOPOMinimapViewer()
+                .catch(e => console.warn('[YOPO minimap] init failed', e))
+                .finally(() => { _yopoMiniInitPromise = null; });
+        }
+        return;
+    }
+    const Cesium = window.world.Cesium;
+    const W = window.world;
+    const target = _getYOPOMinimapTarget();
+
+    // Δ 文本
+    const hText = document.getElementById('yopo-target-height-text');
+    const dText = document.getElementById('yopo-target-delta-text');
+    if (hText) hText.textContent = target ? `Target altitude y: ${target.y.toFixed(2)}` : 'Target altitude y: --';
+    if (dText) {
+        if (target && drone) {
+            const dx = target.x - drone.x, dy = target.y - drone.y, dz = target.z - drone.z;
+            dText.textContent = `Δx/Δy/Δz to target: ${dx.toFixed(2)} / ${dy.toFixed(2)} / ${dz.toFixed(2)}`;
+        } else dText.textContent = 'Δx/Δy/Δz to target: --';
+    }
+
+    // 实体位置 (localToCartesian 把 ENU 本地坐标转成世界 Cartesian3)
+    try {
+        if (drone) {
+            yopoMinimapDroneEntity.position = W.localToCartesian({ x: drone.x, y: drone.y, z: drone.z });
+            yopoMinimapDroneEntity.show = true;
+        } else yopoMinimapDroneEntity.show = false;
+        if (target) {
+            yopoMinimapTargetEntity.position = W.localToCartesian(target);
+            yopoMinimapTargetEntity.show = true;
+        } else yopoMinimapTargetEntity.show = false;
+
+        // 相机跟随: 俯视(-89.9°)把无人机钉在画面正中心。统一使用主世界 W.localToCartesian 坐标框架,
+        // 避免小地图 CesiumWorld 实例的原点未随放置模式重设而错位导致无人机跑出画面。
+        // 缩放(range)按 无人机↔目标 距离自适应, 保证目标点始终在视野内。
+        const centerLocal = drone ? { x: drone.x, y: drone.y, z: drone.z } : (target || { x: 0, y: 0, z: 0 });
+        const dist = (drone && target) ? Math.hypot(drone.x - target.x, drone.z - target.z) : 0;
+        // range = 相机俯视高度; 基础视野放大(默认 150m 级), 且随 无人机→目标 距离
+        // 自适应: 系数 2.4 + 100m 余量, 保证设置/导航中目标点始终不超出视野。
+        const wantRange = Math.max(150, 2.4 * dist + 100);
+        if (_yopoMiniRange === null) _yopoMiniRange = wantRange;
+        else _yopoMiniRange += (wantRange - _yopoMiniRange) * 0.2; // 轻度平滑, 缩放及时不突跳
+
+        const R = _yopoMiniRange;
+        const pitchRad = Cesium.Math.toRadians(-89.9); // 近垂直俯视
+        // 相机放在无人机正上方(R 高度), 朝正下方俯视 (heading=0, pitch=-89.9), 等价于 lookAt(center, HPR(0,-89.9,R))
+        const eyeLocal = {
+            x: centerLocal.x,
+            y: centerLocal.y + R * Math.sin(-pitchRad),
+            z: centerLocal.z - R * Math.cos(pitchRad),
+        };
+        const eyeCart = W.localToCartesian(eyeLocal);
+        yopoMinimapViewer.scene.camera.setView({
+            destination: eyeCart,
+            orientation: {
+                heading: Cesium.Math.toRadians(0),
+                pitch: pitchRad,
+                roll: 0,
+            },
+        });
+    } catch (e) {
+        // 小地图任一步(Cesium 调用)出错都不应拖垮主循环/飞行; 停掉小地图并把真实错误打到 console
+        console.error('[YOPO minimap] update failed, 已停用小地图以免每帧抛错:', e);
+        _yopoMiniStop = true;
+    }
+}
+
 function gameLoop(now) {
     const frameDt = Math.min(MAX_PHYSICS_FRAME_DT, Math.max(0.001, (now - lastFrameTime) / 1000));
     lastFrameTime = now;
@@ -699,8 +887,18 @@ function gameLoop(now) {
             updateFlight(frameDt);
         }
     } catch (e) {
-        reportUserError('Frame update failed', e, {
-            key: 'game-loop',
+        // 飞行/物理更新出错: 与"小地图"分开报告, 便于定位
+        reportUserError('Flight update failed', e, {
+            key: 'flight-loop',
+            intervalMs: 3000,
+        });
+    }
+    try {
+        // 每帧刷新左下角 YOPO 俯视小地图 (目标点 + 无人机当前位置 + Δ 文本)
+        updateYOPOMinimap();
+    } catch (e) {
+        reportUserError('Minimap update failed', e, {
+            key: 'minimap-loop',
             intervalMs: 3000,
         });
     }
@@ -1204,7 +1402,7 @@ function createYOPOTargetMarker(x, y, z) {
             position,
             point: {
                 pixelSize: 16,
-                color: Cesium.Color.fromBytes(255, 200, 0, 255), // amber
+                color: Cesium.Color.fromCssColorString('#ffd23a'),
                 outlineColor: Cesium.Color.WHITE,
                 outlineWidth: 2,
                 disableDepthTestDistance: Number.POSITIVE_INFINITY,
@@ -1213,7 +1411,7 @@ function createYOPOTargetMarker(x, y, z) {
                 text: 'YOPO TARGET',
                 font: '12px sans-serif',
                 pixelOffset: new Cesium.Cartesian2(0, -24),
-                fillColor: Cesium.Color.fromBytes(255, 200, 0, 255),
+                fillColor: Cesium.Color.fromCssColorString('#cfe'),
                 outlineColor: Cesium.Color.BLACK,
                 outlineWidth: 2,
                 style: Cesium.LabelStyle.FILL_AND_OUTLINE,
@@ -1380,9 +1578,9 @@ function updateYOPOStatusUI() {
     if (avoidEl) {
         const src = drone.yopoDepthSource;
         if (src === 'true') {
-            avoidEl.innerHTML = '深度: <span style="color:#7fd07f">真值(射线)</span>';
+            avoidEl.innerHTML = '深度: <span style="color:#9fb5ff">真值(射线)</span>';
         } else if (src === 'da360') {
-            avoidEl.innerHTML = '深度: <span style="color:#f6b93b">DA360</span>';
+            avoidEl.innerHTML = '深度: <span style="color:#cfe">DA360</span>';
         } else {
             avoidEl.textContent = '深度: --';
         }
@@ -1464,7 +1662,7 @@ function updateKeyGuide() {
         '<kbd>← →</kbd>  Roll Left / Right',
         '<kbd>W S</kbd>  Motor Thrust',
         '<kbd>A D</kbd>  Yaw Left / Right',
-        '<span style="color:#8cff8c">Nose down builds forward speed</span>',
+        '<span style="color:#9fb5ff">Nose down builds forward speed</span>',
     ] : [
         '<kbd>↑ ↓</kbd>  Forward / Back',
         '<kbd>← →</kbd>  Strafe Left / Right',

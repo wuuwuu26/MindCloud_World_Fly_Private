@@ -3,3 +3,4 @@ __pycache__/
 tools/
 third_party/DA360/
 .trae/
+*.pth

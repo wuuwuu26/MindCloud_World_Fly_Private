@@ -129,7 +129,7 @@ yaw   = pi - (u + 0.5) / W * 2pi
 pitch = vfov / 2 - (v + 0.5) / H * vfov
 ```
 
-这保证投影模型与 YOPO_360 的 ERP 相机一致；区别是数据来源为 Cesium 渲染视图，而不是仿真栅格的直接 raycast。放置阶段会后台创建全景采样 viewer；确认出生点后会在用户可控前预采样一张全景首帧。飞行中默认 `panoMs=16`、`panoFace=192`、每个采样方向等待 `panoFrameDelayMs=8`，并最多等待 `panoFaceTileTimeoutMs=900` 让当前方向 tiles idle；首帧预加载使用 `panoPreloadFrameDelayMs=96`、`panoPreloadFaceTileTimeoutMs=6000` 和 `panoPreloadTimeoutMs=60000`，默认 `panoPreloadRequired=1`，未拿到完整 6 面首帧不会进入可控飞行。为了避免 Google Tiles 天空/极区采样在 ERP 顶部形成海市蜃楼状伪影，默认对顶部 10 度和底部 2 度做极区 guard；guard 区域保持 ERP 坐标，只向上下极点采样淡出，不会把整张图压缩到 guard 边界。可用 `panoTopPoleGuard` / `panoBottomPoleGuard` 调整或设为 0 关闭。
+这保证投影模型与 YOPO 原版的 ERP 相机一致；区别是数据来源为 Cesium 渲染视图，而不是仿真栅格的直接 raycast。放置阶段会后台创建全景采样 viewer；确认出生点后会在用户可控前预采样一张全景首帧。飞行中默认 `panoMs=16`、`panoFace=192`、每个采样方向等待 `panoFrameDelayMs=8`，并最多等待 `panoFaceTileTimeoutMs=900` 让当前方向 tiles idle；首帧预加载使用 `panoPreloadFrameDelayMs=96`、`panoPreloadFaceTileTimeoutMs=6000` 和 `panoPreloadTimeoutMs=60000`，默认 `panoPreloadRequired=1`，未拿到完整 6 面首帧不会进入可控飞行。为了避免 Google Tiles 天空/极区采样在 ERP 顶部形成海市蜃楼状伪影，默认对顶部 10 度和底部 2 度做极区 guard；guard 区域保持 ERP 坐标，只向上下极点采样淡出，不会把整张图压缩到 guard 边界。可用 `panoTopPoleGuard` / `panoBottomPoleGuard` 调整或设为 0 关闭。
 
 进入可控飞行前，主 Cesium 视图会预加载出生点周围区域，并分别等待第一人称和第三人称初始视角 tiles idle。默认 `flightPreloadStrict=0`，主视图只要目标区域覆盖率达标就继续；全景首帧预加载独立检查隐藏 viewer 的 6 个方向 tiles idle。只有显式设置 `?panoPreloadRequired=0` 时，才会允许全景首帧失败后进入飞行并让实时采样继续重试。
 
@@ -164,10 +164,10 @@ http://127.0.0.1:8080/?da360UploadWidth=672
 
 基于 YOPO 端到端导航网络，无人机可自主飞行到指定目标点。YOPO 接收 ERP 全景深度图、里程计和目标点，输出位置/速度/加速度/偏航指令，通过 SimpleFlight 级联 PID 控制器驱动无人机。
 
-### 导航架构（对齐 YOPO_360 原版）
+### 导航架构（对齐 YOPO 原版）
 
 - **网络输入**：`depth (1,2,192,384)`（通道 0 = 归一化深度，通道 1 = 有效 mask）+ 9 维观测（相机系速度/加速度/目标方向），经 `prepare_input` 展开为 `(1,9,6,12)`。
-- **轨迹选择（纯 YOPO argmin）**：网络输出 72 条候选轨迹（12 水平 × 6 垂直锚点）的终端状态（PVA）+ score。**严格遵循 YOPO_360 `test_yopo_ros.py`，部署端直接 `argmin(score)` 选最优轨迹**，不在部署端叠加任何几何碰撞代价。避障完全由网络在训练期 `safety_loss` 中学到的 score 提供（**学习式避障**），与官方部署实现完全一致。
+- **轨迹选择（纯 YOPO argmin）**：网络输出 72 条候选轨迹（12 水平 × 6 垂直锚点）的终端状态（PVA）+ score。**严格遵循 YOPO 原版 `test_yopo_ros.py` 部署实现，部署端直接 `argmin(score)` 选最优轨迹**，不在部署端叠加任何几何碰撞代价。避障完全由网络在训练期 `safety_loss` 中学到的 score 提供（**学习式避障**），与官方部署实现完全一致。
 - **目标引导**：score 内已含目标方向代价（训练时 `wg=0.15`），网络原生指向目标。
 - **3D 导航**：不做水平面投影，垂直避障由网络预测的 z 终端状态决定。
 - **轨迹生成**：三轴五阶多项式（Poly5Solver），从上次指令状态出发（`plan_from_reference=True`），轨迹连续、无往复。
@@ -211,9 +211,18 @@ YOPO_FORCE_BUILD=1 ./scripts/start_yopo_api.sh
 
 目标点标记在导航、到达后、停止后均保持可见，直到重新选取或取消目标，因此第二次导航时仍能看到目标位置。
 
+### 俯视小地图（目标地图）
+
+主界面左下角常驻一块 **Target Map (Top-Down)** 俯视小地图，飞行中实时刷新，用于直观掌握无人机与目标点的相对位置：
+
+- 地图以无人机为中心，按水平面投影显示无人机当前朝向、目标点位置，以及两者连线。
+- 地图下方两行文字分别给出**目标高度 y**（目标点在 Cesium 坐标系下的高度，单位 m）和**坐标差 Δx/Δy/Δz to target**（目标相对无人机的东/上/北方向位移，单位 m）。
+- 进入目标选择模式（按 `T`）后，地图会随数字键盘对目标点的移动同步更新，方便在空间上对齐目标。
+- 该小地图不含任何数据归属水印，纯前端绘制，不依赖外部地图服务。
+
 ### 深度图
 
-YOPO 需要 **384×192 ERP 全景深度图**（YOPO_360 原生输入格式），双通道：通道 0 = 归一化深度 [0,1]，通道 1 = 有效 mask。获取流程：
+YOPO 需要 **384×192 ERP 全景深度图**（YOPO 原生输入格式），双通道：通道 0 = 归一化深度 [0,1]，通道 1 = 有效 mask。获取流程：
 
 1. DA360 全景深度估计 → ERP 深度图（米制）
 2. 前端重投影/裁剪为 384×192 ERP，附加有效 mask

@@ -155,8 +155,11 @@
 
         /* Key Guide */
         #key-guide {
-            position: absolute; top: 50%; left: 16px; transform: translateY(-50%);
-            z-index: 15; pointer-events: none;
+            /* Anchored above the bottom-left target map instead of vertically centered,
+           to avoid overlapping the minimap. Width aligned with the minimap box (300px). */
+            position: absolute; bottom: 350px; left: 16px; width: 300px;
+            box-sizing: border-box;
+            z-index: 300; pointer-events: none;
             background: rgba(0,0,0,0.5); border-radius: 8px; padding: 12px 16px;
             font-family: 'Courier New', monospace; font-size: 12px; color: #ccc;
             line-height: 1.6; white-space: pre; display: none;
@@ -173,20 +176,32 @@
         /* HUD */
         #hud {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            pointer-events: none; z-index: 10; color: #0f0;
+            pointer-events: none; z-index: 25; color: #cfe;
             font-family: 'Courier New', monospace; font-size: 14px;
         }
         #hud.hidden { display: none; }
         #hud-top-left { position: absolute; top: 16px; left: 16px; }
-        #hud-top-right { position: absolute; top: 54px; right: 16px; text-align: right; }
+        #hud-top-right {
+            position: absolute; bottom: 520px; right: 16px; text-align: right;
+            background: rgba(0,0,0,0.5); padding: 6px 10px; border-radius: 8px;
+            border: 1px solid rgba(66,114,245,0.35); max-width: 220px;
+        }
         #hud-bottom-center { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); text-align: center; }
         #hud-bottom-left { position: absolute; bottom: 16px; left: 16px; }
-        .hud-label { color: #0a0; font-size: 11px; }
-        .hud-value { color: #0f0; font-size: 16px; font-weight: bold; }
-        .hud-subvalue { color: #0f0; font-size: 13px; font-weight: bold; }
-        .hud-kmh { color: #8cff8c; font-size: 11px; font-weight: 600; }
-        .hud-hint { color: #8cff8c; font-size: 11px; margin-top: 6px; max-width: 260px; line-height: 1.35; }
+        .hud-panel {
+            background: rgba(10,16,32,0.55);
+            border: 1px solid rgba(66,114,245,0.35);
+            border-radius: 8px;
+            padding: 6px 10px;
+            backdrop-filter: blur(3px);
+        }
+        .hud-label { color: #8cf; font-size: 10px; }
+        .hud-value { color: #cfe; font-size: 13px; font-weight: bold; }
+        .hud-subvalue { color: #cfe; font-size: 11px; font-weight: bold; }
+        .hud-kmh { color: #9fb5ff; font-size: 10px; font-weight: 600; }
+        .hud-hint { color: #9fb5ff; font-size: 10px; margin-top: 4px; max-width: 200px; line-height: 1.3; }
         .hud-warn { color: #f44; }
+        .hud-line { display: flex; justify-content: flex-end; align-items: baseline; gap: 6px; margin-top: 3px; }
 
         #panorama-sensor-panel {
             position: absolute;
@@ -235,7 +250,7 @@
             text-shadow: 0 1px 2px #000;
         }
         .panorama-status {
-            color: #7dd3fc;
+            color: #9fb5ff;
             font-size: 10px;
             font-weight: 600;
             letter-spacing: 0;
@@ -260,7 +275,7 @@
             letter-spacing: 0.3px;
         }
         .depth-legend-unit {
-            color: #93c5fd;
+            color: #9fb5ff;
             text-align: right;
         }
         .depth-colorbar {
@@ -393,8 +408,8 @@
             font-style:   var(--race-font-style);
             font-size: 19px;
             letter-spacing: 1px;
-            color: #4df;
-            text-shadow: 0 0 5px rgba(77, 220, 255, 0.45);
+            color: #9fb5ff;
+            text-shadow: 0 0 5px rgba(66, 114, 245, 0.45);
             margin: 3px 0 5px;
             text-align: center;
             font-variant-numeric: tabular-nums;
@@ -409,8 +424,8 @@
             font-style:   var(--race-font-style);
             font-size: 12px;
             letter-spacing: 0.5px;
-            color: #c084fc;
-            text-shadow: 0 0 4px rgba(192, 132, 252, 0.45);
+            color: #cfe;
+            text-shadow: 0 0 4px rgba(66, 114, 245, 0.45);
             font-variant-numeric: tabular-nums;
         }
         .hrp-best-time.empty { color: #556; text-shadow: none; }
@@ -443,7 +458,7 @@
         /* Attitude indicator */
         #attitude-indicator {
             position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            width: 160px; height: 160px; border: 2px solid rgba(0,255,0,0.3);
+            width: 160px; height: 160px; border: 2px solid rgba(66,114,245,0.4);
             border-radius: 50%; pointer-events: none;
         }
 
@@ -468,7 +483,7 @@
             border-radius: 4px; cursor: pointer; font-size: 12px; pointer-events: auto;
         }
         .assign-btn:hover { background: #4272F5; color: #000; }
-        .assign-btn.listening { background: #f80; border-color: #f80; color: #000; animation: pulse 0.8s infinite; }
+        .assign-btn.listening { background: #4272F5; border-color: #4272F5; color: #fff; animation: pulse 0.8s infinite; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
         .axis-label { color: #8cf; min-width: 60px; text-align: center; font-size: 13px; }
         input[type="checkbox"] { accent-color: #4272F5; }
@@ -493,9 +508,9 @@
         #armed-indicator {
             position: absolute; top: 50%; right: 16px; transform: translateY(-50%);
             padding: 6px 16px; border-radius: 4px; font-weight: bold; font-size: 14px;
-            z-index: 10; pointer-events: none;
+            z-index: 10; pointer-events: none; display: none;
         }
-        #armed-indicator.armed { background: rgba(0,200,0,0.3); color: #0f0; border: 1px solid #0f0; }
+        #armed-indicator.armed { background: rgba(66,114,245,0.3); color: #9fb5ff; border: 1px solid #4272F5; }
         #armed-indicator.disarmed { background: rgba(200,0,0,0.3); color: #f44; border: 1px solid #f44; }
 
         /* Loading overlay */
@@ -533,7 +548,7 @@
             width: 20px; height: 20px; display: none; pointer-events: none;
         }
         #spawn-marker::before, #spawn-marker::after {
-            content: ''; position: absolute; background: #f80;
+            content: ''; position: absolute; background: #4272F5;
         }
         #spawn-marker::before { width: 2px; height: 100%; left: 50%; transform: translateX(-50%); }
         #spawn-marker::after { width: 100%; height: 2px; top: 50%; transform: translateY(-50%); }
@@ -543,7 +558,7 @@
             display: none;
         }
         #spawn-altitude-panel {
-            position: absolute; right: 20px; bottom: 82px; width: min(340px, calc(100vw - 40px));
+            position: absolute; right: 20px; bottom: 112px; width: min(340px, calc(100vw - 40px));
             background: rgba(0,0,0,0.72); color: #d9e6ff; padding: 12px 14px;
             border: 1px solid rgba(66,114,245,0.55); border-radius: 8px;
             font-family: 'Courier New', monospace; font-size: 12px;
@@ -656,20 +671,29 @@
 
     <!-- HUD overlay -->
     <div id="hud" class="hidden">
-        <div id="hud-top-left">
-            <div class="hud-label">ALT (m)</div>
-            <div class="hud-value" id="hud-altitude">0.0</div>
-            <div class="hud-label" style="margin-top:8px;">V/S (m/s)</div>
-            <div class="hud-value" id="hud-vspeed">0.0</div>
+        <div id="hud-top-left"></div>
+        <!-- YOPO target top-down minimap (persistent, bottom-left of main view) -->
+        <div id="yopo-minimap-overlay" style="position:absolute;left:16px;bottom:16px;z-index:5;background:rgba(8,8,16,0.55);border:1px solid #446;border-radius:8px;padding:8px;width:300px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+                <span style="font-size:12px;color:#8aa;">Target Map (Top-Down)</span>
+                <button id="yopo-minimap-reset" style="display:none;font-size:11px;color:#cfe;background:rgba(40,60,90,0.85);border:1px solid #468;border-radius:5px;padding:2px 8px;cursor:pointer;">Reset View</button>
+            </div>
+            <div id="yopo-minimap" style="width:100%;height:200px;position:relative;overflow:hidden;border:1px solid #335;border-radius:6px;background:#0a0a12;"></div>
+            <div style="font-size:12px;color:#aaa;line-height:1.5;margin-top:4px;">
+                <div id="yopo-target-height-text">Target altitude y: --</div>
+                <div id="yopo-target-delta-text">Δx/Δy/Δz to target: --</div>
+            </div>
         </div>
+        <!-- ALT/V/S (incl. TGT/LIM speed, FPS) kept on the TOP-RIGHT. Compact single-line
+             rows keep it clear of the nose RGB/DA360 panorama panel (bottom-right) and the
+             gear / armed indicators on the right edge. -->
         <div id="hud-top-right">
-            <div class="hud-label">GND SPD (m/s)</div>
-            <div class="hud-value" id="hud-gspeed">0.0</div>
-            <div class="hud-label" style="margin-top:8px;" id="hud-speed-command-label">TGT / LIM (m/s)</div>
-            <div class="hud-subvalue" id="hud-speed-command">0.0 / 83.3</div>
-            <div class="hud-hint" id="hud-speed-hint"></div>
-            <div class="hud-label" style="margin-top:8px;">FPS</div>
-            <div class="hud-value" id="hud-fps">0</div>
+            <div class="hud-line"><span class="hud-label">FPS</span><span class="hud-value" id="hud-fps">0</span></div>
+            <div class="hud-line"><span class="hud-label">ALT (m)</span><span class="hud-value" id="hud-altitude">0.0</span></div>
+            <div class="hud-line"><span class="hud-label">V/S (m/s)</span><span class="hud-value" id="hud-vspeed">0.0</span></div>
+            <div class="hud-line"><span class="hud-label">GND SPD (m/s)</span><span class="hud-value" id="hud-gspeed">0.0</span></div>
+            <div class="hud-line"><span class="hud-label" id="hud-speed-command-label">TGT / LIM (m/s)</span><span class="hud-subvalue" id="hud-speed-command">0.0 / 83.3</span></div>
+            <div class="hud-hint" id="hud-speed-hint" style="text-align:right;margin-top:6px;"></div>
         </div>
         <div id="hud-bottom-center">
             <div id="hud-collision-warn" class="hud-warn" style="display:none;">COLLISION</div>
@@ -690,7 +714,7 @@
                 <span class="hrp-best-time empty" id="hrp-best-time">--:--.---</span>
             </div>
         </div>
-        <div id="hud-bottom-left">
+        <div id="hud-bottom-left" class="hud-panel" style="left:auto;right:64px;bottom:18px;text-align:right;">
             <div class="hud-label">CONTROLLER</div>
             <div class="hud-value" id="hud-controller">Keyboard</div>
         </div>
@@ -797,7 +821,7 @@
             </div>
         </div>
         <div style="font-size:12px;color:#8aa;margin:-2px 0 8px;line-height:1.4;">
-            Drone (Easy): ↑/↓ controls forward/back speed, W/S climbs or descends, Shift boosts lower speed settings up to the 300 km/h cap. FPV (Manual): W/S is motor thrust, so forward flight needs pitch. SimpleFlight (AirSim): AirSim simpleflight 级联 PID 端口，输入映射同 Easy，但使用 4 层级联（位置→速度→姿态→角速率）。YOPO Navigation: 端到端自主导航，需启动 YOPO 后端服务，点击"选取目标点"后用数字键盘移动目标，5确认并自动开始导航。
+            Drone (Easy): ↑/↓ controls forward/back speed, W/S climbs or descends, Shift boosts lower speed settings up to the 300 km/h cap. FPV (Manual): W/S is motor thrust, so forward flight needs pitch. SimpleFlight (AirSim): AirSim simpleflight cascaded PID port; input mapping same as Easy, but uses a 4-stage cascade (position → velocity → attitude → angular rate). YOPO Navigation: end-to-end autonomous navigation; requires the YOPO backend service running. Click "Pick Target" then use the numeric keypad to move the target; press 5 to confirm and auto-start navigation.
         </div>
         <div class="setting-row">
             <label>Easy Max Speed (m/s; 83.3 = 300 km/h)</label>
@@ -895,7 +919,7 @@
 
         <h3>SimpleFlight Gains (AirSim)</h3>
         <div style="font-size:12px;color:#8aa;margin:-2px 0 8px;line-height:1.4;">
-            AirSim simpleflight 级联 PID 增益。默认值对应 AirSim Params.hpp。仅在 Flight Mode = SimpleFlight 时生效。
+            AirSim simpleflight cascaded PID gains. Defaults match AirSim Params.hpp. Only used when Flight Mode = SimpleFlight.
         </div>
         <div class="setting-row">
             <label>Pos Kp</label>
@@ -977,79 +1001,36 @@
 
         <h3>YOPO Navigation</h3>
         <div style="font-size:12px;color:#8aa;margin:-2px 0 8px;line-height:1.4;">
-            端到端自主导航。飞行中按 <b>T</b> 开始设置目标（数字键盘 8/2 沿机头前后、4/6 垂直机头左右、9/3 上下，5 确认开始导航，0 取消），按 <b>X</b> 停止导航。
+            End-to-end autonomous navigation. In flight, press <b>T</b> to start picking a target (Numpad 8/2 forward/back along heading, 4/6 left/right, 9/3 up/down; 5 confirms & starts, 0 cancels). Press <b>X</b> to stop navigation.
         </div>
         <div class="setting-row">
-            <label>目标点 X</label>
+            <label>Target X</label>
             <div class="controls">
                 <input type="number" id="yopo-target-x" step="0.1" value="0" style="width:80px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
             </div>
         </div>
         <div class="setting-row">
-            <label>目标点 Y</label>
+            <label>Target Y</label>
             <div class="controls">
                 <input type="number" id="yopo-target-y" step="0.1" value="2" style="width:80px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
             </div>
         </div>
         <div class="setting-row">
-            <label>目标点 Z</label>
+            <label>Target Z</label>
             <div class="controls">
                 <input type="number" id="yopo-target-z" step="0.1" value="0" style="width:80px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
             </div>
         </div>
         <div style="display:flex;gap:8px;margin:8px 0;">
-            <button class="assign-btn" id="yopo-select-target-btn" style="flex:1;">选取目标点</button>
-            <button class="assign-btn" id="yopo-start-nav-btn" style="flex:1;background:#285e28;">开始导航</button>
-            <button class="assign-btn" id="yopo-stop-nav-btn" style="flex:1;background:#5e2828;">停止导航</button>
+            <button class="assign-btn" id="yopo-select-target-btn" style="flex:1;">Pick Target</button>
+            <button class="assign-btn" id="yopo-start-nav-btn" style="flex:1;background:#285e6e;">Start Nav</button>
+            <button class="assign-btn" id="yopo-stop-nav-btn" style="flex:1;background:#5e285e;">Stop Nav</button>
         </div>
         <div style="font-size:12px;color:#aaa;line-height:1.6;margin-top:4px;">
-            <span id="yopo-status-text">状态: 未激活</span><br>
-            <span id="yopo-dist-text">到目标距离: --</span><br>
-            <span id="yopo-count-text">推理计数: 0</span><br>
-            <span id="yopo-avoid-text">深度: --</span>
-        </div>
-
-        <h3>Cesium 数据集采集</h3>
-        <div style="font-size:12px;color:#8aa;margin:-2px 0 8px;line-height:1.4;">
-            在 Cesium 真实世界采集训练样本, 落盘格式与合成 Simulator 一致, 可直接 train_yopo.py。
-            每个 map 区域请保持较小 (radius ≤ 15m, 因 ESDF 体素 0.2m)。需先启动 cesium_dataset_server.py (:8003)。
-        </div>
-        <div class="setting-row">
-            <label>采集模式</label>
-            <div class="controls">
-                <select id="cds-mode" style="width:auto;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
-                    <option value="da360" selected>DA360 (与运行时一致)</option>
-                    <option value="raycast">Cesium 射线 (离线快速)</option>
-                </select>
-            </div>
-        </div>
-        <div class="setting-row">
-            <label>区域数</label>
-            <div class="controls"><input type="number" id="cds-num-maps" value="4" min="1" max="50" style="width:70px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;"></div>
-        </div>
-        <div class="setting-row">
-            <label>每区样本</label>
-            <div class="controls"><input type="number" id="cds-samples" value="300" min="1" max="5000" style="width:70px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;"></div>
-        </div>
-        <div class="setting-row">
-            <label>半径(m)</label>
-            <div class="controls"><input type="number" id="cds-radius" value="12" min="1" max="50" style="width:70px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;"></div>
-        </div>
-        <div class="setting-row">
-            <label>最大深度(m)</label>
-            <div class="controls"><input type="number" id="cds-max-depth" value="20" min="1" max="100" style="width:70px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;"></div>
-        </div>
-        <div class="setting-row">
-            <label>服务地址</label>
-            <div class="controls"><input type="text" id="cds-server" value="http://localhost:8003" style="width:160px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;"></div>
-        </div>
-        <div style="display:flex;gap:8px;margin:8px 0;">
-            <button class="assign-btn" id="cds-set-region-btn" style="flex:1;">以当前机位为中心</button>
-            <button class="assign-btn" id="cds-start-btn" style="flex:1;background:#285e28;">开始采集</button>
-            <button class="assign-btn" id="cds-stop-btn" style="flex:1;background:#5e2828;">停止</button>
-        </div>
-        <div style="font-size:12px;color:#aaa;line-height:1.6;margin-top:4px;">
-            <span id="cds-status">状态: 空闲</span>
+            <span id="yopo-status-text">Status: Inactive</span><br>
+            <span id="yopo-dist-text">Distance to target: --</span><br>
+            <span id="yopo-count-text">Inference count: 0</span><br>
+            <span id="yopo-avoid-text">Depth: --</span>
         </div>
 
         <h3>Physics</h3>
@@ -1087,8 +1068,8 @@
         <div class="setting-row">
             <label>Drone Size (m)</label>
             <div class="controls">
-                <input type="range" id="phys-drone-size" min="0.1" max="1.0" value="0.15" step="0.05">
-                <input type="number" id="phys-drone-size-num" min="0.1" max="1.0" step="0.05" value="0.15" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+                <input type="range" id="phys-drone-size" min="0.1" max="1.0" value="0.3" step="0.05">
+                <input type="number" id="phys-drone-size-num" min="0.1" max="1.0" step="0.05" value="0.3" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
             </div>
         </div>
         <div class="setting-row">
@@ -1130,7 +1111,7 @@
                         window.googleTilesFlightStart();
                         return;
                     }
-                    import('./src/main.js?v=20260703-panorama-tile-idle')
+                    import('./src/main.js?v=20260814b-panorama-tile-idle')
                         .then(function (mod) {
                             var start = window.googleTilesFlightStart || mod.startTilesMode;
                             if (typeof start === 'function') start();
@@ -1141,6 +1122,6 @@
             });
         }());
     </script>
-    <script type="module" src="src/main.js?v=20260703-panorama-tile-idle"></script>
+    <script type="module" src="src/main.js?v=20260814b-panorama-tile-idle"></script>
 </body>
 </html>

@@ -12,7 +12,7 @@ set -Eeuo pipefail
 #   Important environment variables:
 #       YOPO_MODE          docker|local (default docker)
 #       YOPO_IMAGE         docker image tag (default mindcloud-yopo:latest)
-#       YOPO_MODEL_PATH    path to YOPO checkpoint (default third_party/yopo/saved/YOPO_18/epoch20.pth)
+#       YOPO_MODEL_PATH    path to YOPO checkpoint (default third_party/yopo/saved/YOPO_40/epoch50.pth)
 #       YOPO_PORT          host port exposed (default 5689)
 #       YOPO_FORCE_BUILD   1=always rebuild image, 0=use cached image if present (default 0)
 #       YOPO_GPUS          docker --gpus value, or "none" for CPU (default all)
@@ -20,7 +20,7 @@ set -Eeuo pipefail
 #
 #   Note on depth images:
 #       DA360 uses a 360 equirectangular RGB image and runs a depth-estimation
-#       model server (port 5688).  YOPO_360 expects a 192x384 ERP panorama
+#       model server (port 5688).  YOPO 原版 expects a 192x384 ERP panorama
 #       depth map in metres (encoding '32FC1') plus a uint8 validity mask
 #       (255=valid).  DA360's raw output is already ERP, so it is resized
 #       directly to 192x384 instead of being reprojected into a pinhole.
@@ -31,7 +31,7 @@ MODE="${YOPO_MODE:-docker}"
 IMAGE="${YOPO_IMAGE:-mindcloud-yopo:latest}"
 NAME="${YOPO_CONTAINER_NAME:-mindcloud-yopo-api}"
 PORT="${YOPO_PORT:-5689}"
-MODEL_PATH="${YOPO_MODEL_PATH:-$PROJECT_ROOT/third_party/yopo/saved/YOPO_18/epoch20.pth}"
+MODEL_PATH="${YOPO_MODEL_PATH:-$PROJECT_ROOT/third_party/yopo/saved/YOPO_40/epoch50.pth}"
 BASE_IMAGE="${YOPO_BASE_IMAGE:-pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime}"
 BUILD_NETWORK="${YOPO_BUILD_NETWORK:-host}"
 BUILD_RETRIES="${YOPO_BUILD_RETRIES:-3}"

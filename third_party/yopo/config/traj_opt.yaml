@@ -2,7 +2,7 @@
 # 规划巡航速度上限(米/秒)。归一化用的是 vel_max_train(固定 6.0), 改这里只放大
 # 物理轨迹速度, 不影响网络输入分布。原版 6.0 偏慢, 已提到 12.0 (2倍); 可经
 # 服务端环境变量 YOPO_VELOCITY 进一步覆盖(注意: 速度越高, 同推理延迟下滑行距离越长)。
-velocity: 12.0
+velocity: 16.0
 fixed_height: 0.8  # keep the local terminal altitude fixed in world frame
 
 # IMPORTANT: vel_max and acc_max in training
