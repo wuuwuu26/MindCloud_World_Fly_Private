@@ -69,6 +69,52 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 - 本地开发模式需要 Python 3
 - DA360 深度推理需要 NVIDIA GPU、NVIDIA Container Toolkit、Python 3 + pip，以及可访问模型下载地址的网络
 
+## Docker 构建说明
+
+本项目共三套独立构建的容器，各自的镜像名、基础镜像与重建触发方式都不同：
+
+| 容器 | 镜像 | 基础镜像 | Dockerfile | 入口脚本 |
+|------|------|----------|------------|----------|
+| 主飞行进程 | `google-tiles-flight` | `tumgis/3dcitydb-web-map:alpine-v2.0.0`（自带 Node + Cesium） | `Dockerfile.cesium` | `launch.sh` |
+| YOPO 避障后端 | `mindcloud-yopo` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime`（CUDA） | `Dockerfile.yopo` | `scripts/start_yopo_api.sh` |
+| DA360 深度服务 | `mindcloud-da360` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime`（CUDA） | `Dockerfile.da360` | `scripts/start_da360_api.sh` |
+
+### 主飞行进程（`Dockerfile.cesium`）
+
+- 把整个项目 `COPY` 到容器内 `/var/www/google-tiles-flight`，`CMD node scripts/server.js` 启动 Express 静态服务（同时提供 `/api/path/*.json` 门路线路持久化 API），`EXPOSE 8000`。
+- 由 `launch.sh` 触发构建：仅当镜像**不存在**或加了 `--rebuild` 时才 `docker build`，否则直接复用已有镜像。
+- 运行时用只读卷挂载 `src/`、`index.html`，读写挂载 `asset/gate-paths`，因此**改前端 JS/HTML 无需重建镜像**——重启容器并在浏览器强刷（Ctrl+F5）即可生效。
+
+### YOPO 避障后端（`Dockerfile.yopo`）
+
+- 系统依赖：`libgl1-mesa-glx`、`libglib2.0-0`、`ca-certificates`；Python 依赖：`numpy<2`、`pillow`、`opencv-python-headless`、`scipy`、`flask`、`flask-cors`、`ruamel.yaml`、`websockets`。
+- 镜像内直接拷入 `scripts/yopo_server.py` 与 `third_party/yopo/`（含权重）。
+- `scripts/start_yopo_api.sh` 构建/运行要点：
+  - 构建用 `--network=host`，让容器内 `127.0.0.1:7890` 能访问宿主机代理装 pip；并把宿主 `HTTP(S)/FTP/ALL/NO_PROXY` 转发为 build args（`YOPO_PIP_NO_PROXY=1` 可关闭）。
+  - 触发重建：镜像不存在，或 `YOPO_FORCE_BUILD=1`；失败自动重试 `YOPO_BUILD_RETRIES`（默认 3）。
+  - 运行时只读挂载模型权重、`yopo_server.py`、`third_party/yopo` 源码——**改 Python / 权重不用重建镜像**，重启容器即生效。
+  - 端口 5689（HTTP）+ 5690（WebSocket）；默认 `--gpus all`，`YOPO_GPUS=none` 走 CPU。
+
+### DA360 深度服务（`Dockerfile.da360`）
+
+- Python 依赖：`numpy<2`、`flask`、`flask-cors`、`opencv-python-headless`、`pillow`、`timm`、`tqdm`、`xformers`。
+- `COPY third_party/DA360` 进镜像，但 DA360 源码在 `.gitignore` / `.dockerignore` 中，**构建前需先跑 `scripts/download_da360_model.sh`**（用 `gdown` 从 Google Drive 下载权重，并用 `git clone --depth 1` 拉取 DA360 源码）。
+- `scripts/start_da360_api.sh` 构建/运行要点：
+  - 构建网络与代理转发同 YOPO（`DA360_BUILD_NETWORK`；额外从 `git config` 探测宿主机代理 `DA360_BUILD_PROXY`）。
+  - 会给镜像打 `mindcloud.da360.server_sha` label：已有镜像且 server 脚本 SHA 一致时**自动跳过重建**；`DA360_FORCE_BUILD=1` 或脚本内容变化才重建。
+  - 构建失败时**默认不启动过期镜像**（可用 `DA360_ALLOW_STALE_IMAGE=1` 放宽）。
+  - 端口 5688；运行时只读挂载 `da360_server.py` 与模型权重。
+
+### 构建超时 / 失败的常见原因
+
+- 两个 CUDA 后端的基础镜像 `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime` 体积很大，网络差时从 Docker Hub 拉取容易超时（`start_da360_api.sh` 失败提示中也直接点明了这一点）。
+- 处理办法：脚本已内置 3 次重试，网络恢复后重跑即可；或保证本机 `127.0.0.1:7890` 代理可用；也可把 `YOPO_BASE_IMAGE` / `DA360_BASE_IMAGE` 指向本地或镜像源镜像。
+- 装 pip 依赖失败时，请确认以 `--network=host` 构建且代理可达。
+
+### `.dockerignore`
+
+构建上下文排除了 `.git`、`node_modules`、`__pycache__`、`*.pyc`、`scene/*`、`asset/gate-paths/*.tmp`、`third_party/DA360`，避免把无关/大文件打进镜像。
+
 ## 启动主进程
 默认
 ```bash
