@@ -25,8 +25,18 @@ cd MindCloud_World_Fly_Private
 # 常用方式
 PORT=18081 ./restart_all.sh        # 指定主进程端口
 ./restart_all.sh --detach          # Docker 后台运行
-docker rm -f google-tiles-flight da360-api yopo-api   # 停止全部后台容器
+docker rm -f google-tiles-flight mindcloud-da360-api mindcloud-yopo-api   # 停止全部后台容器
 ```
+
+三个容器的名字由 [restart_all.sh](file:///workspace/restart_all.sh) 顶部的 `MAIN_NAME` / `DA360_NAME` / `YOPO_NAME` 定义（与各入口脚本的默认容器名一致）：
+
+| 容器名 | 用途 | 定义处 |
+|--------|------|--------|
+| `google-tiles-flight` | 主飞行进程（`http://127.0.0.1:8080`） | `launch.sh` 的 `NAME="${NAME:-google-tiles-flight}"` |
+| `mindcloud-da360-api` | DA360 深度服务（`http://127.0.0.1:5688`） | `scripts/start_da360_api.sh` 的 `DA360_CONTAINER_NAME` |
+| `mindcloud-yopo-api` | YOPO 避障后端（`http://127.0.0.1:5689`） | `scripts/start_yopo_api.sh` 的 `YOPO_CONTAINER_NAME` |
+
+如需改名，可设置对应的环境变量覆盖（如 `DA360_CONTAINER_NAME=my-da360 ./restart_all.sh`），停止时请用改动后的名字。
 
 若只想先飞（纯键盘/手柄/RC，不依赖子服务），也可单独运行主进程：
 
