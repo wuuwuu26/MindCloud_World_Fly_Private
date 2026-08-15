@@ -61,7 +61,7 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 ## 环境要求
 
 - Docker Engine
-- Chrome / Chromium
+- 一个支持 WebGL 的现代浏览器（用于打开 `http://127.0.0.1:8080` 使用模拟器）
 - 浏览器可以访问 Cesium Ion 和 Google 3D Tiles
 - 本地开发模式需要 Python 3
 - DA360 深度推理需要 NVIDIA GPU、NVIDIA Container Toolkit、Python 3 + pip，以及可访问模型下载地址的网络
