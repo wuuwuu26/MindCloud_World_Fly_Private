@@ -9,47 +9,57 @@ git clone https://github.com/wuuwuu26/MindCloud_World_Fly_Private.git
 cd MindCloud_World_Fly_Private
 ```
 
-本仓库**不使用 Git LFS**，模型权重（`.pth`）已通过 `.gitignore` 排除，克隆后即可直接运行，无需执行 `git lfs pull` 或安装 Git LFS。
+本仓库**不使用 Git LFS**：YOPO 导航权重已直接提交（克隆即得），DA360 深度权重通过下载脚本获取（见下文），无需 `git lfs pull` 或安装 Git LFS。
 
-## 快速开始（最小可飞）
+> 注意：DA360 的源码与权重均在 `.gitignore` 中（`third_party/DA360/`），克隆后需自行补齐 DA360 源码并运行下载脚本才能启用其深度服务。
 
-1. 克隆仓库（见上）。
-2. 启动主进程：
-   ```bash
-   ./launch.sh
-   ```
-3. 浏览器打开 `http://127.0.0.1:8080`，点击 **Start Google 3D Tiles Flight**，进入放置模式设置出生点后按 `O` 起飞，即可用键盘飞行。
+## 快速开始（一键启动全部服务）
 
-此时**不依赖任何模型权重**即可飞行（纯键盘/手柄/RC 控制）。需要 3D 避障自主导航时，再按需准备 YOPO 与 DA360 权重（见下文）。
+推荐使用 `restart_all.sh` 一次性拉起主进程、DA360 与 YOPO 三个服务：
 
 ```bash
-# 常用启动方式
-PORT=18081 ./launch.sh              # 端口被占用时
-./launch.sh --no-open               # 只启动服务，不自动打开浏览器
-./launch.sh --detach                # Docker 后台运行
-docker rm -f google-tiles-flight    # 停止后台容器
+./restart_all.sh
+```
+
+该脚本等价于依次启动：DA360 深度服务 → YOPO 导航服务 → 主飞行进程（`launch.sh`）。启动后浏览器打开 `http://127.0.0.1:8080`，点击 **Start Google 3D Tiles Flight**，进入放置模式设置出生点后按 `O` 起飞，即可用键盘飞行。
+
+```bash
+# 常用方式
+PORT=18081 ./restart_all.sh        # 指定主进程端口
+./restart_all.sh --no-open         # 只启动服务，不自动打开浏览器
+./restart_all.sh --detach          # Docker 后台运行
+docker rm -f google-tiles-flight da360-api yopo-api   # 停止全部后台容器
+```
+
+若只想先飞（纯键盘/手柄/RC，不依赖子服务），也可单独运行主进程：
+
+```bash
+./launch.sh
 ```
 
 ## 模型权重
 
 | 模型 | 是否随仓库提供 | 获取方式 |
 |------|----------------|----------|
-| DA360 深度模型 | 否 | 脚本自动下载：`./scripts/download_da360_model.sh`（走 Google Drive，需 `gdown`） |
-| YOPO 导航模型 | 否 | 自行放置 `.pth` 到 `third_party/yopo/saved/`（见下） |
+| YOPO 导航权重 | **是**（直接提交，≤100MB） | 克隆即得，位于 `third_party/yopo/saved/`（默认 `YOPO_40/epoch50.pth`） |
+| DA360 深度权重 | 否（约 1.3GB，超限） | 下载脚本：`./scripts/download_da360_model.sh`（Google Drive，需 `gdown`） |
 
 ### YOPO 导航权重
 
-仓库不包含 YOPO 的 `.pth` 权重文件（已被 `.gitignore` 排除）。请将权重放到默认路径，或用环境变量 `YOPO_MODEL_PATH` 指定任意本地路径：
+已直接提交到仓库，克隆后即位于 `third_party/yopo/saved/YOPO_40/epoch50.pth`。默认路径见 `scripts/start_yopo_api.sh`（`YOPO_MODEL_PATH`），可用环境变量覆盖：
 
 ```bash
-# 默认路径（见 scripts/start_yopo_api.sh）
-third_party/yopo/saved/YOPO_40/epoch50.pth
-
-# 或自定义
 YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 ```
 
-缺失 YOPO 权重时，YOPO 后端（`scripts/start_yopo_api.sh`）启动会报错，但**主飞行与 DA360 深度功能不受影响**。
+### DA360 深度权重
+
+因单文件超过 GitHub 100MB 限制，未纳入仓库，请运行下载脚本（需先 `pip install gdown`）：
+
+```bash
+./scripts/download_da360_model.sh
+# 脚本会将权重放到 third_party/DA360/checkpoints/DA360_large.pth
+```
 
 ## 环境要求
 
