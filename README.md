@@ -2,6 +2,55 @@
 
 浏览器中的 Google Photorealistic 3D Tiles 穿越机驾驶器，集成 YOPO 端到端神经网络自主导航（3D 避障）。进入页面后选择城市、放置出生点，然后用键盘、手柄或 RC 遥控器飞行，或设置目标点让 YOPO 自主导航。右下角可显示机头 360 ERP 全景 RGB 和 DA360 深度。
 
+## 克隆仓库
+
+```bash
+git clone https://github.com/wuuwuu26/MindCloud_World_Fly_Private.git
+cd MindCloud_World_Fly_Private
+```
+
+本仓库**不使用 Git LFS**，模型权重（`.pth`）已通过 `.gitignore` 排除，克隆后即可直接运行，无需执行 `git lfs pull` 或安装 Git LFS。
+
+## 快速开始（最小可飞）
+
+1. 克隆仓库（见上）。
+2. 启动主进程：
+   ```bash
+   ./launch.sh
+   ```
+3. 浏览器打开 `http://127.0.0.1:8080`，点击 **Start Google 3D Tiles Flight**，进入放置模式设置出生点后按 `O` 起飞，即可用键盘飞行。
+
+此时**不依赖任何模型权重**即可飞行（纯键盘/手柄/RC 控制）。需要 3D 避障自主导航时，再按需准备 YOPO 与 DA360 权重（见下文）。
+
+```bash
+# 常用启动方式
+PORT=18081 ./launch.sh              # 端口被占用时
+./launch.sh --no-open               # 只启动服务，不自动打开浏览器
+./launch.sh --detach                # Docker 后台运行
+docker rm -f google-tiles-flight    # 停止后台容器
+```
+
+## 模型权重
+
+| 模型 | 是否随仓库提供 | 获取方式 |
+|------|----------------|----------|
+| DA360 深度模型 | 否 | 脚本自动下载：`./scripts/download_da360_model.sh`（走 Google Drive，需 `gdown`） |
+| YOPO 导航模型 | 否 | 自行放置 `.pth` 到 `third_party/yopo/saved/`（见下） |
+
+### YOPO 导航权重
+
+仓库不包含 YOPO 的 `.pth` 权重文件（已被 `.gitignore` 排除）。请将权重放到默认路径，或用环境变量 `YOPO_MODEL_PATH` 指定任意本地路径：
+
+```bash
+# 默认路径（见 scripts/start_yopo_api.sh）
+third_party/yopo/saved/YOPO_40/epoch50.pth
+
+# 或自定义
+YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
+```
+
+缺失 YOPO 权重时，YOPO 后端（`scripts/start_yopo_api.sh`）启动会报错，但**主飞行与 DA360 深度功能不受影响**。
+
 ## 环境要求
 
 - Docker Engine
