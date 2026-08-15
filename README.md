@@ -9,8 +9,6 @@ git clone https://github.com/wuuwuu26/MindCloud_World_Fly_Private.git
 cd MindCloud_World_Fly_Private
 ```
 
-本仓库**不使用 Git LFS**：YOPO 导航权重已直接提交（克隆即得），DA360 深度权重通过下载脚本获取（见下文），无需 `git lfs pull` 或安装 Git LFS。
-
 > 注意：DA360 的源码与权重均在 `.gitignore` 中（`third_party/DA360/`），克隆后需自行补齐 DA360 源码并运行下载脚本才能启用其深度服务。
 
 ## 快速开始（一键启动全部服务）
