@@ -23,7 +23,6 @@ cd MindCloud_World_Fly_Private
 
 ```bash
 # 常用方式
-PORT=18081 ./restart_all.sh        # 指定主进程端口
 ./restart_all.sh --detach          # Docker 后台运行
 docker rm -f google-tiles-flight mindcloud-da360-api mindcloud-yopo-api   # 停止全部后台容器
 ```
