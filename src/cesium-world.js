@@ -40,7 +40,7 @@ const DEFAULT_VIEW = {
 const CESIUM_DRONE_MODEL_URI = 'asset/models/CesiumDrone.glb';
 const HEIGHT_CACHE_TTL_MS = 140;
 const HEIGHT_CACHE_LIMIT = 256;
-const PICK_CACHE_TTL_MS = 400;   // pickLocalRay 方向分桶缓存有效期: 覆盖 ~24 帧@60fps, 飞行中(每帧移动~0.08m)可跨多帧命中
+const PICK_CACHE_TTL_MS = 150;   // pickLocalRay 方向分桶缓存有效期: 由原 400ms 缩短到 150ms, 建筑流式加载完成后更快重新探测到, 缩小穿模窗口
 const PANORAMA_FACE_DEFS = [
     { name: 'front', dir: { x: 0, y: 0, z: -1 }, up: { x: 0, y: 1, z: 0 } },
     { name: 'right', dir: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 } },
@@ -1384,9 +1384,12 @@ export class CesiumWorld {
         // 对几何避障/硬碰撞兜底这类安全网足够安全; 主轨迹仍由 YOPO 决定。这是缓解导航帧率低的
         // 关键手段(瓦片拾取抖动主因), 帧率恢复后第二个小地图 viewer 的渲染也会随之恢复。
         const nowP = performance.now();
-        const oKey = `${Math.round(originLocal.x / 0.5)}:${Math.round(originLocal.y / 0.5)}:${Math.round(originLocal.z / 0.5)}`;
-        const dKey = `${Math.round(dir.x * 36)}:${Math.round(dir.y * 36)}:${Math.round(dir.z * 36)}`;
-        const pKey = `${oKey}|${dKey}|${Math.round((maxDistance || 0) * 4)}`;
+        // 量化粒度由 0.5m/36/4 细化到 0.25m/72/8: 桶更密 → 无人机稍一移动/转向就换新桶重新
+        // 拾取, 建筑流式加载完成后能更快被发现(配合 150ms TTL 进一步缩小漏检窗口)。代价是
+        // GPU 拾取次数上升, 此为方案B权衡(换更及时的障碍感知, 缓解机翼穿墙)。
+        const oKey = `${Math.round(originLocal.x / 0.25)}:${Math.round(originLocal.y / 0.25)}:${Math.round(originLocal.z / 0.25)}`;
+        const dKey = `${Math.round(dir.x * 72)}:${Math.round(dir.y * 72)}:${Math.round(dir.z * 72)}`;
+        const pKey = `${oKey}|${dKey}|${Math.round((maxDistance || 0) * 8)}`;
         const pCached = this._pickRayCache.get(pKey);
         if (pCached && nowP - pCached.time <= PICK_CACHE_TTL_MS) {
             return pCached.hit;   // 命中: 直接返回缓存结果(含 null/未命中), 零 GPU 拾取

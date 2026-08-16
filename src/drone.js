@@ -176,15 +176,17 @@ export class Drone {
         // 地面/屋顶间隙, 生成排斥/切向绕行/近障刹车。仅当障碍进入
         // 几何避障安全网(Cesium 真实几何势场)已停用: 仅依赖 YOPO_30 网络自身的
         // 学习式避障(训练期 safety_loss, wc=8 学到), 不叠加任何额外避障算法。
-        this.yopoAvoidEnabled = false;
+        this.yopoAvoidEnabled = true;
         this.yopoAvoidRays = [
             { x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 },
             { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 },
             { x: 0.7071, y: 0, z: 0.7071 }, { x: -0.7071, y: 0, z: 0.7071 },
             { x: 0.7071, y: 0, z: -0.7071 }, { x: -0.7071, y: 0, z: -0.7071 },
         ];
-        this.yopoAvoidRange = 25.0;   // 障碍探测/排斥作用半径 (m) — 加大到 25m 给 15m/s 巡航足够反应距离
-        this.yopoAvoidStop = 3.5;     // 该距离内几乎完全刹车 (m) — 安全净空, 防止擦碰
+        this.yopoAvoidRange = 25.0;   // 障碍探测半径 (m) — 给 15m/s 巡航足够反应距离(探测仍用全半径)
+        // 安全净空 yopoAvoidStop 不在此硬编码 — 必须依据无人机实际占用尺寸(见下方 collisionRadius/fanHalf
+        // 处), 否则会与机体/探测束尺寸脱节, 留过大余量导致小出口出不去。
+        this.yopoAvoidRepRange = 12.0; // 排斥/切向仅在该距离内生效 (m): 远于此不绕, 避免远处就大幅偏转让小出口出不去
         this.yopoAvoidGain = 8.0;     // 排斥/切向速度增益 (m/s) — 加强以真正推开/绕行
         this.yopoAvoidDecel = 3.5;    // 安全刹车减速度 (m/s^2) — 用于运动学停车距离计算
         this.yopoAvoidQueryMs = 70;   // 射线探测节流 (ms)
@@ -212,11 +214,26 @@ export class Drone {
         this.yopoAvoidFanRays = 3;    // 每条主方向的平行射线数 (奇数: 中心±两侧)
         this.yopoAvoidCeilRay = true; // 额外向上探测屋顶/悬挑下沿, 防止钻入矮檐
         this.yopoAvoidCeilLook = 1.2; // 上仰探测高度 (m)
+        // —— 竖直越障 (A+B 方案) ——
+        // 传统几何避障只在水平面 rep/tan 绕行 + 地面净空上推, 完全不懂"竖直越中间障碍"
+        // (楼/平台/悬空结构)。本项让无人机在水平被强挡且某侧竖直空间畅通时, 主动
+        // 爬升/下降越过: 探测层在 当前高度/上方/下方 三层的障碍距离, 选畅通侧给竖直速度。
+        // 方案B: 竖直越障激活时削弱 velTargetY 对目标高度的急迫收敛(×0.3), 避免被轨迹
+        // 高度"锁住", 保留竖直自由度去越障。
+        this.yopoAvoidVStep = 8.0;        // 竖直探测抬升/下探步长 (m), 配合 *2 高层可越更高楼
+        this.yopoAvoidVClimbScale = 0.5;  // 竖直越障速度 = gain * scale (m/s)
+        this.yopoAvoidVBlock = 8.0;       // 前进净空 < 此值才触发竖直越障 (m)
+        this.yopoAvoidVClear = 0.45;      // 上层视为"畅通"的距离占比 (> R*该值 即畅通)
         this._avoidProbe = null;      // 最近一次射线探测缓存
         this._collisionProvider = null; // 供 world.pickLocalRay 访问 (update 注入)
 
         this.collisionRadius = 0.1;
         this.bounceDamping   = 0.3;
+        // —— 安全净空 yopoAvoidStop: 依据无人机实际尺寸确定 ——
+        // 必须 ≥ 探测束半宽 yopoAvoidFanHalf (其本身已含"机体半宽+余量"), 否则绕行时最外侧
+        // 探测射线会穿入墙体造成误判; 仅在其上叠加少量余量。这样净空贴合机体尺寸, 远小于之前
+        // 3.5m 的拍脑袋值, 让本可挤过的小出口能过。改 droneSize/collisionRadius/fanHalf 时本值自动跟随。
+        this.yopoAvoidStop = this.yopoAvoidFanHalf + 0.3; // ≈ 1.1m (fanHalf=0.8 + 0.3 余量)
 
         // ---- Output state ----
         this.isColliding      = false;
@@ -1298,7 +1315,11 @@ export class Drone {
             if (avoid) {
                 velTargetX = velTargetX * avoid.brake + avoid.repX + avoid.tanX;
                 velTargetZ = velTargetZ * avoid.brake + avoid.repZ + avoid.tanZ;
-                velTargetY = velTargetY * avoid.brake + avoid.upPush;
+                // 竖直: 地面净空上推 + 竖直越障。方案B: 竖直越障激活时削弱对目标高度的
+                // 急迫收敛(×0.3), 避免被轨迹高度"锁住", 保留竖直自由度去越障。
+                velTargetY = velTargetY * avoid.brake;
+                if (avoid.vRep) velTargetY = velTargetY * 0.3 + avoid.vRep;
+                velTargetY += avoid.upPush;
                 avoidAccScale = avoid.brake;
             }
         }
@@ -1519,7 +1540,8 @@ export class Drone {
         // 位置变化很小也可复用, 减少 Cesium pickFromRay 开销
         if (p) {
             const moved = Math.hypot(this.x - p.x, this.z - p.z);
-            if (moved < 0.25 && now - p.time < 500) return;
+            const dy = Math.abs(this.y - p.y);
+            if (moved < 0.25 && dy < 1.0 && now - p.time < 500) return;
         }
         this._avoidProbe = this._computeAvoidProbe();
     }
@@ -1538,11 +1560,33 @@ export class Drone {
 
         const dirs = this.yopoAvoidRays;
         const R = this.yopoAvoidRange;
-        const dists = new Array(dirs.length);
         const nFan = this.yopoAvoidFanRays;
         const half = this.yopoAvoidFanHalf;
-        // 平行射线在垂直于主方向的平面内的横向偏移 (归一化法向量 n)
-        // n = 主方向在水平面逆时针旋转 90°: dir=(dx,dz) → n=(dz,-dx) 归一代
+
+        // 地面间隙先算: 用于 clamp 下探层起点, 避免贴地误检
+        let groundGap = Number.POSITIVE_INFINITY;
+        if (typeof w.sampleHeightAtLocal === 'function') {
+            const gy = w.sampleHeightAtLocal(this.x, this.z, 0.6);
+            if (Number.isFinite(gy)) groundGap = this.y - gy;
+        }
+        const groundY = Number.isFinite(groundGap) ? (this.y - groundGap) : -1e9;
+
+        // 扇形射线束: 在某高度层沿主方向发 nFan 条平行射线, 取最近障碍距离。
+        // 单条中心射线遇内凹(凹窗/门洞)会穿过去漏检, 两侧偏移射线命中凹槽墙沿。
+        const fanDist = (dir, yLevel) => {
+            const dlen = Math.hypot(dir.x, dir.z) || 1e-6;
+            const nx = dir.z / dlen, nz = -dir.x / dlen; // 主方向法向(水平面内垂直向量)
+            let near = R;
+            for (let k = 0; k < nFan; k++) {
+                const off = (nFan === 1) ? 0 : (2 * k / (nFan - 1) - 1) * half;
+                const o = { x: this.x + nx * off, y: yLevel, z: this.z + nz * off };
+                const hit = w.pickLocalRay(o, dir, R);
+                const hd = (hit && Number.isFinite(hit.distance) && hit.distance > 0.04)
+                    ? hit.distance : R;
+                if (hd < near) near = hd;
+            }
+            return near;
+        };
 
         // 屋顶/悬挑下沿探测: 向上看是否存在遮挡, 防止钻入低矮檐口/凹槽顶
         let ceilHit = false;
@@ -1554,36 +1598,29 @@ export class Drone {
             }
         }
 
+        // 三层高度探测: 当前高度(mid) / 上方(high) / 下方(low)。
+        // 比较三层距离即可判断"前方障碍能否上越或下钻", 供竖直越障使用。
+        const dists = new Array(dirs.length);
+        const distsHigh = new Array(dirs.length);
+        const distsHigh2 = new Array(dirs.length);
+        const distsLow = new Array(dirs.length);
+        const yHigh = this.y + this.yopoAvoidVStep;
+        const yHigh2 = this.y + this.yopoAvoidVStep * 2;
+        const yLow = Math.max(this.y - this.yopoAvoidVStep, groundY + 1.0);
+        const lowOk = (yLow - groundY) > 1.5; // 下探层明显高于地面才算有效可钻
         for (let i = 0; i < dirs.length; i++) {
-            const d = dirs[i];
-            const dlen = Math.hypot(d.x, d.z) || 1e-6;
-            // 主方向法向 (水平面内垂直向量, 归一化)
-            const nx = d.z / dlen, nz = -d.x / dlen;
-            let dNear = R;
-            // 扇束: 奇数条平行射线, 偏移 -half..+half
-            for (let k = 0; k < nFan; k++) {
-                const off = (nFan === 1) ? 0 : (2 * k / (nFan - 1) - 1) * half;
-                const o = {
-                    x: this.x + nx * off,
-                    y: this.y,
-                    z: this.z + nz * off,
-                };
-                const hit = w.pickLocalRay(o, d, R);
-                const hd = (hit && Number.isFinite(hit.distance) && hit.distance > 0.04)
-                    ? hit.distance : R;
-                if (hd < dNear) dNear = hd;
-            }
-            dists[i] = dNear;
-        }
-
-        let groundGap = Number.POSITIVE_INFINITY;
-        if (typeof w.sampleHeightAtLocal === 'function') {
-            const gy = w.sampleHeightAtLocal(this.x, this.z, 0.6);
-            if (Number.isFinite(gy)) groundGap = this.y - gy;
+            dists[i] = fanDist(dirs[i], this.y);
+            distsHigh[i] = fanDist(dirs[i], yHigh);
+            distsHigh2[i] = fanDist(dirs[i], yHigh2);
+            distsLow[i] = lowOk ? fanDist(dirs[i], yLow) : dists[i];
         }
 
         return {
             dists,
+            distsHigh,
+            distsHigh2,
+            distsLow,
+            lowOk,
             groundGap,
             ceilHit,
             x: this.x, y: this.y, z: this.z,
@@ -1623,8 +1660,8 @@ export class Drone {
             if (!Number.isFinite(d) || d <= 0) continue;
             if (d < dMin) dMin = d;
             if (d > openMax) { openMax = d; openDirX = dirs[i].x; openDirZ = dirs[i].z; }
-            if (d < R) {
-                const w = 1 - d / R;
+            if (d < this.yopoAvoidRepRange) {
+                const w = 1 - d / this.yopoAvoidRepRange;
                 repX -= dirs[i].x * w;
                 repZ -= dirs[i].z * w;
             }
@@ -1678,12 +1715,60 @@ export class Drone {
             if (des <= 0.3) { dx = openDirX; dz = openDirZ; }
             const s1 = dx * t1x + dz * t1z + 0.3 * (openDirX * t1x + openDirZ * t1z);
             const s2 = dx * t2x + dz * t2z + 0.3 * (openDirX * t2x + openDirZ * t2z);
-            const t = this.yopoAvoidGain * (1 - dMin / R) * 0.8;
+            const t = this.yopoAvoidGain * (1 - dMin / this.yopoAvoidRepRange) * 0.8;
             if (s1 >= s2) { tanX = t1x * t; tanZ = t1z * t; }
             else          { tanX = t2x * t; tanZ = t2z * t; }
         }
 
-        return { repX, repZ, tanX, tanZ, brake, upPush };
+        // ---- 出口识别: 目标方向净空充足 → 直飞, 不被侧向 rep 推回而绕圈/绕回起点 ----
+        // 取最对齐目标方向(=期望速度方向 udx/udz)的射线净空 dg。dg 充足说明正前方有路,
+        // 此时大幅削弱水平 rep/tan, 让无人机沿 YOPO 直飞目标, 避免被侧向障碍推离绕大圈。
+        let goalClear = false;
+        if (des > 0.3) {
+            let dg = R, dgMax = -1;
+            for (let i = 0; i < dirs.length; i++) {
+                const dd = dists[i];
+                if (!Number.isFinite(dd) || dd <= 0) continue;
+                const dot = dirs[i].x * udx + dirs[i].z * udz;
+                if (dot > dgMax) { dgMax = dot; dg = dd; }
+            }
+            const clearThresh = this.yopoAvoidRange * 0.5; // 目标方向净空 > 15m 视为有出口
+            if (dg > clearThresh) goalClear = true;
+        }
+
+        // ---- 竖直越障 (A) ----
+        // 水平前进被强挡(dAhead 近)且某侧竖直空间畅通时, 主动爬升/下降越过中间障碍。
+        // 沿最对齐前进方向的射线, 比较其 mid/high/high2/low 多层距离: 任一层上方畅通→上越,
+        // 否则下方畅通→下钻。探测随高度动态刷新, 无人机持续爬升直到越过障碍顶。
+        let vRep = 0;
+        const blockDist = this.yopoAvoidStop + this.yopoAvoidVBlock;
+        if (dAhead < blockDist && des > 0.3 && p.distsHigh && p.distsHigh2 && p.distsLow) {
+            let bi = -1, bdot = 0.5;
+            for (let i = 0; i < dirs.length; i++) {
+                const dot = dirs[i].x * udx + dirs[i].z * udz;
+                if (dot > bdot) { bdot = dot; bi = i; }
+            }
+            if (bi >= 0) {
+                const dH = p.distsHigh[bi];
+                const dH2 = p.distsHigh2[bi];
+                const dL = p.distsLow[bi];
+                const clearD = R * this.yopoAvoidVClear; // 该层距离 > 此值视为畅通, 可飞越
+                const upClear = (dH > clearD) || (dH2 > clearD); // 任一层上方畅通即可越
+                const downClear = (p.lowOk === true) && (dL > clearD);
+                const e = this.yopoAvoidGain * this.yopoAvoidVClimbScale;
+                if (upClear && downClear) vRep = e;       // 两侧皆可 → 优先爬升(更安全)
+                else if (upClear) vRep = e;               // 上越
+                else if (downClear) vRep = -e;            // 下钻
+            }
+        }
+
+        // 出口畅通时大幅削弱水平排斥/切向(保留少量避让), 让无人机果断直飞目标, 不绕回起点
+        if (goalClear) {
+            repX *= 0.15; repZ *= 0.15;
+            tanX = 0; tanZ = 0;
+        }
+
+        return { repX, repZ, tanX, tanZ, brake, upPush, vRep };
     }
 
     _handleCollisions(collisionProvider, previousPosition = null, dt = 0.016) {
