@@ -53,7 +53,7 @@ const _v3    = new pc.Vec3();
 export class Drone {
     constructor() {
         // ---- Geometry ----
-        this.droneSize = 0.15;
+        this.droneSize = 0.5;
 
         // ---- State ----
         this.x = 0; this.y = 2; this.z = 0;
@@ -227,7 +227,7 @@ export class Drone {
         this._avoidProbe = null;      // 最近一次射线探测缓存
         this._collisionProvider = null; // 供 world.pickLocalRay 访问 (update 注入)
 
-        this.collisionRadius = 0.1;
+        this.collisionRadius = 0.25;
         this.bounceDamping   = 0.3;
         // —— 安全净空 yopoAvoidStop: 依据无人机实际尺寸确定 ——
         // 必须 ≥ 探测束半宽 yopoAvoidFanHalf (其本身已含"机体半宽+余量"), 否则绕行时最外侧

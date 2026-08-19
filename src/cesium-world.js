@@ -1760,7 +1760,7 @@ export class CesiumWorld {
         try {
             if (frustum) {
                 if ('fov' in frustum) frustum.fov = faceFovDeg * Math.PI / 180;
-                if ('near' in frustum) frustum.near = 0.03;
+                if ('near' in frustum) frustum.near = 0.5;
                 if ('far' in frustum) frustum.far = 15000000;
             }
 

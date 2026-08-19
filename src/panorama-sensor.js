@@ -16,7 +16,9 @@ function evenNumber(value) {
 const CAPTURE_INTERVAL_MS = urlNumber('panoMs', 16, 8, 10000);
 const DEPTH_INTERVAL_MS = urlNumber('depthMs', 100, 50, 10000);
 const DA360_TIMEOUT_MS = urlNumber('da360TimeoutMs', 12000, 1000, 60000);
-const DA360_UPLOAD_SCALE = urlNumber('da360UploadScale', 0.2, 0.05, 1);
+// 上传到 DA360 的分辨率系数: 默认 1.0 即原分辨率(不压缩), 与服务端 DEFAULT_INPUT_SCALE=1.0 配合,
+// 保证深度图与 RGB 全景同分辨率。低端 GPU 可下调此值或服务端 DA360_INPUT_SCALE 以提速。
+const DA360_UPLOAD_SCALE = urlNumber('da360UploadScale', 1.0, 0.05, 1);
 const DA360_UPLOAD_WIDTH = Math.round(urlNumber('da360UploadWidth', 0, 0, 5760));
 const DA360_UPLOAD_HEIGHT = Math.round(urlNumber('da360UploadHeight', 0, 0, 2880));
 const PANORAMA_WIDTH = evenNumber(urlNumber('panoWidth', 672, 280, 5760));

@@ -44,7 +44,9 @@ DEFAULT_MODEL = Path(os.environ.get(
     DA360_ROOT / "checkpoints" / f"DA360_{DEFAULT_MODEL_NAME}.pth",
 ))
 PATCH_SIZE = 14
-DEFAULT_INPUT_SCALE = 0.65
+# 默认全分辨率推理(不压缩)。推理尺寸=checkpoint(1036×518), 深度图再贴回上传尺寸,
+# 与 RGB 全景同分辨率。低端 GPU 可用 DA360_INPUT_SCALE 环境变/--input-scale 降到 0.65 档提速。
+DEFAULT_INPUT_SCALE = 1.0
 
 
 def env_bool(name, default=False):
@@ -243,54 +245,78 @@ class DA360Runner:
         checkpoint.setdefault("width", 1036)
         self.checkpoint_height = int(checkpoint["height"])
         self.checkpoint_width = int(checkpoint["width"])
-        self.width, self.height = resolve_input_size(
-            self.checkpoint_width,
-            self.checkpoint_height,
-            input_scale=input_scale,
-            input_width=input_width,
-            input_height=input_height,
-        )
-        self.input_scale = self.width / max(1, self.checkpoint_width)
+        self.input_scale = input_scale
+        self.input_width = input_width
+        self.input_height = input_height
 
         net_cls = getattr(networks, checkpoint["net"])
-        self.model = net_cls(
-            self.height,
-            self.width,
-            dinov2_encoder=checkpoint["dinov2_encoder"],
-        ).to(self.device)
-        model_state = self.model.state_dict()
-        compatible_state = {}
-        for key, value in checkpoint.items():
-            if key not in model_state or not hasattr(value, "shape"):
-                continue
-            if tuple(value.shape) == tuple(model_state[key].shape):
-                compatible_state[key] = value
-        self.model.load_state_dict(compatible_state, strict=False)
-        self.model.eval()
+        self.net_cls = net_cls
+        self.dinov2_encoder = checkpoint["dinov2_encoder"]
+        # 兼容权重: 与任意尺寸模型共享(卷积/位置编码与尺寸无关, 仅 patch grid 不同)。
+        self.checkpoint_state = checkpoint
         self.model_name = Path(model_path).stem
         self.use_amp = self.device.type == "cuda" and env_bool("DA360_AMP", True)
         self.channels_last = self.device.type == "cuda" and env_bool("DA360_CHANNELS_LAST", True)
-        if self.channels_last:
-            self.model = self.model.to(memory_format=torch.channels_last)
-        if env_bool("DA360_TORCH_COMPILE", False) and hasattr(torch, "compile"):
-            self.model = torch.compile(self.model)
         self.mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(1, 3, 1, 1)
         self.std = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(1, 3, 1, 1)
         resample_name = os.environ.get("DA360_RESAMPLE", "bilinear").strip().lower()
         self.resample_name = "bicubic" if resample_name == "bicubic" else "bilinear"
         self.resample = Image.Resampling.BICUBIC if resample_name == "bicubic" else Image.Resampling.BILINEAR
         self.lock = threading.Lock()
+        # 按 (width, height) 缓存模型: 推理尺寸 = 上传图原始尺寸(对齐 PATCH_SIZE), 不缩放。
+        self._models = {}
 
         if os.environ.get("DA360_NO_WARMUP") != "1":
-            warmup = Image.new("RGB", (self.width, self.height), (0, 0, 0))
-            self.infer(warmup)
+            # 暖机用 checkpoint 默认尺寸, 确保首个模型已构建。
+            warmup_w, warmup_h = resolve_input_size(
+                self.checkpoint_width,
+                self.checkpoint_height,
+                input_scale=1.0,
+            )
+            self.infer(Image.new("RGB", (warmup_w, warmup_h), (0, 0, 0)))
+
+    def _get_model(self, width, height):
+        key = (width, height)
+        model = self._models.get(key)
+        if model is not None:
+            return model
+        with self.lock:
+            # double-check after acquiring lock
+            model = self._models.get(key)
+            if model is not None:
+                return model
+            net = self.net_cls(
+                height,
+                width,
+                dinov2_encoder=self.dinov2_encoder,
+            ).to(self.device)
+            model_state = net.state_dict()
+            compatible_state = {}
+            for k, v in self.checkpoint_state.items():
+                if k not in model_state or not hasattr(v, "shape"):
+                    continue
+                if tuple(v.shape) == tuple(model_state[k].shape):
+                    compatible_state[k] = v
+            net.load_state_dict(compatible_state, strict=False)
+            net.eval()
+            if self.channels_last:
+                net = net.to(memory_format=torch.channels_last)
+            if env_bool("DA360_TORCH_COMPILE", False) and hasattr(torch, "compile"):
+                net = torch.compile(net)
+            self._models[key] = net
+            return net
 
     def infer(self, image):
+        request_width, request_height = image.size
+        # 推理尺寸 = 上传图原始尺寸(对齐到 PATCH_SIZE 的倍数), 全程不缩放。
+        width = max(PATCH_SIZE, round(request_width / PATCH_SIZE) * PATCH_SIZE)
+        height = max(PATCH_SIZE, round(request_height / PATCH_SIZE) * PATCH_SIZE)
+        model = self._get_model(width, height)
         with self.lock:
             tensor = image_to_tensor(
                 image,
-                self.width,
-                self.height,
+                width,
+                height,
                 self.device,
                 self.mean,
                 self.std,
@@ -300,7 +326,7 @@ class DA360Runner:
             with torch.inference_mode():
                 amp_context = torch.cuda.amp.autocast() if self.use_amp else nullcontext()
                 with amp_context:
-                    outputs = self.model(tensor)
+                    outputs = model(tensor)
             disp = outputs["pred_disp"].detach().float().cpu().numpy()[0, 0]
         depth = 1.0 / np.maximum(disp, 1e-6)
         valid = np.isfinite(depth) & (depth > 0)
@@ -327,8 +353,7 @@ def create_app(runner):
             "ok": True,
             "model": runner.model_name,
             "device": str(runner.device),
-            "width": runner.width,
-            "height": runner.height,
+            "infer_mode": "native (request resolution, no downscale)",
             "checkpoint_width": runner.checkpoint_width,
             "checkpoint_height": runner.checkpoint_height,
             "input_scale": runner.input_scale,
@@ -356,6 +381,13 @@ def create_app(runner):
             colored, depth_scale = depth_to_color(pred_depth)
             timings["color_ms"] = (time.time() - mark) * 1000.0
             mark = time.time()
+            # 模型按上传尺寸对齐到 PATCH_SIZE 倍数推理, pred_depth 可能与上传图相差几像素。
+            # 贴回原始上传尺寸, 保证与 RGB 全景同尺寸/同形状(这一步是无损裁剪/微缩放, 不做整体压缩)。
+            if colored.shape[1] != request_width or colored.shape[0] != request_height:
+                colored = np.asarray(
+                    Image.fromarray(colored).resize((request_width, request_height), Image.BILINEAR),
+                    dtype=colored.dtype,
+                )
             depth_image = encode_image(
                 colored,
                 os.environ.get("DA360_OUTPUT_FORMAT", "jpeg"),
@@ -387,11 +419,8 @@ def create_app(runner):
                 "timings_ms": timings,
                 "model": runner.model_name,
                 "device": str(runner.device),
-                "width": runner.width,
-                "height": runner.height,
                 "request_width": request_width,
                 "request_height": request_height,
-                "input_pixels": runner.width * runner.height,
                 "request_pixels": request_width * request_height,
             }
             if include_raw:
@@ -434,7 +463,7 @@ def main():
     print(f"DA360 API running at http://127.0.0.1:{args.port}")
     print(f"Model: {args.model_path}")
     print(f"Device: {runner.device}")
-    print(f"Input: {runner.width}x{runner.height} (checkpoint {runner.checkpoint_width}x{runner.checkpoint_height})")
+    print(f"Inference: native request resolution (no downscale); checkpoint {runner.checkpoint_width}x{runner.checkpoint_height}")
     app.run(host=args.host, port=args.port, debug=args.debug, threaded=False)
 
 
