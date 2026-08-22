@@ -1,7 +1,9 @@
 # IMPORTANT: velocity in testing (modifiable)
-# 规划巡航速度上限(米/秒)。归一化用的是 vel_max_train(固定 6.0), 改这里只放大
-# 物理轨迹速度, 不影响网络输入分布。原版 6.0 偏慢, 已提到 12.0 (2倍); 可经
-# 服务端环境变量 YOPO_VELOCITY 进一步覆盖(注意: 速度越高, 同推理延迟下滑行距离越长)。
+# 规划巡航速度上限(米/秒)。归一化用 vel_max_train(固定 6.0), 改这里只放大物理轨迹速度,
+# 不影响网络输入分布。此处原始值 16.0 偏激进: 对应 acc_max≈42.7 m/s², 无人机易"突然猛冲"。
+# 实际部署默认由 restart_all.sh 设 YOPO_VELOCITY=8.0 覆盖: vel_max≈8 m/s, acc_max≈10.7 m/s²,
+# 兼顾速度与安全。可经 YOPO_VELOCITY 调回 10/12/16(重启生效); 注意速度越高,
+# 同推理延迟下滑行距离越长, 越容易追不上而出现速度突跳。
 velocity: 16.0
 fixed_height: 0.8  # keep the local terminal altitude fixed in world frame
 

@@ -38,7 +38,9 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
         flask \
         flask-cors \
         ruamel.yaml \
-        websockets
+        websockets \
+        tensorrt \
+        onnx
 
 # Clear proxy env so the running container doesn't inherit it
 ENV HTTP_PROXY=
@@ -51,6 +53,7 @@ RUN mkdir -p /opt/mindcloud-yopo/scripts /opt/mindcloud-yopo/third_party/yopo
 
 # Copy the server script
 COPY scripts/yopo_server.py /opt/mindcloud-yopo/scripts/yopo_server.py
+COPY scripts/yopo_trt_transfer.py /opt/mindcloud-yopo/scripts/yopo_trt_transfer.py
 
 # Copy the YOPO source code
 COPY third_party/yopo /opt/mindcloud-yopo/third_party/yopo

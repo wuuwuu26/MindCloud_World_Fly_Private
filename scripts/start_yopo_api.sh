@@ -17,6 +17,9 @@ set -Eeuo pipefail
 #       YOPO_FORCE_BUILD   1=always rebuild image, 0=use cached image if present (default 0)
 #       YOPO_GPUS          docker --gpus value, or "none" for CPU (default all)
 #       YOPO_DETACH        1=run container in background (default 0)
+#       YOPO_USE_TRT        1=enable TensorRT engine acceleration (default empty=off)
+#       YOPO_TRT_PATH       path to TensorRT engine inside container
+#                          (default /opt/mindcloud-yopo/trt/yopo_trt.pth)
 #
 #   Note on depth images:
 #       DA360 uses a 360 equirectangular RGB image and runs a depth-estimation
@@ -93,8 +96,25 @@ if [[ ! -s "$MODEL_PATH" ]]; then
     exit 1
 fi
 
+# ── TensorRT 自动启用 ──────────────────────────────────────────────
+# 引擎文件存在且用户未显式设置 YOPO_USE_TRT 时, 默认启用 TRT 加速, 使
+# restart_all.sh / launch.sh 等任意启动入口一键即可跑在加速模式。
+# 显式 YOPO_USE_TRT=0 可强制回退 PyTorch eager。
+TRT_ENGINE_HOST="$PROJECT_ROOT/asset/yopo-trt/yopo_trt.pth"
+if [[ -z "${YOPO_USE_TRT:-}" ]]; then
+    if [[ -f "$TRT_ENGINE_HOST" ]]; then
+        YOPO_USE_TRT=1
+        echo "YOPO TRT: 检测到引擎 $TRT_ENGINE_HOST → 自动启用 YOPO_USE_TRT=1 (推理加速)"
+    else
+        YOPO_USE_TRT=0
+        echo "YOPO TRT: 未找到引擎 $TRT_ENGINE_HOST (运行 scripts/yopo_trt_transfer.py 生成) → 回退 PyTorch eager"
+    fi
+fi
+export YOPO_USE_TRT
+
 echo "YOPO model: $MODEL_PATH"
 echo "YOPO mode:  $MODE"
+echo "YOPO TRT:   YOPO_USE_TRT=$YOPO_USE_TRT"
 
 MODEL_PATH="$(readlink -f "$MODEL_PATH")"
 MODEL_BASENAME="$(basename "$MODEL_PATH")"
@@ -175,7 +195,12 @@ run_args=(
     # 转发速度/时间缩放相关环境变量(否则在 docker 模式下设置无效, 只能改 yaml 重启)
     -e "YOPO_VELOCITY=${YOPO_VELOCITY:-}"
     -e "YOPO_CTRL_TIME_SCALE=${YOPO_CTRL_TIME_SCALE:-}"
+    # TensorRT 加速开关与引擎路径: YOPO_USE_TRT=1 时加载 YOPO_TRT_PATH 指向的引擎
+    -e "YOPO_USE_TRT=${YOPO_USE_TRT:-}"
+    -e "YOPO_TRT_PATH=${YOPO_TRT_PATH:-/opt/mindcloud-yopo/trt/yopo_trt.pth}"
     -v "$MODEL_PATH:/models/$MODEL_BASENAME:ro"
+    # TensorRT 引擎持久化目录(重规划加速权重, 跨容器重建保留)
+    -v "$PROJECT_ROOT/asset/yopo-trt:/opt/mindcloud-yopo/trt:rw"
 )
 
 if [[ "$MOUNT_SERVER" == "1" ]]; then

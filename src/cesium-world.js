@@ -50,15 +50,24 @@ const PANORAMA_FACE_DEFS = [
     { name: 'down', dir: { x: 0, y: -1, z: 0 }, up: { x: 0, y: 0, z: -1 } },
 ];
 
+// 缓存 URLSearchParams 解析结果: pickLocalRay 缓存 miss 时每帧多次调用,
+// 每次 new URLSearchParams + 正则解析非常昂贵(实测显著拖低帧率)。首次调用解析一次,
+// 后续全部走缓存; 运行时改 URL 参数不生效(正常使用场景不会中途改)。
+let _urlParamsCache = null;
+function urlParams() {
+    if (!_urlParamsCache) _urlParamsCache = new URLSearchParams(window.location.search);
+    return _urlParamsCache;
+}
+
 function urlNumber(name, fallback) {
-    const v = new URLSearchParams(window.location.search).get(name);
+    const v = urlParams().get(name);
     if (v == null || v === '') return fallback;
     const n = Number(v);
     return Number.isFinite(n) ? n : fallback;
 }
 
 function urlString(name, fallback) {
-    const v = new URLSearchParams(window.location.search).get(name);
+    const v = urlParams().get(name);
     return v == null || v === '' ? fallback : v;
 }
 
@@ -444,25 +453,32 @@ export class CesiumWorld {
             0.88
         );
         this.flightTileSSE = clampNumber(
-            urlNumber('flightTileSse', options.flightTileSSE ?? 24),
+            // SSE 与帧率的平衡: 12 会让 8GB 显存被极精细瓦片打满(实测 7.6/8.2GB),
+            // 每帧渲染海量三角形 + 显存换出 -> 帧率个位数。回退到 20(仍比原始 24 精细)。
+            // 可 ?flightTileSse=12(最精细/最卡) 或 ?flightTileSse=24(最流畅) 调整。
+            urlNumber('flightTileSse', options.flightTileSSE ?? 20),
             8,
             64,
             24
         );
         this.placementTileSSE = clampNumber(
-            urlNumber('placementTileSse', options.placementTileSSE ?? 16),
+            // 静态模式 12: 比原始 16 略精细, 负担可控。?placementTileSse=8 还原。
+            urlNumber('placementTileSse', options.placementTileSSE ?? 12),
             8,
             64,
             16
         );
         this.tileCacheMb = Math.round(clampNumber(
+            // 缓存 2GB: 4096 在 8GB 显存下会让瓦片缓存占满显存(与地图/深度抢显存)。
             urlNumber('tileCacheMb', options.tileCacheMb ?? 2048),
             512,
             8192,
             2048
         ));
         this.panoramaTileSSE = clampNumber(
-            urlNumber('panoramaTileSse', options.panoramaTileSSE ?? 32),
+            // 全景瓦片 24: 12 让全景采集也打满显存。24 平衡深度精度与显存(原 32)。
+            // 可 ?panoramaTileSse=12 提精度/更卡, ?panoramaTileSse=32 更快。
+            urlNumber('panoramaTileSse', options.panoramaTileSSE ?? 24),
             4,
             128,
             32
@@ -694,6 +710,8 @@ export class CesiumWorld {
         setIfPresent('loadSiblings', false);
         setIfPresent('skipLevelOfDetail', true);
         setIfPresent('baseScreenSpaceError', flightMode ? 1536 : 1024);
+        // skip 参数回退(配合 SSE=20/12): 过紧的 skip 会让 LOD 频繁跳级, 增加瓦片请求与
+        // 渲染负担。原始 18/12 是参考项目验证过的平衡。
         setIfPresent('skipScreenSpaceErrorFactor', flightMode ? 18 : 12);
         setIfPresent('skipLevels', flightMode ? 2 : 1);
         setIfPresent('immediatelyLoadDesiredLevelOfDetail', false);
@@ -731,7 +749,7 @@ export class CesiumWorld {
         };
     }
 
-    waitForTilesIdle(timeoutMs = 1600, quietMs = 180, tileset = null, loadState = null, renderViewer = null) {
+    waitForTilesIdle(timeoutMs = 1600, quietMs = 180, tileset = null, loadState = null, renderViewer = null, lenient = false) {
         const targetTileset = tileset || this.tileset;
         if (!targetTileset) return Promise.resolve(true);
 
@@ -748,21 +766,39 @@ export class CesiumWorld {
 
             const tick = () => {
                 if (done) return;
-                if (
-                    renderViewer &&
-                    (!renderViewer.isDestroyed || !renderViewer.isDestroyed()) &&
-                    renderViewer.scene
-                ) {
-                    renderViewer.scene.requestRender();
-                    this._renderViewerNow(renderViewer);
-                }
                 const now = performance.now();
                 const pending = loadState ? loadState.pending : this._tileLoadPending;
                 const processing = loadState ? loadState.processing : this._tileLoadProcessing;
                 const queueKnown = pending !== null || processing !== null;
                 const queueIdle = !queueKnown ||
                     ((pending || 0) <= 0 && (processing || 0) <= 0);
-                const loaded = targetTileset.tilesLoaded === true && queueIdle;
+                // 判断就绪: 默认要求整个 tileset 的瓦片全部加载完(tilesLoaded===true)
+                // 且队列空闲 —— 但流式 3D Tiles 在移动/新区域时 LOD 持续更新,
+                // tilesLoaded 可能长时间 false → 全景采集"卡在 1/6"(首 face 永远等不齐)。
+                // lenient=true(全景 viewer 专用)时放宽为"队列空闲且加载流程已启动":
+                // 即观测到过 loadProgress(pending !== null) 且当前无待处理瓦片。
+                // 关键: 不能只看 queueIdle —— 冷启动时 _panoramaTileLoadState 的
+                // pending/processing 初始为 null, queueKnown=false 会误判"空闲", 导致
+                // updateFace 读回空白画面(RGB 加载不出来)。pending !== null 表示瓦片
+                // 加载已真正开始, 此时队列空闲才代表"当前视角可见瓦片已渲染", 缺失的
+                // 远处 LOD 由后续采集补上。兜底: 若 loadProgress 从未触发(pending 恒 null,
+                // 极端情况), 以 tilesLoaded===true 为准(全部瓦片就绪必然可读)。
+                const loaded = (lenient
+                    ? (queueIdle && (pending !== null || targetTileset.tilesLoaded === true))
+                    : (targetTileset.tilesLoaded === true && queueIdle));
+
+                // 仅在"未就绪且队列非空"阶段驱动渲染: 瓦片请求依赖渲染触发, 队列有
+                // 待处理任务时渲染一次推进加载; 队列已空(仅等 tilesLoaded 置位)或已
+                // 就绪后的确认阶段纯检测不渲染, 减少主线程无谓的全景 viewer 渲染开销。
+                // 注意: 队列空但未 loaded 时若不再渲染, 可能永远等不到 tilesLoaded;
+                // 因此每 tick 仍渲染一次, 但节流到 tickMs(≥20ms)而非每检测都渲染。
+                if (!loaded && renderViewer &&
+                    (!renderViewer.isDestroyed || !renderViewer.isDestroyed()) &&
+                    renderViewer.scene
+                ) {
+                    renderViewer.scene.requestRender();
+                    this._renderViewerNow(renderViewer);
+                }
 
                 if (loaded) {
                     if (idleSince == null) idleSince = now;
@@ -771,8 +807,22 @@ export class CesiumWorld {
                     idleSince = null;
                 }
 
+                // 诊断: 每 2s 打印一次瓦片加载状态, 定位 RGB 出不来是"瓦片未就绪"还是别的
+                if (now - started > 2000 && !this._tileDiagPrinted) {
+                    this._tileDiagPrinted = true;
+                    console.log(
+                        `[tile-diag] tilesLoaded=${targetTileset.tilesLoaded} ` +
+                        `pending=${pending ?? this._tileLoadPending ?? 'n/a'} ` +
+                        `processing=${processing ?? this._tileLoadProcessing ?? 'n/a'} ` +
+                        `timeout=${timeoutMs}ms elapsed=${Math.round(now - started)}ms`
+                    );
+                }
+
                 if (now - started >= timeoutMs) return finish(false);
-                window.setTimeout(tick, 80);
+                // tick 间隔按 quietMs 自适应: 取 max(20, quietMs/3), quietMs=40 -> tick≈20ms;
+                // 默认 180 -> tick=60ms。平衡检测速度与主线程负载。
+                const tickMs = Math.max(20, Math.min(80, Math.round(quietMs / 3)));
+                window.setTimeout(tick, tickMs);
             };
 
             tick();
@@ -1357,7 +1407,7 @@ export class CesiumWorld {
         if (firstKey !== undefined) this._pickRayCache.delete(firstKey);
     }
 
-    pickLocalRay(originLocal, directionLocal, maxDistance) {
+    pickLocalRay(originLocal, directionLocal, maxDistance, forceFresh = false) {
         if (!this.viewer || !this.ready) return null;
         const Cesium = this.Cesium;
         const scene = this.viewer.scene;
@@ -1383,16 +1433,28 @@ export class CesiumWorld {
         // 把每帧数十次 GPU 拾取砍掉大半。命中返回的是真实墙体绝对位置(仅"距离"可能陈旧≤0.5m),
         // 对几何避障/硬碰撞兜底这类安全网足够安全; 主轨迹仍由 YOPO 决定。这是缓解导航帧率低的
         // 关键手段(瓦片拾取抖动主因), 帧率恢复后第二个小地图 viewer 的渲染也会随之恢复。
+        // forceFresh=true 时(深度标定射线专用)跳过缓存: 每次返回当前真实距离,
+        // 不依赖任何量化桶/TTL。标定要的是"这张深度图对应时刻的真实米制距离",
+        // 距离随无人机移动每帧都在变, 缓存命中会返回陈旧值 → 标定误差。碰撞探测
+        // 等安全网仍走缓存(不传 forceFresh), 不牺牲帧率优化。
         const nowP = performance.now();
-        // 量化粒度由 0.5m/36/4 细化到 0.25m/72/8: 桶更密 → 无人机稍一移动/转向就换新桶重新
-        // 拾取, 建筑流式加载完成后能更快被发现(配合 150ms TTL 进一步缩小漏检窗口)。代价是
-        // GPU 拾取次数上升, 此为方案B权衡(换更及时的障碍感知, 缓解机翼穿墙)。
-        const oKey = `${Math.round(originLocal.x / 0.25)}:${Math.round(originLocal.y / 0.25)}:${Math.round(originLocal.z / 0.25)}`;
-        const dKey = `${Math.round(dir.x * 72)}:${Math.round(dir.y * 72)}:${Math.round(dir.z * 72)}`;
-        const pKey = `${oKey}|${dKey}|${Math.round((maxDistance || 0) * 8)}`;
-        const pCached = this._pickRayCache.get(pKey);
-        if (pCached && nowP - pCached.time <= PICK_CACHE_TTL_MS) {
-            return pCached.hit;   // 命中: 直接返回缓存结果(含 null/未命中), 零 GPU 拾取
+        // 量化粒度 0.5m/36/4: 桶更粗 → 无人机移动/转向时更久落在同一桶, 缓存命中率更高,
+        // 实际触发的 GPU 拾取(scene.pickFromRay 每次都是一次 GPU 渲染+读回)更少,
+        // CPU 调度开销显著下降(这是 CPU 负载高的主因之一)。150ms TTL 保证流式加载后
+        // 仍会重新探测, 漏检窗口可接受。?pickQuant 参数可临时调 (0.25 更密/更慢, 0.75 更疏/更快)。
+        if (!forceFresh) {
+            const quant = urlNumber('pickQuant', 0.5);
+            const oKey = `${Math.round(originLocal.x / quant)}:${Math.round(originLocal.y / quant)}:${Math.round(originLocal.z / quant)}`;
+            const dKey = `${Math.round(dir.x * 36)}:${Math.round(dir.y * 36)}:${Math.round(dir.z * 36)}`;
+            const pKey = `${oKey}|${dKey}|${Math.round((maxDistance || 0) * 4)}`;
+            const pCached = this._pickRayCache.get(pKey);
+            if (pCached && nowP - pCached.time <= PICK_CACHE_TTL_MS) {
+                return pCached.hit;   // 命中: 直接返回缓存结果(含 null/未命中), 零 GPU 拾取
+            }
+            // 记缓存键, 拾取成功后写入 (仅在缓存路径下写, forceFresh 不污染缓存)
+            this._pickCacheKey = pKey;
+        } else {
+            this._pickCacheKey = null;
         }
 
         const origin = this.localToCartesian(originLocal);
@@ -1407,15 +1469,15 @@ export class CesiumWorld {
                 key: 'scene-pick-from-ray-collision',
                 intervalMs: 10000,
             });
-            this._rememberPick(pKey, null, nowP);
+            if (this._pickCacheKey) this._rememberPick(this._pickCacheKey, null, nowP);
             return null;
         }
         if (!hit || !Cesium.defined(hit.position)) {
-            this._rememberPick(pKey, null, nowP);
+            if (this._pickCacheKey) this._rememberPick(this._pickCacheKey, null, nowP);
             return null;
         }
         if (this._isExcludedCollisionHit(hit)) {
-            this._rememberPick(pKey, null, nowP);
+            if (this._pickCacheKey) this._rememberPick(this._pickCacheKey, null, nowP);
             return null;
         }
 
@@ -1425,6 +1487,7 @@ export class CesiumWorld {
         const dz = local.z - originLocal.z;
         const distance = Math.hypot(dx, dy, dz);
         if (!Number.isFinite(distance) || distance > maxDistance) return null;
+        if (this._pickCacheKey) this._rememberPick(this._pickCacheKey, { position: local, distance }, nowP);
         return { position: local, distance };
     }
 
@@ -1748,6 +1811,48 @@ export class CesiumWorld {
         };
         const basis = this.getTransformBasisFixed(transform);
         const destination = this.localToCartesian(transform.position);
+        // ── 无 roll 基准（修顶部左右错位）────────────────────────────
+        // shader 采样 up/down face 时按"世界水平轴"对齐（faceUv 用固定
+        // (-1,0,0)/(0,0,1) 等世界常量，见 sampleYFace）。若渲染 up face 的相机
+        // 带横滚（roll），顶部画面会绕光轴旋转 → equirect 顶部左右错位；无人机
+        // 慢速转弯/侧飞时 roll 明显，快速直线 roll≈0 才不错位。侧面 face
+        // (front/right/back/left) 的 shader 采样同样用世界水平轴对齐，因此
+        // 修复必须作用于【全部 6 个 face】（否则 side 与 up 基准不一致，
+        // 接缝处错位更严重——上一版只改 up/down 正是如此）。
+        // 方案：保留 yaw+pitch（水平环/俯仰跟随机头），把 roll 归零 —— 构造
+        // 无 roll 基准：up' = 世界竖直在 ⊥forward 平面上的投影（即竖直方向
+        // 去掉 forward 分量），right' 由 cross(forward, up') 重算。这样顶部
+        // 始终世界水平，side 面水平环仍跟随机头朝向。
+        let faceBasis = basis;
+        {
+            const fwd = basis.forward;
+            const worldUp = new Cesium.Cartesian3(0, 1, 0);
+            const fDot = Cesium.Cartesian3.dot(worldUp, fwd);
+            const upY = Cesium.Cartesian3.subtract(
+                worldUp,
+                Cesium.Cartesian3.multiplyByScalar(fwd, fDot, new Cesium.Cartesian3()),
+                new Cesium.Cartesian3()
+            );
+            const upLen = Cesium.Cartesian3.magnitude(upY);
+            if (upLen > 1e-4) {
+                Cesium.Cartesian3.divideByScalar(upY, upLen, upY);
+                const rightY = Cesium.Cartesian3.cross(fwd, upY, new Cesium.Cartesian3());
+                // 符号对齐: 保证 roll=0(机头水平) 时与原始 right 同向
+                if (Cesium.Cartesian3.dot(rightY, basis.right) < 0) {
+                    Cesium.Cartesian3.negate(rightY, rightY);
+                }
+                const backY = Cesium.Cartesian3.negate(fwd, new Cesium.Cartesian3());
+                faceBasis = {
+                    right: rightY,
+                    left: Cesium.Cartesian3.negate(rightY, new Cesium.Cartesian3()),
+                    up: upY,
+                    down: Cesium.Cartesian3.negate(upY, new Cesium.Cartesian3()),
+                    back: backY,
+                    forward: fwd,
+                };
+            }
+            // 机头近乎垂直朝上/朝下(极端俯仰): ⊥forward 竖直分量退化, 回退完整姿态
+        }
         const faceFovDeg = Math.max(90, Math.min(170, Number(options.faceFovDeg) || 130));
         const topPoleGuardDeg = Math.max(0, Math.min(45, Number(options.topPoleGuardDeg) || 0));
         const bottomPoleGuardDeg = Math.max(0, Math.min(45, Number(options.bottomPoleGuardDeg) || 0));
@@ -1770,8 +1875,8 @@ export class CesiumWorld {
                 camera.setView({
                     destination,
                     orientation: {
-                        direction: this._componentDirectionToFixed(basis, faceDef.dir),
-                        up: this._componentDirectionToFixed(basis, faceDef.up),
+                        direction: this._componentDirectionToFixed(faceBasis, faceDef.dir),
+                        up: this._componentDirectionToFixed(faceBasis, faceDef.up),
                     },
                 });
                 viewer.scene.requestRender();
@@ -1787,7 +1892,8 @@ export class CesiumWorld {
                         tileQuietMs,
                         this._panoramaTileset,
                         this._panoramaTileLoadState,
-                        viewer
+                        viewer,
+                        true  // lenient: 全景 viewer 放宽为"加载已启动且队列空闲即就绪"(tilesLoaded 常 false)
                     );
                     if (!tilesReady) {
                         return {
@@ -1797,6 +1903,8 @@ export class CesiumWorld {
                             loadingTiles: true,
                             faceIndex,
                             faces: PANORAMA_FACE_DEFS.length,
+                            // 供调用方按本次瓦片超时联动重试间隔(避免写死 900ms 卡住 fast 模式)
+                            tileTimeoutMs,
                         };
                     }
                 }

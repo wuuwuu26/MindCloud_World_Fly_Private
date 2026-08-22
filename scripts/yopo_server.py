@@ -86,9 +86,57 @@ except Exception as _yopo_import_err:
 
 # ── Constants ─────────────────────────────────────────────────────
 DEFAULT_PORT = 5689
+
+
+class _TrtYopoModel:
+    """TensorRT 推理封装: 从 ONNX 导出的引擎加载, 暴露与 YopoNetwork 同签名
+    (depth, obs) -> (endstate, score) 的 __call__, 使推理调用处 (self.policy(...))
+    无需改动。用 tensorrt Python API 直接执行引擎 (无需 torch2trt / nvcc)。"""
+
+    def __init__(self, engine_path, device):
+        import tensorrt as trt
+        self.device = device
+        self.logger = trt.Logger(trt.Logger.WARNING)
+        with open(engine_path, 'rb') as f:
+            engine_data = f.read()
+        runtime = trt.Runtime(self.logger)
+        self.engine = runtime.deserialize_cuda_engine(engine_data)
+        self.context = self.engine.create_execution_context()
+        self.stream = torch.cuda.Stream()  # 独立 CUDA 流, 避免默认流的性能告警
+        self.input_names = []
+        self.output_names = []
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+                self.input_names.append(name)
+            else:
+                self.output_names.append(name)
+
+    def __call__(self, depth, obs):
+        # torch.from_numpy/state_transform 的输出通常已连续; 仅在确实非连续时才拷贝,
+        # 避免高频调用下无谓的整张张量复制。
+        if not depth.is_contiguous():
+            depth = depth.contiguous()
+        if not obs.is_contiguous():
+            obs = obs.contiguous()
+        dev = depth.device
+        self.context.set_tensor_address(self.input_names[0], depth.data_ptr())
+        self.context.set_tensor_address(self.input_names[1], obs.data_ptr())
+        out_bufs = {}
+        for name in self.output_names:
+            shape = tuple(self.engine.get_tensor_shape(name))
+            t = torch.empty(shape, dtype=torch.float32, device=dev)
+            out_bufs[name] = t
+            self.context.set_tensor_address(name, t.data_ptr())
+        # 输入张量由调用方在默认流上写入; 先同步默认流确保数据就绪, 再用独立流执行
+        # (避免 TensorRT 在默认流上额外 cudaStreamSynchronize 的性能告警), 最后同步本流。
+        torch.cuda.default_stream(dev).synchronize()
+        self.context.execute_async_v3(self.stream.cuda_stream)
+        self.stream.synchronize()
+        return out_bufs[self.output_names[0]], out_bufs[self.output_names[1]]
 DEFAULT_WS_PORT = 5690  # WebSocket transport port (0 = disabled)
 DEFAULT_MODEL = os.path.join(
-    YOPO_DIR, 'saved', 'YOPO_18', 'epoch20.pth'
+    YOPO_DIR, 'saved', 'YOPO_40', 'epoch20.pth'
 )
 
 #: MindCloud:  x=east,  y=up,    z=north   (body forward = -z at identity)
@@ -242,6 +290,27 @@ class YOPOServer:
         self.policy.load_state_dict(state_dict)
         self.policy = self.policy.to(self.device)
         self.policy.eval()
+
+        # ── 可选 TensorRT 加速 (README: TensorRT Deployment) ──
+        # 仅当 YOPO_USE_TRT=1 且转换好的引擎 yopo_trt.pth 存在时启用; 否则回退
+        # PyTorch eager (原生路径)。转换脚本见 scripts/yopo_trt_transfer.py: 把本
+        # eager 模型经 ONNX 导出固化为 TensorRT 引擎 (fp16)。Orin NX 上推理仅 1~5ms,
+        # 相比 eager 的 100~350ms 大幅提速, 重规划频率随之提升、盲飞段缩短、避障改善。
+        # 用 tensorrt 直接加载引擎并包成与 YopoNetwork 同签名 (depth, obs)->(endstate, score)
+        # 的推理封装 (_TrtYopoModel), 故推理调用处 (self.policy(...)) 无需改动。
+        self.use_trt = False
+        trt_path = os.environ.get('YOPO_TRT_PATH') or os.path.join(
+            os.path.dirname(model_path), 'yopo_trt.pth')
+        if os.environ.get('YOPO_USE_TRT', '0').lower() in ('1', 'true', 'yes'):
+            if not os.path.isfile(trt_path):
+                print(f"[TensorRT] 未找到引擎 {trt_path}; 请先运行 scripts/yopo_trt_transfer.py 生成, 回退 eager")
+            else:
+                try:
+                    self.policy = _TrtYopoModel(trt_path, self.device)
+                    self.use_trt = True
+                    print(f"[TensorRT] 已加载 {trt_path} — 推理加速启用")
+                except Exception as e:
+                    print(f"[TensorRT] 加载失败 ({e}); 回退 PyTorch eager")
         # Warmup does one dummy forward pass so the first real inference isn't
         # penalised by lazy CUDA/JIT init. Skippable via YOPO_NO_WARMUP=1 to
         # make restarts faster (first navigate will pay the small init cost).
@@ -417,16 +486,13 @@ class YOPOServer:
         start_vel_ros = self._vec_mc_to_ros(self.vel)
         start_acc_ros = self._vec_mc_to_ros(self.desire_acc) if self.desire_acc is not None else np.zeros(3)
 
-        # 目标高度由 yopo target 决定(用户设置的导航目标高度), 整条轨迹终点高度
-        # 强制等于 goal[1]。
-        fixed_height = float(self.goal[1])  # MC y=up = 目标高度(ROS z 一致)
-        endstate_w_ros[0, 2, 0] = fixed_height - start_pos_ros[2]
-        # 强制终点垂直速度/加速度=0: 否则网络预测的"向下终点速度"会让无人机到达
-        # 目标高度时仍带向下速度 → 过冲下坠(在二次导航/已接近低目标时最明显),
-        # 表现为持续的"向下运动趋势"。终点接管段本就令终端 vel/acc=0, 此处对齐;
-        # 高度已由 fixed_height 锁定为目标高度, 不影响"目标高度由 yopo target 决定"。
-        endstate_w_ros[0, 2, 1] = 0.0
-        endstate_w_ros[0, 2, 2] = 0.0
+        # 3D 导航: 完全信任网络预测的 z(垂直)终端状态 —— 不强制终点高度=目标高度,
+        # 不强制垂直速度/加速度=0。网络输入 obs 已含"目标相对位置(含垂直分量)",
+        # 网络会自行权衡水平推进与垂直机动(上/下避障, 垂直锚点 β), 这正是 YOPO 的
+        # 3D 能力。早期曾强制 fixed_height=goal[1] 并清零垂直 PVA, 效果是"把 3D
+        # 导航降级为 2D": 目标高度与当前高度差距大时, 整条轨迹被纵向拖拽, 且网络
+        # 预测的垂直位移/速度被丢弃 → 无人机"一开始就往目标高度冲/不动"。删除后
+        # 恢复网络原生的 3D 轨迹(与 docstring 及官方 test_yopo_ros.py 完全一致)。
 
         self.optimal_poly_x = Poly5Solver(
             start_pos_ros[0], start_vel_ros[0], start_acc_ros[0],
@@ -449,6 +515,14 @@ class YOPOServer:
             endstate_w_ros[0, 2, 2],
             self.traj_time
         )
+        # ctrl_time 从 0 起步(不保留进度): 保证指令位置/速度/加速度 C0/C1/C2 连续。
+        # 原因(实测): 若把 ctrl_time 保留到上一条轨迹的进度, navigate 重建新轨迹后
+        # _compute_command 会直接从【新轨迹中段】采样 → 指令位置在重规划瞬间大幅跳变
+        # (实测重规划间最大跳变 10.4m), 无人机运动不连续。改为从 0 起步后, 新轨迹
+        # 起点=当前真实位置/速度/加速度(line 上面的 start_*), 指令从当前位置连续
+        # 接出, 重规划间跳变降到 ~2m。巡航速度由 CTRL_TIME_SCALE 与 YOPO_VELOCITY
+        # 提供, 控制环(50Hz)从 0 快速推进到中段, 不影响连续性。
+        # 终点接管 _plan_final_approach 独立设置 ctrl_time=0, 与此一致。
         self.ctrl_time = 0.0
         self.poly_duration = self.traj_time
 
@@ -584,6 +658,9 @@ class YOPOServer:
             mask_raw = np.frombuffer(mask_bytes, dtype=np.uint8).reshape(self.height, self.width)
 
         depth = self._preprocess_depth(depth_raw, mask_raw=mask_raw)
+        # 缓存 CPU 侧归一化深度(channel 0), 供 _process_output 计算前方障碍距离,
+        # 避免每次推理都把 GPU 上的整幅深度图 .cpu().numpy() 回拷。
+        self._last_depth_map_np = depth[0, 0]
         time1 = time.time()
 
         if not self.desire_init:
@@ -802,9 +879,12 @@ class YOPOServer:
         score = score_pred.reshape(N)
 
         # ── 前方障碍距离 (仅诊断, 不参与轨迹选择) ──
+        # 复用 navigate 预处理阶段缓存的 CPU 侧归一化深度, 避免每次推理把整幅
+        # 深度图从 GPU .cpu().numpy() 回拷(192×384×4B≈288KB/次) —— 省一次 D2H
+        # 拷贝与一次大数组分配, 使重规划高频化(TensorRT 1.3ms 下该开销不可忽略)。
         fwd_dist = self.max_dis
-        if self._last_depth_input is not None:
-            depth_map = self._last_depth_input[0, 0].cpu().numpy()  # (H,W) norm[0,1]
+        depth_map = getattr(self, '_last_depth_map_np', None)
+        if depth_map is not None:
             self._last_depth_map = depth_map  # 诊断端点用
             H, W = depth_map.shape
             fwd_patch = depth_map[H//2-14:H//2+15, W//2-30:W//2+31]

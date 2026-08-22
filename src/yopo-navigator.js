@@ -20,7 +20,10 @@ export class YOPONavigator {
         this.lastCmd = null;       // {position, velocity, acceleration, yaw, yaw_dot}
         this.inferenceCount = 0;
         this._lastRequestTime = 0;
-        this._requestInterval = 10; // ms (~100 Hz) — higher depth/replan rate for smoother, more continuous flight
+        // 重规划(运动指令更新)客户端节流。该值运行时会被 main.js 直接绑定为
+        // yopoDepthFromPanorama._minRefreshIntervalMs (深度刷新间隔), 从而保证"运动指令更新频率
+        // == 深度图像更新频率"。初始设为 5ms (~200Hz) 基准, 实际频率仍受 YOPO 推理/WS 往返下限约束。
+        this._requestInterval = 5; // ms — must match depth refresh interval (see main.js binding)
 
         // ── WebSocket transport (efficient alternative to per-call HTTP) ──
         // Derive ws:// URL from the HTTP server URL (same host, port 5690).
@@ -115,17 +118,23 @@ export class YOPONavigator {
         });
     }
 
-    async _wsNavigate(depthData, position, velocity, orientation) {
+    async _wsNavigate(depthData, position, velocity, orientation, maskData) {
         const id = ++this._wsId;
+        const hasMask = maskData instanceof Uint8Array &&
+            maskData.length >= YOPO_DEPTH_HEIGHT * YOPO_DEPTH_WIDTH;
         const header = {
             type: 'navigate',
             id,
             depth_shape: [YOPO_DEPTH_HEIGHT, YOPO_DEPTH_WIDTH],
             depth_encoding: '32FC1',
-            mask: false,
+            mask: hasMask,
             position, velocity, orientation,
         };
-        // Pack binary frame: [uint32 BE header_len][utf8 json][depth bytes]
+        // Pack binary frame: [uint32 BE header_len][utf8 json][depth bytes][mask bytes]
+        // 服务端 _ws_handle_message 在 hdr.mask=true 时, 从 off+dsize 之后切出 H*W 字节的
+        // mono8 掩码作为第 2 输入通道, 与 YOPO_360 训练约定(通道0=深度, 通道1=有效性掩码)对齐。
+        // 这是关键修正: 之前 mask:false 导致 YOPO 收不到掩码, 无效/天空像素被当作"远处可飞",
+        // 模型会朝缺失区规划 → 撞墙。
         const enc = new TextEncoder();
         const hdrBytes = enc.encode(JSON.stringify(header));
         const hdrLen = new Uint8Array(4);
@@ -133,7 +142,9 @@ export class YOPONavigator {
         // 发送 Float32Array 视图本身(而非底层 .buffer): 若 depthData 是某大缓冲区的
         // view, .buffer 会把整块(可能数 MB)发出去, 而视图只取其 288KB 范围, 传输更小更快。
         const depthBuf = depthData; // 384x192 Float32 = 288KB
-        const blob = new Blob([hdrLen, hdrBytes, depthBuf]);
+        const parts = [hdrLen, hdrBytes, depthBuf];
+        if (hasMask) parts.push(maskData); // mono8 掩码字节, H*W = 73728
+        const blob = new Blob(parts);
         return this._wsSendBinary(header, blob);
     }
 
@@ -204,7 +215,7 @@ export class YOPONavigator {
 
         // ── Preferred: WebSocket (raw binary depth, no base64/HTTP overhead) ──
         if (this.wsReady && this.ws && depthData instanceof Float32Array) {
-            const cmd = await this._wsNavigate(depthData, position, velocity, orientation);
+            const cmd = await this._wsNavigate(depthData, position, velocity, orientation, maskData);
             if (cmd && !cmd.error) {
                 this.lastCmd = cmd;
                 this.arrived = cmd.arrived || false;

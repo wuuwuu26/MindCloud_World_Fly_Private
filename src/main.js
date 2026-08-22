@@ -23,23 +23,15 @@
  * from the original simulator.
  */
 
-import { CesiumWorld } from './cesium-world.js?v=20260703-panorama-tile-idle';
+import { CesiumWorld } from './cesium-world.js?v=20260822-hz-trt25';
 import { TilesCollisionProvider } from './tiles-collision.js';
 import { Controller } from './controller.js';
-import { Drone } from './drone.js';
+import { Drone } from './drone.js?v=20260822-hz-trt25';
 import { HUD } from './hud.js';
 import { OSD } from './osd.js';
-import { PanoramaSensor } from './panorama-sensor.js';
+import { PanoramaSensor } from './panorama-sensor.js?v=20260820-nobusy';
 import { YOPONavigator } from './yopo-navigator.js';
-import { YOPODepthFromPanorama } from './yopo-depth-from-panorama.js';
-// 数据集采集模块 (yopo-cesium-dataset.js) 为可选模块: 当前环境未包含该文件。
-// 改用动态 import 容错加载, 避免静态 import 缺失模块导致整个 main.js 加载失败、
-// 连导航与 UI 都无法启动。缺失时采集功能不可用, 但导航等其他功能照常工作。
-let CesiumYOPODataset = null;
-(async () => {
-  try { ({ CesiumYOPODataset } = await import('./yopo-cesium-dataset.js')); }
-  catch (e) { console.warn('[main] yopo-cesium-dataset.js 未加载, 数据集采集功能不可用', e); }
-})();
+import { YOPODepthFromPanorama } from './yopo-depth-from-panorama.js?v=20260820-fps3';
 import { reportUserError } from './error-report.js';
 
 let world = null;
@@ -68,6 +60,7 @@ let yopoTargetSelectMode = false;
 let yopoTargetMarker = null;
 let yopoNavInProgress = false;
 let yopoControlInProgress = false;
+let yopoControlTimer = null;  // 独立 50Hz 控制定时器(见 yopoControlTick)
 let panoramaWarmupPromise = null;
 let thirdPersonPointer = {
     active: false,
@@ -236,13 +229,7 @@ function initSubsystems() {
 
     setupDisplaySettingsListeners();
     setupYOPOUI();
-    setupCesiumDatasetUI();
     yopoDepthFromPanorama = null;
-
-    // 无头训练采集: 自动进入 tiles 模式, 随后由 startTilesMode 内部触发采集
-    if (new URLSearchParams(location.search).get('autocollect') === '1') {
-        setTimeout(() => { if (typeof startTilesMode === 'function') startTilesMode(); }, 300);
-    }
 }
 
 export async function startTilesMode() {
@@ -273,15 +260,10 @@ export async function startTilesMode() {
         warmPanoramaViewerInBackground();
         document.getElementById('loading-overlay')?.classList.remove('visible');
 
-        // 暴露给无头自动采集脚本 (?autocollect=1)
         window.world = world;
         window.drone = drone;
         window.yopoDepthFromPanorama = yopoDepthFromPanorama;
-        window.runAutoCollect = runAutoCollect;
         window.startTilesMode = startTilesMode;
-        if (new URLSearchParams(location.search).get('autocollect') === '1') {
-            runAutoCollect();
-        }
 
         if (!loopStarted) {
             loopStarted = true;
@@ -708,6 +690,7 @@ let yopoMinimapDroneEntity = null;
 let yopoMinimapTargetEntity = null;
 let _yopoMiniInitPromise = null;
 let _yopoMiniRange = null; // 平滑后的 lookAt 距离(缩放)
+let _yopoMiniHeading = null; // 平滑后的小地图朝向(rad): heading-up 地图, 使无人机前方始终朝上
 let _yopoMiniStop = false; // 小地图更新出错后停用, 避免每帧抛错拖垮主循环
 
 async function initYOPOMinimapViewer() {
@@ -851,7 +834,32 @@ function updateYOPOMinimap() {
 
         const R = _yopoMiniRange;
         const pitchRad = Cesium.Math.toRadians(-89.9); // 近垂直俯视
-        // 相机放在无人机正上方(R 高度), 朝正下方俯视 (heading=0, pitch=-89.9), 等价于 lookAt(center, HPR(0,-89.9,R))
+
+        // heading-up 小地图: 无人机"水平面上的机头方向"始终为小地图上方。
+        // 必须用机头方向(而非速度方向): 无人机后退/侧飞时速度方向会与机头相反,
+        // 若用速度方向小地图会反转 180°(后退即翻面)。机头方向取 yopoBodyMoveAxes().fwd
+        // —— 即 local -Z 投影到水平面(ENU), 与数字键 8/2/4/6 移动目标点的 forward 完全一致,
+        // 选点/飞行/前进/后退 方向都一致, 永不反转。
+        // Cesium 俯视 heading=0 时屏幕上方=北(ENU +z), 故 heading = atan2(fwdEast, fwdNorth)。
+        let fwdHx = 0, fwdHz = -1; // 默认朝南(-Z), 与 identity 机头方向一致
+        if (drone) {
+            const axes = yopoBodyMoveAxes();
+            fwdHx = axes.fwd.x;
+            fwdHz = axes.fwd.z;
+        }
+        const targetHeading = Math.atan2(fwdHx, fwdHz);
+        if (_yopoMiniHeading === null) {
+            _yopoMiniHeading = targetHeading;
+        } else {
+            // 角度插值, 处理 ±π 环绕, 平滑跟随转向(不致猛甩)
+            let d = targetHeading - _yopoMiniHeading;
+            while (d > Math.PI) d -= 2 * Math.PI;
+            while (d < -Math.PI) d += 2 * Math.PI;
+            _yopoMiniHeading += d * 0.2;
+        }
+        const headingRad = _yopoMiniHeading;
+
+        // 相机放在无人机正上方(R 高度), 朝正下方俯视 (pitch=-89.9), 等价 lookAt(center, HPR(heading,-89.9,R))
         const eyeLocal = {
             x: centerLocal.x,
             y: centerLocal.y + R * Math.sin(-pitchRad),
@@ -861,7 +869,7 @@ function updateYOPOMinimap() {
         yopoMinimapViewer.scene.camera.setView({
             destination: eyeCart,
             orientation: {
-                heading: Cesium.Math.toRadians(0),
+                heading: headingRad,
                 pitch: pitchRad,
                 roll: 0,
             },
@@ -947,6 +955,11 @@ function updateFlight(dt) {
     //   - 深度环 (~0.4Hz, 深度到达时): /yopo/navigate 重新推理, 重建多项式
     // 两者独立, 互不阻塞。控制命令始终新鲜, 无人机不盲飞。
     if (drone.flightMode === 'yopo_nav' && drone.yopoNavActive && yopoNavigator && !drone.yopoArrived) {
+        // 运动指令(重规划)的更新频率与深度图像更新频率保持一致: 把 navigate 客户端节流
+        // 直接绑定到深度刷新间隔, 确保两者"符合频率", 且随 _minRefreshIntervalMs 一并提高。
+        if (yopoDepthFromPanorama) {
+            yopoNavigator._requestInterval = yopoDepthFromPanorama._minRefreshIntervalMs;
+        }
         const pos = { x: drone.x, y: drone.y, z: drone.z };
         const vel = { x: drone.vx, y: drone.vy, z: drone.vz };
         const orient = {
@@ -956,31 +969,10 @@ function updateFlight(dt) {
             w: drone.orientation.w,
         };
 
-        // ── 控制环 (高频, 每帧) ──
-        // 不带深度, 用上次多项式推进 ctrl_time, 返回 poly(ctrl_time) 的 pos/vel/acc/yaw。
-        // 一次只允许一个 control 请求在途, HTTP 往返自然限频 (~50-100Hz)。
-        // 深度不可用(悬停等待)期间跳过, 保留悬停指令, 防止旧多项式覆盖。
-        if (!drone.yopoDepthUnavailable && !yopoControlInProgress) {
-            yopoControlInProgress = true;
-            (async () => {
-                try {
-                    const cmd = await yopoNavigator.control(pos, vel, orient);
-                    if (cmd && !cmd.error) {
-                        drone.yopoCmdPos = cmd.position;
-                        drone.yopoCmdVel = cmd.velocity;
-                        drone.yopoCmdAcc = cmd.acceleration;
-                        drone.yopoCmdYaw = cmd.yaw;
-                        drone.yopoCmdYawDot = cmd.yaw_dot || 0;
-                        drone.yopoCmdTime = performance.now();
-                        drone.yopoArrived = cmd.arrived || false;
-                        drone.yopoDistToGoal = cmd.dist_to_goal || 0;
-                    }
-                } catch (e) {
-                    // 高频调用, 静默处理瞬态错误
-                }
-                yopoControlInProgress = false;
-            })();
-        }
+        // ── 控制环已剥离为独立 50Hz 定时器 yopoControlTick ──
+        // (不再依赖渲染帧率: 主线程被 Cesium 渲染/DA360 上传拖慢时, 每帧调用
+        //  会让 ctrl_time 每帧只推进 20ms 且被 navigate 高频重置, 多项式永远停在
+        //  起点 → 指令速度≈0 → 无人机突然变慢。见 yopoControlTick 注释。)
 
         // ── 深度环 (低频, 深度到达时) ──
         // 带深度+odom, 运行 YOPO 推理, 重建多项式, 重置 ctrl_time=0。
@@ -1190,19 +1182,28 @@ function setupYOPOUI() {
             console.warn('YOPO server not reachable at', yopoNavigator.serverUrl);
             return;
         }
+        // 预热深度缓存: 激活导航前先建立首帧深度, 首个 navigate 立即有深度可用
+        prewarmYOPODepth();
         drone.flightMode = 'yopo_nav';
         drone.yopoNavActive = true;
         if (panoramaSensor) {
             // 导航时不再抑制 UI 深度请求, 这样 da360 depth 窗口会随导航环
             // 持续刷新(之前 depthSuppress=true 会让窗口冻结在最后一张图)。
             panoramaSensor.depthSuppress = false;
-            panoramaSensor.captureIntervalOverride = 100;  // 10Hz 全景, 释放 GPU 给深度管线
+            panoramaSensor.captureIntervalOverride = 50;  // 20Hz 全景请求: capturing 期间 update 会自动跳过, 故请求频率提高
+            // 只会让采集完成(6 face 约 300-600ms)后更快启动下一次; 不额外占主线程。
         }
         drone.yopoArrived = false;
         drone.yopoInferenceCount = 0;
         drone.yopoCmdPos = null;
         drone.yopoCmdVel = null;
         drone.yopoCmdTime = 0;
+        // 启动独立 50Hz 控制定时器: 保证轨迹持续推进(不受渲染帧率拖累)。
+        // 控制环与深度环并行: 深度环重建多项式时会重置 ctrl_time, 但控制环
+        // 每 20ms 推进一次, 即便重规划 3-5Hz, 每次 200-300ms 窗口内也能推进
+        // 轨迹 0.2-0.3s, 指令速度可爬升到巡航水平(实测 ~5-9 m/s)。
+        if (yopoControlTimer) clearInterval(yopoControlTimer);
+        yopoControlTimer = setInterval(yopoControlTick, 20);
         // Sync the flight mode dropdown
         const modeSelect = document.getElementById('flight-mode-select');
         if (modeSelect) modeSelect.value = 'yopo_nav';
@@ -1213,109 +1214,6 @@ function setupYOPOUI() {
 
     // Stop Navigation button
     stopNavBtn.addEventListener('click', stopYOPONavigation);
-}
-
-// ── Cesium → YOPO_360 数据集采集 UI ─────────────────────────────
-function setupCesiumDatasetUI() {
-    const modeSel = document.getElementById('cds-mode');
-    const numMapsEl = document.getElementById('cds-num-maps');
-    const samplesEl = document.getElementById('cds-samples');
-    const radiusEl = document.getElementById('cds-radius');
-    const maxDepthEl = document.getElementById('cds-max-depth');
-    const serverEl = document.getElementById('cds-server');
-    const setRegionBtn = document.getElementById('cds-set-region-btn');
-    const startBtn = document.getElementById('cds-start-btn');
-    const stopBtn = document.getElementById('cds-stop-btn');
-    const statusEl = document.getElementById('cds-status');
-    if (!startBtn || !stopBtn) return;
-
-    let collector = null;
-
-    const setStatus = (s) => { if (statusEl) statusEl.textContent = '状态: ' + s; };
-
-    if (setRegionBtn) {
-        setRegionBtn.addEventListener('click', () => {
-            if (!collector) collector = new CesiumYOPODataset(world, drone, yopoDepthFromPanorama, {});
-            if (collector.setRegionFromDrone()) {
-                const c = collector.regionCenter;
-                setStatus(`区域中心已设为机位 (${c.x.toFixed(1)}, ${c.y.toFixed(1)}, ${c.z.toFixed(1)})`);
-            } else {
-                setStatus('无法获取机位');
-            }
-        });
-    }
-
-    startBtn.addEventListener('click', async () => {
-        if (!world || !drone) { setStatus('世界未就绪'); return; }
-        if (!yopoDepthFromPanorama && (modeSel.value === 'da360')) {
-            setStatus('DA360 深度未就绪 (请稍候或切到 Cesium 射线模式)');
-            return;
-        }
-        const opts = {
-            mode: modeSel.value,
-            numMaps: parseInt(numMapsEl.value, 10) || 4,
-            samplesPerMap: parseInt(samplesEl.value, 10) || 300,
-            radius: parseFloat(radiusEl.value) || 12,
-            maxDepth: parseFloat(maxDepthEl.value) || 20,
-            serverUrl: serverEl.value || 'http://localhost:8003',
-        };
-        collector = new CesiumYOPODataset(world, drone, yopoDepthFromPanorama, opts);
-        if (!collector.regionCenter) collector.setRegionFromDrone();
-        collector.onProgress = (info) => {
-            if (info.skipped) {
-                setStatus(`map ${info.map} 样本 ${info.sample}: 跳过(深度获取失败)`);
-            } else {
-                setStatus(`采集中 map ${info.map + 1}/${opts.numMaps} 样本 ${info.sample + 1}/${info.total} · 点云 ${info.pts} 点 · 模式 ${info.mode}`);
-            }
-        };
-        startBtn.disabled = true;
-        setStatus('采集中...');
-        try {
-            const res = await collector.collect();
-            setStatus(res.done ? `完成 (中心 ${JSON.stringify(res.center)})` : '已停止');
-        } catch (e) {
-            console.error('Cesium dataset collect failed', e);
-            setStatus('失败: ' + (e && e.message ? e.message : e));
-        } finally {
-            startBtn.disabled = false;
-        }
-    });
-
-    stopBtn.addEventListener('click', () => {
-        if (collector) collector.stop();
-        setStatus('正在停止...');
-    });
-}
-
-// ── 无头自动采集 (?autocollect=1): 供 Playwright 等无头脚本驱动 ──
-function runAutoCollect() {
-    const p = new URLSearchParams(location.search);
-    const opts = {
-        mode: p.get('mode') || 'da360',
-        numMaps: parseInt(p.get('numMaps') || '2', 10),
-        samplesPerMap: parseInt(p.get('samples') || '50', 10),
-        radius: parseFloat(p.get('radius') || '12'),
-        maxDepth: parseFloat(p.get('maxDepth') || '20'),
-        serverUrl: p.get('server') || 'http://localhost:8003',
-    };
-    window.__cdsStatus = { running: true, done: false, error: null, info: null, opts };
-    try {
-        const collector = new CesiumYOPODataset(window.world, window.drone, window.yopoDepthFromPanorama, opts);
-        if (!collector.regionCenter) collector.setRegionFromDrone();
-        collector.onProgress = (info) => { window.__cdsStatus.info = info; };
-        collector.collect().then((res) => {
-            window.__cdsStatus.running = false;
-            window.__cdsStatus.done = res.done;
-            window.__cdsStatus.center = res.center;
-        }).catch((e) => {
-            window.__cdsStatus.running = false;
-            window.__cdsStatus.error = (e && e.message) ? e.message : String(e);
-            console.error('autocollect failed', e);
-        });
-    } catch (e) {
-        window.__cdsStatus.running = false;
-        window.__cdsStatus.error = (e && e.message) ? e.message : String(e);
-    }
 }
 
 // ── YOPO target selection helpers ───────────────────────────────
@@ -1354,6 +1252,10 @@ function stopYOPONavigation() {
     }
     drone.yopoNavActive = false;
     drone.yopoArrived = false;
+    if (yopoControlTimer) {
+        clearInterval(yopoControlTimer);
+        yopoControlTimer = null;
+    }
     if (panoramaSensor) {
         panoramaSensor.depthSuppress = false;  // 恢复 UI 深度显示
         panoramaSensor.captureIntervalOverride = 0;  // 恢复 60Hz 全景
@@ -1368,6 +1270,51 @@ function stopYOPONavigation() {
     document.getElementById('yopo-status-text').textContent = '状态: 已停止';
     document.getElementById('yopo-start-nav-btn').textContent = '开始导航';
     // 保留目标点标记: 让"设置的目标点"在停止后依然可见, 再次导航时对照
+}
+
+// ── YOPO 控制环 (独立 50Hz 定时器) ───────────────────────────────
+// 控制环从渲染帧循环中剥离的原因:
+//   浏览器主线程被 Cesium 3D Tiles 渲染 / 全景捕获 / DA360 上传拖累时, 帧率可能
+//   低至 3-10fps。若控制环依赖"每渲染帧", 则:
+//     - 控制环频率 = 帧率 (3-10Hz), ctrl_time 每帧只推进 20ms(服务端 cap)
+//     - 深度环 navigate() 每次重建多项式都会重置 ctrl_time=0 (~3Hz)
+//     → ctrl_time 永远停在轨迹起点附近, 多项式速度≈起点速度(循环依赖真实速度)
+//     → 指令速度趋近 0, 无人机"突然变得很慢, 连 1m/s 都不到"。
+// 独立 20ms 定时器保证控制环 50Hz 稳定推进 ctrl_time: 即便 navigate 每 200-300ms
+// 重置一次, 窗口内也能推进 0.2-0.3s 轨迹, 指令速度爬升到巡航水平(实测 5-9 m/s)。
+// 与深度环并行(互不阻塞), 控制命令始终新鲜, 无人机不盲飞。
+function yopoControlTick() {
+    if (!drone || !yopoNavigator) return;
+    if (drone.flightMode !== 'yopo_nav' || !drone.yopoNavActive || drone.yopoArrived) return;
+    // 深度不可用(悬停等待)期间跳过, 保留悬停指令, 防止旧多项式覆盖。
+    if (drone.yopoDepthUnavailable || yopoControlInProgress) return;
+    const pos = { x: drone.x, y: drone.y, z: drone.z };
+    const vel = { x: drone.vx, y: drone.vy, z: drone.vz };
+    const orient = {
+        x: drone.orientation.x,
+        y: drone.orientation.y,
+        z: drone.orientation.z,
+        w: drone.orientation.w,
+    };
+    yopoControlInProgress = true;
+    (async () => {
+        try {
+            const cmd = await yopoNavigator.control(pos, vel, orient);
+            if (cmd && !cmd.error) {
+                drone.yopoCmdPos = cmd.position;
+                drone.yopoCmdVel = cmd.velocity;
+                drone.yopoCmdAcc = cmd.acceleration;
+                drone.yopoCmdYaw = cmd.yaw;
+                drone.yopoCmdYawDot = cmd.yaw_dot || 0;
+                drone.yopoCmdTime = performance.now();
+                drone.yopoArrived = cmd.arrived || false;
+                drone.yopoDistToGoal = cmd.dist_to_goal || 0;
+            }
+        } catch (e) {
+            // 高频调用, 静默处理瞬态错误
+        }
+        yopoControlInProgress = false;
+    })();
 }
 
 /**
@@ -1507,11 +1454,38 @@ function handleYOPOKeyDown(e) {
     return consumed;
 }
 
+/** 预热 YOPO 深度缓存: 导航激活前后台触发一次 DA360 深度捕获, 让首个 navigate
+ * 立即可用缓存深度, 消除"导航开始后无人机原地悬停数秒"的等待。
+ * 返回 true 表示已触发预热; false 表示条件不满足(未触发)。 */
+function prewarmYOPODepth() {
+    if (!drone || !yopoDepthFromPanorama || typeof drone.getCameraTransform !== 'function') return false;
+    try {
+        const cameraTransform = drone.getCameraTransform();
+        if (!cameraTransform) return false;
+        yopoDepthFromPanorama.captureYOPODepthERP(cameraTransform, {
+            width: 384, height: 192, maxDistance: 20, timeoutMs: 6000,
+        }).then(() => {
+            console.log('[prewarm] YOPO depth cache warmed');
+        }).catch((e) => {
+            // 预热失败不阻塞导航: 深度环首帧仍会正常重试
+            console.warn('[prewarm] YOPO depth prewarm failed:', e);
+        });
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 /** Confirm the selected target: set goal on server and auto-start nav. */
 async function confirmYOPOTarget(x, y, z) {
     yopoTargetSelectMode = false;
     document.getElementById('yopo-status-text').textContent =
         `状态: 设置目标 (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})...`;
+
+    // 并行预热深度缓存: DA360 推理慢(~1.6s), 若等导航激活后才取首帧深度, 无人机
+    // 会在原地悬停数秒("徘徊很久才行动")。提前在 setGoal/getStatus 期间后台触发
+    // 一次深度捕获, 首个 navigate 即可复用缓存立即出指令。
+    const prewarm = prewarmYOPODepth();
 
     const ok = await yopoNavigator.setGoal(x, y, z);
     if (!ok) {
@@ -1533,6 +1507,9 @@ async function confirmYOPOTarget(x, y, z) {
         return;
     }
 
+    // 导航即将激活, 确保预热已触发(上面若因条件不满足未触发, 这里补一次)
+    if (prewarm !== true) prewarmYOPODepth();
+
     // Auto-start navigation
     drone.flightMode = 'yopo_nav';
     drone.yopoNavActive = true;
@@ -1541,13 +1518,16 @@ async function confirmYOPOTarget(x, y, z) {
                     // 在设目标点起开始导航后冻结(见 setGoal 路径同理)。保持 false
                     // 让窗口随导航环的 RGB 刷新持续请求深度图。
                     panoramaSensor.depthSuppress = false;
-                    panoramaSensor.captureIntervalOverride = 100;  // 10Hz 全景, 释放 GPU 给深度管线
+                    panoramaSensor.captureIntervalOverride = 50;  // 20Hz 全景请求(理由同上)
                 }
     drone.yopoArrived = false;
     drone.yopoInferenceCount = 0;
     drone.yopoCmdPos = null;
     drone.yopoCmdVel = null;
     drone.yopoCmdTime = 0;
+    // 启动独立 50Hz 控制定时器(与手动"开始导航"按钮路径一致)
+    if (yopoControlTimer) clearInterval(yopoControlTimer);
+    yopoControlTimer = setInterval(yopoControlTick, 20);
     const modeSelect = document.getElementById('flight-mode-select');
     if (modeSelect) modeSelect.value = 'yopo_nav';
     document.getElementById('yopo-status-text').textContent = '状态: 导航中...';
@@ -1577,13 +1557,15 @@ function updateYOPOStatusUI() {
     // 深度源状态: 显示当前用的是真值射线还是 DA360 估计深度(便于 A/B 对照)
     if (avoidEl) {
         const src = drone.yopoDepthSource;
+        let srcHtml;
         if (src === 'true') {
-            avoidEl.innerHTML = '深度: <span style="color:#9fb5ff">真值(射线)</span>';
+            srcHtml = '深度: <span style="color:#9fb5ff">真值(射线)</span>';
         } else if (src === 'da360') {
-            avoidEl.innerHTML = '深度: <span style="color:#cfe">DA360</span>';
+            srcHtml = '深度: <span style="color:#cfe">DA360</span>';
         } else {
-            avoidEl.textContent = '深度: --';
+            srcHtml = '深度: --';
         }
+        avoidEl.innerHTML = srcHtml;
     }
 
     // Show distance during target selection mode too (compute from inputs,
@@ -1883,10 +1865,6 @@ function initializeAppShell() {
     setProgress('');
     window.googleTilesFlightStart = startTilesMode;
     window.startTilesMode = startTilesMode;
-    window.runAutoCollect = runAutoCollect;
-    if (new URLSearchParams(location.search).get('autocollect') === '1') {
-        setTimeout(() => { if (typeof window.startTilesMode === 'function') window.startTilesMode(); }, 300);
-    }
 }
 
 if (document.readyState === 'loading') {
