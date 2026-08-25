@@ -21,6 +21,8 @@ cd MindCloud_World_Fly_Private
 
 该脚本等价于依次启动：DA360 深度服务 → YOPO 导航服务 → 主飞行进程（`launch.sh`）。启动后浏览器打开 `http://127.0.0.1:8080`，点击 **Start Google 3D Tiles Flight**，进入放置模式设置出生点后按 `O` 起飞，即可用键盘飞行。
 
+> YOPO 推理默认走 TensorRT 加速（引擎 `asset/yopo-trt/yopo_trt.pth` 已随仓库提供），`restart_all.sh` 检测到引擎即自动启用，无需额外操作；详情见「YOPO TensorRT 加速」。
+
 ```bash
 # 常用方式
 ./restart_all.sh --detach          # Docker 后台运行
@@ -48,6 +50,7 @@ docker rm -f google-tiles-flight mindcloud-da360-api mindcloud-yopo-api   # 停�
 | 模型 | 是否随仓库提供 | 获取方式 |
 |------|----------------|----------|
 | YOPO 导航权重 | **是**（直接提交，≤100MB） | 克隆即得，位于 `third_party/yopo/saved/`（默认 `YOPO_40/epoch50.pth`） |
+| YOPO TensorRT 引擎 | **是**（直接提交，≤100MB） | 位于 `asset/yopo-trt/yopo_trt.pth`（fp16）；由 `epoch50.pth` 转换，换 GPU/模型时重建，见「YOPO TensorRT 加速」 |
 | DA360 深度权重 | 否（约 1.3GB，超限） | 下载脚本：`./scripts/download_da360_model.sh`（Google Drive，需 `gdown`） |
 
 ### YOPO 导航权重
@@ -100,6 +103,7 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
   - 触发重建：镜像不存在，或 `YOPO_FORCE_BUILD=1`；失败自动重试 `YOPO_BUILD_RETRIES`（默认 3）。
   - 运行时只读挂载模型权重、`yopo_server.py`、`third_party/yopo` 源码——**改 Python / 权重不用重建镜像**，重启容器即生效。
   - 端口 5689（HTTP）+ 5690（WebSocket）；默认 `--gpus all`，`YOPO_GPUS=none` 走 CPU。
+  - 镜像内 TensorRT 固定为 `8.6.1`（兼容 CUDA 12.1，且匹配 `yopo_server` 的 TRT 8 加载 API）；TRT 8.6 pip 包不自带 cuDNN，复用镜像内 torch 捆绑的 cuDNN8 提供 `libcudnn.so.8`（见 `Dockerfile.yopo` 的 `LD_LIBRARY_PATH`）。TRT 推理加速见「YOPO TensorRT 加速」。
 
 ### DA360 深度服务（`Dockerfile.da360`）
 
@@ -296,6 +300,29 @@ YOPO_FORCE_BUILD=1 ./scripts/start_yopo_api.sh
 ```
 
 服务运行在 `http://127.0.0.1:5689`。`yopo_server.py` 通过 Docker volume 挂载，修改后无需重建镜像。
+
+### YOPO TensorRT 加速
+
+YOPO 推理默认走 TensorRT（TRT）加速。将 `epoch50.pth` 固化为 fp16 引擎后，单次推理延迟从 PyTorch eager 的约 100~350ms 降到 1~5ms，使导航重规划更频繁、盲飞段更短、避障更顺。
+
+- **引擎路径**：`asset/yopo-trt/yopo_trt.pth`（已提交；fp16，绑定本机 GPU 架构）。
+- **一键启用**：`restart_all.sh` 检测到引擎存在即自动设 `YOPO_USE_TRT=1`，启动后后端日志打印 `[TensorRT] 已加载 … 推理加速启用`。强制退回 PyTorch eager：
+  ```bash
+  YOPO_USE_TRT=0 ./restart_all.sh
+  ```
+- **自动构建**：若启用 TRT 但引擎缺失，`scripts/start_yopo_api.sh` 会在 YOPO 容器内用 GPU 自动把当前模型（`YOPO_MODEL_PATH`，默认 `epoch50.pth`）固化为引擎并写入 `asset/yopo-trt/`（读写挂载），下次启动直接加载，无需手动预处理。
+- **手动转换**：更换模型或重建引擎时，在带 GPU 的容器内运行转换脚本（`scripts/yopo_trt_transfer.py`：`epoch50.pth` → `torch.onnx.export`（`depth[1,2,192,384]` + `obs[1,9,6,12]`）→ TRT fp16 引擎，兼容 TRT 8.x / 10+）：
+  ```bash
+  docker run --rm --gpus all \
+    -v "$PWD/third_party/yopo:/opt/mindcloud-yopo/third_party/yopo:ro" \
+    -v "$PWD/scripts/yopo_trt_transfer.py:/opt/mindcloud-yopo/scripts/yopo_trt_transfer.py:ro" \
+    -v "$PWD/third_party/yopo/saved/YOPO_40/epoch50.pth:/models/epoch50.pth:ro" \
+    -v "$PWD/asset/yopo-trt:/opt/mindcloud-yopo/trt:rw" \
+    mindcloud-yopo:latest python /opt/mindcloud-yopo/scripts/yopo_trt_transfer.py \
+      --model /models/epoch50.pth --out /opt/mindcloud-yopo/trt/yopo_trt.pth
+  ```
+- **换 GPU / 架构**：TRT 引擎与 GPU 的 SM 计算能力绑定，当前引擎在 RTX 4070 上构建。部署到 Orin NX 或其它卡时，在目标机删除旧引擎并让 `start_yopo_api.sh` 自动重建（或重新跑上面命令）。
+- **环境约束**：容器内 TensorRT 固定为 `8.6.1`（匹配 CUDA 12.1 运行时与 `yopo_server` 的 TRT 8 加载 API）；TRT 8.6 pip 包不自带 cuDNN，转而复用镜像内 torch 捆绑的 cuDNN8 提供 `libcudnn.so.8`（见 `Dockerfile.yopo` 的 `LD_LIBRARY_PATH`）。
 
 ### 目标点选择与导航
 

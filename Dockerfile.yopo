@@ -39,7 +39,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
         flask-cors \
         ruamel.yaml \
         websockets \
-        tensorrt \
+        tensorrt==8.6.1.post1 \
         onnx
 
 # Clear proxy env so the running container doesn't inherit it
@@ -47,6 +47,9 @@ ENV HTTP_PROXY=
 ENV HTTPS_PROXY=
 ENV http_proxy=
 ENV https_proxy=
+
+# TensorRT 8.6 pip 包不自带 cuDNN, 复用镜像内 torch 捆绑的 cuDNN8 提供 libcudnn.so.8
+ENV LD_LIBRARY_PATH=/opt/conda/lib/python3.10/site-packages/torch/lib:${LD_LIBRARY_PATH}
 
 # Create directories
 RUN mkdir -p /opt/mindcloud-yopo/scripts /opt/mindcloud-yopo/third_party/yopo

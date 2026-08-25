@@ -220,6 +220,25 @@ if [[ "${YOPO_DETACH:-0}" == "1" ]]; then
     run_args=(-d "${run_args[@]}")
 fi
 
+# ── 自动构建 TensorRT 引擎 (启用 TRT 但宿主引擎缺失时) ──
+# 在容器内用 GPU 把当前模型固化为引擎, 存到 asset/yopo-trt (挂载 rw), 使
+# restart_all.sh / launch.sh 等任意入口一键即可获得 TRT 加速, 无需手动预处理。
+if [[ "${YOPO_USE_TRT:-0}" == "1" && "${MODE}" != "local" ]]; then
+    if [[ ! -f "$TRT_ENGINE_HOST" ]]; then
+        echo "YOPO TRT: 未找到引擎 $TRT_ENGINE_HOST, 尝试在容器内用 GPU 自动构建 ..."
+        docker run --rm "${gpu_args[@]}" \
+            -v "$SCRIPT_DIR/yopo_trt_transfer.py:/opt/mindcloud-yopo/scripts/yopo_trt_transfer.py:ro" \
+            -v "$YOPO_SRC_DIR:/opt/mindcloud-yopo/third_party/yopo:ro" \
+            -v "$MODEL_PATH:/models/$MODEL_BASENAME:ro" \
+            -v "$PROJECT_ROOT/asset/yopo-trt:/opt/mindcloud-yopo/trt:rw" \
+            "$IMAGE" python /opt/mindcloud-yopo/scripts/yopo_trt_transfer.py \
+                --model "/models/$MODEL_BASENAME" \
+                --out /opt/mindcloud-yopo/trt/yopo_trt.pth \
+        && echo "YOPO TRT: 引擎构建成功 -> $TRT_ENGINE_HOST" \
+        || echo "YOPO TRT: 自动构建失败 (容器可能缺少 tensorrt/GPU), 将回退 PyTorch eager" >&2
+    fi
+fi
+
 echo "Starting YOPO container $NAME on host port $PORT -> container port 5689 ..."
 if [[ "${YOPO_DETACH:-0}" == "1" ]]; then
     echo "Container is running in detached mode. Stop it later with: docker rm -f $NAME"
