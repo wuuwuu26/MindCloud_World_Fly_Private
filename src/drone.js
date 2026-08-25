@@ -1308,17 +1308,26 @@ export class Drone {
         // 基于 Cesium 真值射线: 探测水平 8 方向障碍距离 + 地面/屋顶间隙 + 三层高度,
         // 生成排斥(rep)/切向绕行(tan)/近障刹车(brake)/竖直越障(vRep)。这是**主动**
         // 避障层: 中距(4~25m)就开始连续绕行+刹车。路径通畅时输出为零 → 不影响导航。
-        // 摇杆抢占 / 已到达(终点悬停)时不干预。
         this._avoidAccScale = 1.0;
+        // 终点接管阶段(yopoNearGoalHold: 距目标 <12m 或已到达)PD 已直接收敛到目标点。
+        // 此阶段势场仍保留"绕行(tan)+减速(brake)+竖直防撞", 但**不叠加法向 rep** ——
+        // 否则 rep 把无人机推离目标, 与 PD 在同一直线来回拉扯 → "前后摆动/徘徊", 且被
+        // 推离后 yopoArrived 永远置不上、势场永久生效(死循环)。只取 tan+brake 既能避开
+        // 接管范围内的障碍(绕行+减速), 又不与 PD 对抗。碰撞另有 _handleCollisions 兜底。
         if (this.yopoAvoidEnabled && this.yopoNavTarget &&
             !stickActive && !this.yopoArrived) {
             this._updateAvoidProbe();
             const avoid = this._avoidanceVelocity(velTargetX, velTargetZ);
             if (avoid) {
-                velTargetX = velTargetX * avoid.brake + avoid.repX + avoid.tanX;
-                velTargetZ = velTargetZ * avoid.brake + avoid.repZ + avoid.tanZ;
-                // 竖直: 地面净空上推 + 竖直越障。方案B: 竖直越障激活时削弱对目标高度的
-                // 急迫收敛(×0.3), 避免被轨迹高度"锁住", 保留竖直自由度去越障。
+                if (yopoNearGoalHold) {
+                    // 终点接管: 仅叠加绕行(tan)与减速(brake), 不加法向 rep(避免推离目标摆动)
+                    velTargetX = velTargetX * avoid.brake + avoid.tanX;
+                    velTargetZ = velTargetZ * avoid.brake + avoid.tanZ;
+                } else {
+                    velTargetX = velTargetX * avoid.brake + avoid.repX + avoid.tanX;
+                    velTargetZ = velTargetZ * avoid.brake + avoid.repZ + avoid.tanZ;
+                }
+                // 竖直: 地面净空上推 + 竖直越障 + 下降运动学刹车。终点段同样保留(防撞地/顶/下障)。
                 velTargetY = velTargetY * avoid.brake;
                 if (avoid.vRep) velTargetY = velTargetY * 0.3 + avoid.vRep;
                 velTargetY += avoid.upPush;
@@ -1846,48 +1855,47 @@ export class Drone {
             repX *= s; repZ *= s;
         }
 
-        // 切向绕行: 直接按 8 方向净空挑"最朝目标且最畅通"的开口侧(稳定不抖, 避免左右横跳),
-        // 被完全围时沿最空方向逃离局部极小。叠加方向滞后记忆: 与上一帧 tan 夹角 >120°
-        // 且上一帧方向此刻仍通畅时, 保持上一帧方向 —— 防止过障碍正中时合力翻转导致来回绕。
+        // 切向绕行: 用"最近障碍方向 dMin"算确定性切向(绕开最近障碍、朝目标侧), 不挑开口 /
+        // 不 fallback 最空方向 —— 避免绕到侧面、朝目标被挡时误选"最空=来路"方向折返
+        // ("绕开又回去")。叠加方向滞后记忆: 与上一帧 tan 夹角 >120° 且上一帧方向此刻仍通畅
+        // 时保持上一帧, 防止过障碍正中时合力翻转导致来回绕。
         let tanX = 0, tanZ = 0;
-        const passMin = this.yopoAvoidStop + 2.0; // 可通行净空下限(>机体半径+余量)
-        if (dMin < R) {
-            let bi = -1, bscore = 0.05;
+        // 仅当正前方较近处确有障碍(dAhead < repRange*0.5 ≈9m)才施加切向绕行。
+        // 通道/狭窄空间里障碍多在两侧, 正前(目标方向=通道纵深)畅通, 若仍施加切向会把
+        // 无人机推向侧壁、卡在通道口进不去; 此条件下正前畅通→不绕行, 由 rep(非终点段)
+        // 推离侧墙保持居中 / 终点段由 PD 收敛中线, 无人机得以直行入通道。正前确有近障
+        // 时才正常绕行。
+        if (dMin < R && dAhead < this.yopoAvoidRepRange * 0.5) {
+            // 找最近障碍方向(dMin 对应的射线方向)
+            let mi = -1;
             for (let i = 0; i < dirs.length; i++) {
                 const d = dists[i];
-                if (!Number.isFinite(d) || d < passMin) continue; // 该方向须可通行
-                const dot = dirs[i].x * udx + dirs[i].z * udz;
-                const s = (des <= 0.3) ? (d / R)
-                    : (dot * 0.5 + 0.5) * (d / R); // 朝目标(0..1) × 净空(R标定)
-                if (s > bscore) { bscore = s; bi = i; }
+                if (!Number.isFinite(d) || d <= 0) continue;
+                if (mi < 0 || d < dists[mi]) mi = i;
             }
-            let fx = 0, fz = 0, ok = false;
-            if (bi >= 0) {
+            if (mi >= 0) {
+                const ox = dirs[mi].x, oz = dirs[mi].z;   // 指向最近障碍
+                // 两个切向候选(垂直于障碍方向): 选朝目标(期望速度)投影更大的一侧绕行;
+                // 目标在障碍正后方时两候选都≈0, 任取一侧继续绕行(不再折返来路)。
+                const tx1 = -oz, tz1 = ox;
+                const tx2 = oz, tz2 = -ox;
+                const c1 = tx1 * udx + tz1 * udz;
+                const c2 = tx2 * udx + tz2 * udz;
+                let fx, fz;
+                if (c1 >= c2) { fx = tx1; fz = tz1; } else { fx = tx2; fz = tz2; }
                 const t = this.yopoAvoidGain * (1 - dMin / this.yopoAvoidRepRange) * 0.95;
-                fx = dirs[bi].x * t; fz = dirs[bi].z * t; ok = true;
-            } else {
-                // 无朝目标可通行开口(被围)→ 沿最空方向逃离局部极小, 而非原地被 rep 顶死
-                let oi = -1, od = -1;
-                for (let i = 0; i < dirs.length; i++) {
-                    if (dists[i] > od) { od = dists[i]; oi = i; }
-                }
-                if (oi >= 0) {
-                    const t = this.yopoAvoidGain * 0.7;
-                    fx = dirs[oi].x * t; fz = dirs[oi].z * t; ok = true;
-                }
-            }
-            if (ok) {
+                fx *= t; fz *= t;
+                // 方向滞后记忆: 与上一帧 tan 夹角 >120° 且上一帧方向此刻仍通畅时, 保持上一帧
                 const lt = this._avoidLastTan || null;
                 if (lt) {
-                    const lm = Math.hypot(lt.x, lt.z);
-                    const nm = Math.hypot(fx, fz);
+                    const lm = Math.hypot(lt.x, lt.z), nm = Math.hypot(fx, fz);
                     if (lm > 1e-3 && nm > 1e-3) {
                         const cos = (fx * lt.x + fz * lt.z) / (nm * lm);
-                        // 上一帧方向此刻是否仍通畅(避免卡死在已堵方向)
                         let lastOk = false;
                         for (let i = 0; i < dirs.length; i++) {
-                            if (Math.abs(dirs[i].x - lt.x) < 0.01 && Math.abs(dirs[i].z - lt.z) < 0.01) {
-                                if (dists[i] > passMin) lastOk = true;
+                            const lnx = lt.x / lm, lnz = lt.z / lm; // 上一帧方向(归一化)
+                            if (Math.abs(dirs[i].x - lnx) < 0.01 && Math.abs(dirs[i].z - lnz) < 0.01) {
+                                if (dists[i] > this.yopoAvoidStop + 2.0) lastOk = true;
                                 break;
                             }
                         }
