@@ -1923,15 +1923,18 @@ export class Drone {
             }
         }
 
-        // ---- 出口识别: 朝目标方向净空充足 → 直飞, 避障完全不干扰往目标点的运动 ----
-        // 关键修正: 只使用"水平环形射线中, 与目标方向最接近的几条"判断通畅度, 严格排除
-        //   fwdDownDist(前下俯视 20°)/groundGap(净空)/ceilHit(屋顶下沿) 这些**竖直/下方**威胁。
-        // 否则在平坦/缓坡/城区做水平巡航时, 前下 20° 探头会扫到前方下方屋檐或地形抬升 →
-        // dAhead 被拉小 → 误判"不通畅" → 被持续减速/推离(即"明明畅通却总被避开")。
-        // 竖直威胁仍由 upPush / vSafeDown 单独处理(只限垂直方向), 不影响水平直飞。
-        // 目标方向优先取"机体→导航目标"真实方位; 无目标时回退到期望速度方向。
+        // ---- 出口识别: 当前前进方向走廊畅通 → 直飞, 不被绕行/避障扰动 ----
+        // 关键修正: 用"飞行走廊"判定通畅度, 而非固定角度锥。走廊 = 以前进方向为中心线、
+        // 半宽 pathHalfWidth 的带状区域; 仅落在走廊内(实测到前进线的垂直偏移 < 半宽)的障碍
+        // 才算"挡在路上"。走廊外的侧旁障碍(即便很近)直接忽略——直飞即可安全通过。
+        // 这彻底解决"畅通时仍被侧旁/下方障碍的绕行+刹车影响": 之前用 ±72° 大前锥, 任何侧旁
+        // 障碍(偏离航线 60°+)都被算作挡路 → 持续切向绕行; 后来收窄到固定角度锥仍有几何缺陷
+        // (正前障碍在阈值内会误判畅通)。走廊法按真实垂直偏移判定, 既不放过正前障碍, 也不误伤侧旁。
+        // 判定轴优先用"期望速度方向"(无人机实际正在前进的方向); 仅在无明确前进方向(悬停/末段)
+        // 时回退到"机体→导航目标"方位。竖直威胁(fwdDownDist/groundGap/ceilHit)一律不参与,
+        // 由 upPush/vSafeDown 单独处理垂直安全。
         let gx = udx, gz = udz;
-        if (this.yopoNavTarget) {
+        if (des <= 0.3 && this.yopoNavTarget) {
             const tdx = this.yopoNavTarget.x - this.x;
             const tdz = this.yopoNavTarget.z - this.z;
             const tl = Math.hypot(tdx, tdz);
@@ -1939,24 +1942,19 @@ export class Drone {
         }
         let goalClear = false;
         if (des > 0.3 || this.yopoNavTarget) {
-            let dg = R, dgMaxDot = -1;     // 最对齐目标方向的射线净空
-            let dCone = R;                 // 目标方向 ±~20° 锥内最小净空(防射线间空隙漏检)
-            let dFwd = R;                  // 目标方向前锥形(dot>0.3)最小净空(真正朝目标途中)
+            const pathHalfWidth = 2.5;                      // m, 飞行走廊半宽(机体半径+余量)
+            const clearThresh = this.yopoAvoidRepRange;     // 走廊内 25m 无障碍才算畅通
+            let dPath = R;                                  // 走廊内最近障碍距离
             for (let i = 0; i < dirs.length; i++) {
                 const dd = dists[i];
                 if (!Number.isFinite(dd) || dd <= 0) continue;
                 const dot = dirs[i].x * gx + dirs[i].z * gz;
-                if (dot > dgMaxDot) { dgMaxDot = dot; dg = dd; }
-                if (dot > 0.94 && dd < dCone) dCone = dd; // 最对齐的 1~3 条(36 射线→10°间隔)
-                if (dot > 0.3  && dd < dFwd)  dFwd  = dd;
+                if (dot <= 0) continue;                     // 身后不算前进路径
+                // 障碍到前进线的垂直偏移 = dd * sin(夹角)
+                const lateral = dd * Math.sqrt(Math.max(0, 1 - dot * dot));
+                if (lateral < pathHalfWidth && dd < dPath) dPath = dd;
             }
-            const clearThresh = this.yopoAvoidRange * 0.5;  // 目标方向净空 > 17.5m
-            const dAheadClear = this.yopoAvoidRange * 0.45; // 朝目标 15.75m 内无障碍
-            // 仅水平通道畅通才直飞: 目标方向射线、其邻近射线、以及前锥形都无障碍 → 果断直飞,
-            // 不被侧向/下方障碍推离绕圈; 若朝目标途中确有近障(dFwd 小)则不直飞, 继续绕行。
-            if (dg > clearThresh && dCone > clearThresh * 0.8 && dFwd > dAheadClear) {
-                goalClear = true;
-            }
+            if (dPath > clearThresh) goalClear = true;
         }
 
         // ---- 竖直越障 (A) ----
