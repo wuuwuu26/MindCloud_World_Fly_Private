@@ -1923,27 +1923,40 @@ export class Drone {
             }
         }
 
-        // ---- 出口识别: 目标方向净空充足 → 直飞, 不被侧向 rep 推回而绕圈/绕回起点 ----
-        // 取最对齐目标方向(=期望速度方向 udx/udz)的射线净空 dg。dg 充足说明正前方有路,
-        // 此时大幅削弱水平 rep/tan, 让无人机沿 YOPO 直飞目标, 避免被侧向障碍推离绕大圈。
+        // ---- 出口识别: 朝目标方向净空充足 → 直飞, 避障完全不干扰往目标点的运动 ----
+        // 关键修正: 只使用"水平环形射线中, 与目标方向最接近的几条"判断通畅度, 严格排除
+        //   fwdDownDist(前下俯视 20°)/groundGap(净空)/ceilHit(屋顶下沿) 这些**竖直/下方**威胁。
+        // 否则在平坦/缓坡/城区做水平巡航时, 前下 20° 探头会扫到前方下方屋檐或地形抬升 →
+        // dAhead 被拉小 → 误判"不通畅" → 被持续减速/推离(即"明明畅通却总被避开")。
+        // 竖直威胁仍由 upPush / vSafeDown 单独处理(只限垂直方向), 不影响水平直飞。
+        // 目标方向优先取"机体→导航目标"真实方位; 无目标时回退到期望速度方向。
+        let gx = udx, gz = udz;
+        if (this.yopoNavTarget) {
+            const tdx = this.yopoNavTarget.x - this.x;
+            const tdz = this.yopoNavTarget.z - this.z;
+            const tl = Math.hypot(tdx, tdz);
+            if (tl > 0.5) { gx = tdx / tl; gz = tdz / tl; }
+        }
         let goalClear = false;
-        if (des > 0.3) {
-            let dg = R, dgMax = -1;
+        if (des > 0.3 || this.yopoNavTarget) {
+            let dg = R, dgMaxDot = -1;     // 最对齐目标方向的射线净空
+            let dCone = R;                 // 目标方向 ±~20° 锥内最小净空(防射线间空隙漏检)
+            let dFwd = R;                  // 目标方向前锥形(dot>0.3)最小净空(真正朝目标途中)
             for (let i = 0; i < dirs.length; i++) {
                 const dd = dists[i];
                 if (!Number.isFinite(dd) || dd <= 0) continue;
-                const dot = dirs[i].x * udx + dirs[i].z * udz;
-                if (dot > dgMax) { dgMax = dot; dg = dd; }
+                const dot = dirs[i].x * gx + dirs[i].z * gz;
+                if (dot > dgMaxDot) { dgMaxDot = dot; dg = dd; }
+                if (dot > 0.94 && dd < dCone) dCone = dd; // 最对齐的 1~3 条(36 射线→10°间隔)
+                if (dot > 0.3  && dd < dFwd)  dFwd  = dd;
             }
-            const clearThresh = this.yopoAvoidRange * 0.5; // 目标方向净空 > 12.5m
-            // 出口判定以"朝目标方向实际畅通度"为准, 而非"离最近障碍距离":
-            //   dg    = 最对齐目标方向射线的净空
-            //   dAhead= 朝目标前进途中(期望速度方向附近)的最近障碍距离
-            // 仅当 目标方向净空足(dg) 且 朝目标前进途中畅通(dAhead 大) 才直飞。
-            // → 接近终点、朝目标一路畅通时果断直飞, 不再被侧旁障碍的 dMin 误触发绕行;
-            // → 侧面绕回场景若朝目标近处仍被挡(dAhead 小)则不直飞, 继续绕到真正出口。
-            const dAheadClear = this.yopoAvoidRange * 0.6; // 朝目标方向 15m 内无障碍
-            if (dg > clearThresh && dAhead > dAheadClear) goalClear = true;
+            const clearThresh = this.yopoAvoidRange * 0.5;  // 目标方向净空 > 17.5m
+            const dAheadClear = this.yopoAvoidRange * 0.45; // 朝目标 15.75m 内无障碍
+            // 仅水平通道畅通才直飞: 目标方向射线、其邻近射线、以及前锥形都无障碍 → 果断直飞,
+            // 不被侧向/下方障碍推离绕圈; 若朝目标途中确有近障(dFwd 小)则不直飞, 继续绕行。
+            if (dg > clearThresh && dCone > clearThresh * 0.8 && dFwd > dAheadClear) {
+                goalClear = true;
+            }
         }
 
         // ---- 竖直越障 (A) ----
@@ -1991,14 +2004,14 @@ export class Drone {
         tanX *= repHold; tanZ *= repHold;
 
         // 出口畅通时彻底解除水平排斥/切向/刹车, 直飞目标:
-        // 这是"明明没障碍却总被推开"的根治点——只要最对齐目标方向的射线净空充足(dg>clearThresh)
-        // 且前进途中无障碍(dAhead>dAheadClear), 就全速直飞, 不叠加任何 rep/tan/brake。
-        // 此前仅 rep*0.15 且完全没动 brake, 导致即便判定出口畅通, 只要 dAhead 偏小就被持续减速拖住,
-        // 体感就是"被推开/推不动"。现改为全清零: 畅通=全速直飞(仍要求 dAhead>21m, 物理上刹得住)。
-        if (goalClear) {
+        // 这是"明明没障碍却总被推开"的根治点——只要朝目标方向的水平通道净空充足(dg>clearThresh
+        // 且邻近射线/前锥形无障碍), 就全速直飞, 不叠加任何 rep/tan/brake。
+        // 注意: 仅当确有前进意图(des>0.3)才解除——悬停时仍保留 rep/tan 维持与障碍的安全间距,
+        // 不被误判为"畅通"而漂向墙面。竖直安全(upPush/vSafeDown)始终生效, 与水平直飞互不干扰。
+        if (goalClear && des > 0.3) {
             repX = 0; repZ = 0;          // 水平排斥彻底归零(不再留 15% 残余推力)
             tanX = 0; tanZ = 0;          // 切向完全去掉(避免绕回起点)
-            brake = 1.0;                 // 出口畅通即全速, 不被 dAhead 偏小误减速
+            brake = 1.0;                 // 出口畅通即全速, 不被竖直威胁误减速
         }
 
         return { repX, repZ, tanX, tanZ, brake, upPush, vRep, vSafeDown };
