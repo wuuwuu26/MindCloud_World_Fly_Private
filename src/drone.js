@@ -179,28 +179,32 @@ export class Drone {
         // 重规划(深度环)较慢时, 过大的加速度会让无人机在下一指令到达前冲入障碍. 限幅留余量.
         this.yopoAccMax = 8.0;
         // ── 几何反应式避障 (势场法, 基于 Cesium 真值射线) —— 参考 git 3b92a03 ──
-        // 与 DA360 深度无关: 直接用 world.pickLocalRay 探测水平 8 方向障碍距离 +
+        // 与 DA360 深度无关: 直接用 world.pickLocalRay 探测水平 360° 环形障碍距离 +
         // 地面/屋顶间隙 + 三层高度(当前/上/下), 生成排斥(rep)/切向绕行(tan)/
         // 近障刹车(brake)/竖直越障(vRep)。仅当障碍进入探测半径才生效, 路径畅通时
         // 输出为零 → 不影响正常导航。
         this.yopoAvoidEnabled = true;
-        this.yopoAvoidRays = [
-            { x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 },
-            { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 },
-            { x: 0.7071, y: 0, z: 0.7071 }, { x: -0.7071, y: 0, z: 0.7071 },
-            { x: 0.7071, y: 0, z: -0.7071 }, { x: -0.7071, y: 0, z: -0.7071 },
-        ];
-        this.yopoAvoidRange = 25.0;   // 障碍探测半径 (m) — 给 12m/s 巡航足够反应距离
-        this.yopoAvoidRepRange = 18.0; // 排斥/切向作用距离 (m): 增大后障碍在更远处就开始
-                                      // 生效(更早感知、更早绕行)。原 12m 在 12m/s 下仅 1s
-                                      // 反应 → 感觉"迟钝"; 18m 给 ~1.5s 主动避障窗口。
-        this.yopoAvoidGain = 6.0;     // 排斥/切向速度增益 (m/s): 调低使推离更温和, 不猛冲过头
-                                      // 原 8 偏温和, 12 明显更快推开/绕开障碍。
-        this.yopoAvoidDecel = 9.0;    // 安全刹车减速度 (m/s²): 运动学 v_safe=√(2ad)。
-                                      // 12m/s 刹车距离 v²/2a=8m, 需 decel≥9 才能在探测
-                                      // 滞后(~1m)+响应延迟内刹停且留余量。物理上限 ~15.7
-                                      // (58° 倾角), 9.0 是速度环能实现的保守值。
-        this.yopoAvoidQueryMs = 50;   // 射线探测节流 (ms): 12m/s 时每 0.6m 更新一次,
+        // 360° 均匀环形射线: 取代原 8 向粗采样(45° 间隔会在侧向/斜向留下大空隙, 漏检墙角/柱/凹槽)。
+        // 生成 yopoAvoidRayCount 条等角分布的水平射线, 任意方向障碍都能被探测到。
+        this.yopoAvoidRayCount = 36;       // 360° 射线数(10° 间隔); 越大越密、射线开销越高, 卡顿时可下调
+        this.yopoAvoidRays = (() => {
+            const arr = [], N = this.yopoAvoidRayCount;
+            for (let i = 0; i < N; i++) {
+                const a = (i * 2 * Math.PI) / N;   // 水平面等角分布, 覆盖完整 360°
+                arr.push({ x: Math.cos(a), y: 0, z: Math.sin(a) });
+            }
+            return arr;
+        })();
+        this.yopoAvoidRange = 35.0;   // 障碍探测半径 (m) — 18m/s 巡航需更长前瞻: 刹车距离 v²/2a≈13.5m,
+                                      // 35m 给足探测滞后+响应余量, 障碍更早进入感知。
+        this.yopoAvoidRepRange = 26.0; // 排斥/切向作用距离 (m): 增大后障碍在更远处就开始
+                                      // 生效(更早感知、更早绕行)。18m/s 下 26m 提供 ~1.4s 主动避障窗口。
+        this.yopoAvoidGain = 10.0;    // 排斥/切向速度增益 (m/s): 高速下需更大横向推离力才能绕开;
+                                      // 经归一化后最大推离/绕行速度≈gain, 10 对 18m/s 前向更稳。
+        this.yopoAvoidDecel = 12.0;   // 安全刹车减速度 (m/s²): 运动学 v_safe=√(2ad)。
+                                      // 18m/s 刹车距离 v²/2a=13.5m, 需 decel≥12 才能在探测
+                                      // 滞后+响应延迟内刹停且留余量。物理上限 ~15.7(58° 倾角)。
+        this.yopoAvoidQueryMs = 35;   // 射线探测节流 (ms): 18m/s 时每 0.63m 更新一次,
                                       // 探测更密 → 障碍信息更实时, 避障响应更快。
         this.yopoMinAlt = 2.5;        // 地面/屋顶最小净空 (m) — 软避障(上推)触发阈值
         this.yopoAvoidFanHalf = 0.8;  // 扇形射线束半宽 (m): 覆盖机体半宽+余量, 防凹槽漏检
@@ -213,8 +217,10 @@ export class Drone {
         this.yopoAvoidVertRange = 12.0;   // 竖直射线探测范围 (m)
         // —— 竖直越障 (A+B 方案) ——
         this.yopoAvoidVStep = 8.0;        // 竖直探测抬升/下探步长 (m), *2 高层可越更高楼
-        this.yopoAvoidVClimbScale = 0.5;  // 竖直越障速度 = gain * scale (m/s)
-        this.yopoAvoidVBlock = 8.0;       // 前进净空 < 此值才触发竖直越障 (m)
+        this.yopoAvoidVClimbScale = 0.9;  // 竖直越障速度 = gain*scale; 原 6*0.5=3m/s, 现 10*0.9=9m/s,
+                                          // 高速下越障爬升更快; < droneMaxVSpeed=12 安全
+        this.yopoAvoidVBlock = 12.0;      // 前进净空 < 此值即触发竖直越障 (m): 18m/s 下 stop+12≈13.1m≈0.73s,
+                                          // 比原 8m(0.44s)留更多越障提前量, 免得临到障碍才爬
         this.yopoAvoidVClear = 0.45;      // 上层视为"畅通"的距离占比 (> R*该值 即畅通)
         this.yopoAvoidStop = this.yopoAvoidFanHalf + 0.3; // ≈1.1m 安全净空 (贴合机体)
         this._avoidProbe = null;      // 势场射线探测缓存
@@ -1210,8 +1216,9 @@ export class Drone {
         // YOPO 导航最大水平速度。服务端默认 YOPO_VELOCITY=8.0(巡航 vel_max≈8),
         // 位置环误差贡献限幅 4 m/s + 速度前馈 12 m/s → 峰值≈16 m/s, 钳制到 13
         // 保留跟踪余量, 避免网络切换高速轨迹时位置误差把速度目标顶到上限造成"突然猛冲"。
-        // (12.0 巡航是实测折中: 8.0 太慢, 16.0 端点爆速 76m/s 会猛冲。)
-        const yopoMaxSpd = 13.0;
+        // 提速到 20.0 m/s: 配合服务端 YOPO_VELOCITY=15 + 客户端 yopoPosErrMaxV=15 解锁位置环巡航,
+        // 实际巡航 ~12-15 m/s、端点 ~16-19; 硬上限 20 防爆速猛冲。避障已配套加大探测半径/刹车/增益。
+        const yopoMaxSpd = 20.0;
         const maxSpd = stickActive ? this.droneMaxSpeed : yopoMaxSpd;
         const rates = input.rates || { roll: 1, pitch: 1, yaw: 1 };
 
@@ -1284,11 +1291,12 @@ export class Drone {
 
             const yopoPosKp = 1.0;   // 位置环增益: 兼顾"拉回旧指令位置"趋势与巡航速度。配合服务端时间缩放, 让无人机更紧地追上更快的指令。
             const yopoAltKp = 1.2;   // 高度环增益: 3D 导航下垂直误差由网络轨迹主导, 位置环仅纠偏
-            // 位置误差项限幅: replan 瞬间 yopoCmdPos 可能因网络切换高速轨迹而跳变,
-            // 若 1.0*posErr 直接叠加前馈会把速度目标顶到 yopoMaxSpd 上限 → "突然飞得很快"。
-            // 限幅后跟踪仍收敛(持续偏差时维持上限速度), 但抑制指令跳变引发的猛冲。
-            const yopoPosErrMaxV = 4.0;  // 水平位置误差贡献上限 (m/s)
-            const yopoAltErrMaxV = 6.0;  // 垂直位置误差贡献上限 (m/s): 3D 导航允许垂直机动
+            // 位置误差项限幅: 原为 4.0 把巡航死死卡在 ±4 m/s(用户实测 0~4m/s 的根因——
+            // 当服务端速度前馈 ffX≈0 时, 无人机只能靠位置环追 cmdPos, 被 4 上限限成龟速)。
+            // 提到 15 后, 位置环可输出与 YOPO 规划速度(~15)匹配的水平/垂直速度, 真正解锁巡航;
+            // 仍由 yopoMaxSpd 硬钳制防 replan 跳变猛冲, 且避障已加强足以托住高速。
+            const yopoPosErrMaxV = 15.0;  // 水平位置误差贡献上限 (m/s): 匹配 yopo 速度上限 ~15
+            const yopoAltErrMaxV = 15.0;  // 垂直位置误差贡献上限 (m/s): 3D 导航允许垂直机动
             velTargetX = clamp(yopoPosKp * posErrX, -yopoPosErrMaxV, yopoPosErrMaxV) + ffX;
             velTargetZ = clamp(yopoPosKp * posErrZ, -yopoPosErrMaxV, yopoPosErrMaxV) + ffZ;
             velTargetY = clamp(yopoAltKp * posErrY, -yopoAltErrMaxV, yopoAltErrMaxV) + ffY;
@@ -1305,7 +1313,7 @@ export class Drone {
         }
 
         // ── 几何反应式避障 (势场法, 参考 git 3b92a03) ──
-        // 基于 Cesium 真值射线: 探测水平 8 方向障碍距离 + 地面/屋顶间隙 + 三层高度,
+        // 基于 Cesium 真值射线: 探测水平 360° 环形障碍距离 + 地面/屋顶间隙 + 三层高度,
         // 生成排斥(rep)/切向绕行(tan)/近障刹车(brake)/竖直越障(vRep)。这是**主动**
         // 避障层: 中距(4~25m)就开始连续绕行+刹车。路径通畅时输出为零 → 不影响导航。
         this._avoidAccScale = 1.0;
@@ -1563,7 +1571,7 @@ export class Drone {
     }
 
     /**
-     * 探测水平 8 方向障碍距离 + 地面/屋顶间隙 (世界系, 单位 m)。
+     * 探测水平 360° 环形障碍距离 + 地面/屋顶间隙 (世界系, 单位 m)。
      * 采用"扇形射线束": 每个主方向从机体左右偏移点发出多条平行射线, 取最近距离。
      * 单条中心射线在遇建筑物内凹部分(凹窗/门洞/凹墙面)时, 会穿过凹槽而漏检,
      * 两侧偏移射线能命中凹槽两边的墙沿, 从而把"凹进去的墙"当作障碍感知,
@@ -1625,17 +1633,25 @@ export class Drone {
         const fanCountOf = (i) => (fwdFanIdx.indexOf(i) >= 0 ? this.yopoAvoidFanRays : 1);
 
         // 屋顶/悬挑下沿探测: 向上看是否存在遮挡, 防止钻入低矮檐口/凹槽顶。
-        // 只探测前方 2 个主方向(前/后), 由 8 方向降为 2, 大幅降开销。
+        // 屋顶/悬挑下沿探测: 向上看遮挡, 防钻入低矮檐口/凹槽顶。环形布局无固定"前/后",
+        // 故按与前进方向最对齐的 2 条射线做上探(静止/无前向时回退 dirs[0]/[1])。
         let ceilHit = false;
         if (this.yopoAvoidCeilRay) {
             const oUp = { x: this.x, y: this.y + this.yopoAvoidCeilLook, z: this.z };
-            for (let i = 0; i < 2; i++) {
+            const cand = [];
+            for (let i = 0; i < dirs.length; i++) {
+                const dot = dirs[i].x * fwdHx + dirs[i].z * fwdHz;
+                if (dot > 0.3) cand.push({ i, dot });
+            }
+            cand.sort((p, q) => q.dot - p.dot);
+            const probeIdx = cand.length >= 2 ? [cand[0].i, cand[1].i] : [0, 1];
+            for (const i of probeIdx) {
                 const h = pickF(oUp, dirs[i], Math.min(R, 6));
                 if (h && Number.isFinite(h.distance) && h.distance > 0.04) { ceilHit = true; break; }
             }
         }
 
-        // 高度探测: mid(当前高度)全部 8 方向; high/high2/low 只对"最对齐前进方向"
+        // 高度探测: mid(当前高度)全部环形方向; high/high2/low 只对"最对齐前进方向"
         // 的 2 条射线探测 — 竖直越障只关心前进方向能否上越/下钻, 减少射线数提帧率。
         const dists = new Array(dirs.length);
         const distsHigh = new Array(dirs.length);
@@ -1974,10 +1990,15 @@ export class Drone {
         repX *= repHold; repZ *= repHold;
         tanX *= repHold; tanZ *= repHold;
 
-        // 出口畅通时大幅削弱水平排斥/切向(保留少量避让), 让无人机果断直飞目标, 不绕回起点
+        // 出口畅通时彻底解除水平排斥/切向/刹车, 直飞目标:
+        // 这是"明明没障碍却总被推开"的根治点——只要最对齐目标方向的射线净空充足(dg>clearThresh)
+        // 且前进途中无障碍(dAhead>dAheadClear), 就全速直飞, 不叠加任何 rep/tan/brake。
+        // 此前仅 rep*0.15 且完全没动 brake, 导致即便判定出口畅通, 只要 dAhead 偏小就被持续减速拖住,
+        // 体感就是"被推开/推不动"。现改为全清零: 畅通=全速直飞(仍要求 dAhead>21m, 物理上刹得住)。
         if (goalClear) {
-            repX *= 0.15; repZ *= 0.15;
-            tanX = 0; tanZ = 0;
+            repX = 0; repZ = 0;          // 水平排斥彻底归零(不再留 15% 残余推力)
+            tanX = 0; tanZ = 0;          // 切向完全去掉(避免绕回起点)
+            brake = 1.0;                 // 出口畅通即全速, 不被 dAhead 偏小误减速
         }
 
         return { repX, repZ, tanX, tanZ, brake, upPush, vRep, vSafeDown };

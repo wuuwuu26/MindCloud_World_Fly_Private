@@ -90,12 +90,12 @@ if [ "$DO_YOPO" = "1" ]; then
     # 默认部署 YOPO_40 (wc=8, 学习式避障) + TensorRT 加速 (YOPO_USE_TRT=1)。
     # 引擎缺失时仍正常启动(回退 PyTorch eager), 并给出生成引擎的提示。
     # 如需切回其他模型, 将下方 YOPO_MODEL_PATH 改为对应 checkpoint 即可。
-    # 巡航速度默认 YOPO_VELOCITY=12.0 (vel_max≈12 m/s, acc_max≈24 m/s²):
+    # 巡航速度默认 YOPO_VELOCITY=15.0 (vel_max≈15 m/s, acc_max≈37.5 m/s²):
     # 实测对比 — 8.0 巡航仅 ~7 m/s(太慢, 用户反馈 0.5m/s 即源于此);
     # 16.0 轨迹端点被网络预测放大到 ~76 m/s(即"突然飞得很快"的爆速真凶);
-    # 12.0 中段巡航 7-12 m/s、端点 13-16 m/s, 快而可控, 客户端还有
-    # yopoPosErrMaxV=4 位置误差限幅 + yopoMaxSpd=13 钳制双保险防猛冲。
-    # 想更快可设 YOPO_VELOCITY=14; 更稳可降到 10。
+    # 15.0 中段巡航 ~12-15 m/s、端点 ~16-19 m/s, 快而可控。客户端侧已把
+    # yopoPosErrMaxV 提到 15(解锁位置环巡航上限) + yopoMaxSpd=20 钳制双保险防猛冲。
+    # 想更快可设 YOPO_VELOCITY=16~18(注意爆速风险); 更稳可降到 12。
     # YOPO_CTRL_TIME_SCALE=2: 指令连续修复后的提速手段。轨迹重建从 0 起步保证位置/
     # 速度连续(实测重规划跳变 10.4m→0.36m), 速度由控制环时间缩放提供 —— SCALE=2 时
     # 巡航≈7-8 m/s 且重规划跳变仅 0.36m(可接受), 相比 SCALE=1(4.7m/s)提速 48%,
@@ -109,7 +109,7 @@ if [ "$DO_YOPO" = "1" ]; then
     YOPO_DETACH=1 \
         YOPO_MODEL_PATH="$SCRIPT_DIR/third_party/yopo/saved/YOPO_40/epoch50.pth" \
         YOPO_USE_TRT=1 \
-        YOPO_VELOCITY=12.0 \
+        YOPO_VELOCITY=15.0 \
         YOPO_CTRL_TIME_SCALE=2 \
         ./scripts/start_yopo_api.sh >/tmp/restart_yopo.log 2>&1 &
     YOPO_PID=$!
