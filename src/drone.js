@@ -200,8 +200,12 @@ export class Drone {
         this.yopoAvoidRepRange = 15.0; // 排斥/切向作用距离 (m): 已调小(原 26)→ 障碍更近才触发
                                       // 主动避障, 畅通时更早解除、少绕行。配合更大 decel 仍能刹停:
                                       // 18m/s 下 15m 提供 ~0.83s 窗口, 刹车距离 v²/2a≈10.8m < 15m。
-        this.yopoAvoidGain = 10.0;    // 排斥/切向速度增益 (m/s): 高速下需更大横向推离力才能绕开;
-                                      // 经归一化后最大推离/绕行速度≈gain, 10 对 18m/s 前向更稳。
+        this.yopoAvoidGain = 10.0;    // 通用避障增益基准: 现主要用于竖直安全(upPush/vRep=
+                                      // gain*系数), 水平 rep/tan 已拆为下方独立增益以便分别调强弱。
+        this.yopoAvoidRepGain = 4.0;  // 排斥(径向推离)最大速度 (m/s): 调小→绕行时不再被猛推离、
+                                      // 机体不被推离航线过远; 贴障保持由碰撞系统兜底。
+        this.yopoAvoidTanGain = 14.0; // 切向(绕行)速度增益 (m/s): 调大→遇障时更果断朝目标侧绕行、
+                                      // 更快绕过, 解决"排斥大、切向弱→总被推回而非绕开"。
         this.yopoAvoidDecel = 15.0;   // 安全刹车减速度 (m/s²): 已调大(原 12)→ 运动学 v_safe=√(2ad)
                                       // 更短, 触发距离减小后仍能刹停且留余量。物理上限 ~15.7(58° 倾角),
                                       // 取 15 逼近上限使减速更果断; 实际减速受 yopoAccMax 钳制。
@@ -1868,7 +1872,7 @@ export class Drone {
         const repMag = Math.hypot(repX, repZ);
         // 排斥强度限幅
         if (repMag > 1e-6) {
-            const s = Math.min(1, this.yopoAvoidGain / repMag);
+            const s = Math.min(1, this.yopoAvoidRepGain / repMag);
             repX *= s; repZ *= s;
         }
 
@@ -1900,7 +1904,7 @@ export class Drone {
                 const c2 = tx2 * udx + tz2 * udz;
                 let fx, fz;
                 if (c1 >= c2) { fx = tx1; fz = tz1; } else { fx = tx2; fz = tz2; }
-                const t = this.yopoAvoidGain * (1 - dMin / this.yopoAvoidRepRange) * 0.95;
+                const t = this.yopoAvoidTanGain * (1 - dMin / this.yopoAvoidRepRange);
                 fx *= t; fz *= t;
                 // 方向滞后记忆: 与上一帧 tan 夹角 >120° 且上一帧方向此刻仍通畅时, 保持上一帧
                 const lt = this._avoidLastTan || null;
