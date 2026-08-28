@@ -212,8 +212,9 @@ export class Drone {
                                       // gain*系数), 水平 rep/tan 已拆为下方独立增益以便分别调强弱。
         this.yopoAvoidRepGain = 12.0; // 排斥(径向推离)最大速度 (m/s): 加强到 12, 遇障更果断推离/绕开
                                       // (配合 repRange 增大更及时), 不再被"推回而非绕开"
-        this.yopoAvoidTanGain = 24.0; // 切向(绕行)速度增益 (m/s): 加强到 24, 遇障时更果断朝目标侧
+        this.yopoAvoidTanGain = 36.0; // 切向(绕行)速度增益 (m/s): 加强到 36, 遇障时更果断朝目标侧
                                       // 绕行、更快绕过, 解决"排斥大、切向弱→总被推回而非绕开"。
+                                      // 配合 _controlYOPO 内"侧向速度预算预留", 绕行分量不再被前向淹没。
         this.yopoAvoidDecel = 8.0;    // v_safe=√(2ad) 刹车阈值所用的【假定减速度】(m/s²), 故意取低于
                                       // yopoAccMax(11): 让运动学刹车【提早触发】+ 留足余量(10m/s 巡航时在
                                       // ~8m 处即开始减速, 而非更晚)。真实刹停能力由 yopoAccMax=11 提供
@@ -1354,8 +1355,33 @@ export class Drone {
                     velTargetX = velTargetX * avoid.brake + avoid.tanX;
                     velTargetZ = velTargetZ * avoid.brake + avoid.tanZ;
                 } else {
-                    velTargetX = velTargetX * avoid.brake + avoid.repX + avoid.tanX;
-                    velTargetZ = velTargetZ * avoid.brake + avoid.repZ + avoid.tanZ;
+                    // 水平绕障核心: 把"前进进度"与"侧向绕行(rep+tan)"拆开预算。
+                    // 此前 velTarget=前进*brake+rep+tan 后再整体被 maxSpd 限幅, 前向分量占大头、
+                    // 切向被按比例削掉 → "边全速前冲边轻蹭", 绕不过去。
+                    // 现将侧向绕行矢量单独保留, 障碍越近/绕行越强, 越压低前向分量,
+                    // 让速度矢量真正偏向切向(贴着障碍滑过去)。侧向最多占 70% 速度预算,
+                    // 前向至少保留 30%, 避免完全停滞; 绕过后 dAhead 增大、steer 归零, 自动恢复全速。
+                    const fwdX = velTargetX * avoid.brake;
+                    const fwdZ = velTargetZ * avoid.brake;
+                    const steerX = avoid.repX + avoid.tanX;
+                    const steerZ = avoid.repZ + avoid.tanZ;
+                    const steerMag = Math.hypot(steerX, steerZ);
+                    if (steerMag > 1e-3) {
+                        const lateralBudget = Math.min(maxSpd * 0.70, steerMag);
+                        const fwdAllow = Math.max(maxSpd * 0.30, maxSpd - lateralBudget);
+                        const fwdMag = Math.hypot(fwdX, fwdZ);
+                        if (fwdMag > fwdAllow) {
+                            const s = fwdAllow / fwdMag;
+                            velTargetX = fwdX * s + steerX;
+                            velTargetZ = fwdZ * s + steerZ;
+                        } else {
+                            velTargetX = fwdX + steerX;
+                            velTargetZ = fwdZ + steerZ;
+                        }
+                    } else {
+                        velTargetX = fwdX + steerX;
+                        velTargetZ = fwdZ + steerZ;
+                    }
                 }
                 // 竖直障碍(正下/正上方有障)水平绕行: 叠加 vGo 平滑离开障碍足迹(不升不降)
                 velTargetX += avoid.vGoX;
@@ -1868,12 +1894,12 @@ export class Drone {
         // ("绕开又回去")。叠加方向滞后记忆: 与上一帧 tan 夹角 >120° 且上一帧方向此刻仍通畅
         // 时保持上一帧, 防止过障碍正中时合力翻转导致来回绕。
         let tanX = 0, tanZ = 0;
-        // 仅当正前方较近处确有障碍(dAhead < repRange*0.5 ≈9m)才施加切向绕行。
-        // 通道/狭窄空间里障碍多在两侧, 正前(目标方向=通道纵深)畅通, 若仍施加切向会把
-        // 无人机推向侧壁、卡在通道口进不去; 此条件下正前畅通→不绕行, 由 rep(非终点段)
-        // 推离侧墙保持居中 / 终点段由 PD 收敛中线, 无人机得以直行入通道。正前确有近障
-        // 时才正常绕行。
-        if (dMin < R && dAhead < this.yopoAvoidRepRange * 0.5) {
+        // 仅当正前方较近处确有障碍才施加切向绕行。门槛放宽到 repRange*0.8 ≈16m:
+        // 此前 0.5(≈9m) 太晚, 等临近才绕、横向机动距离不足、常"绕不开又撞上"。
+        // 16m 提前起步, 配合下方侧向速度预算, 无人机有充足距离完成绕行弧线。
+        // 通道/狭窄空间里障碍多在两侧, 正前(目标方向=通道纵深)畅通(dAhead 大)→不绕行,
+        // 由 rep(非终点段)推离侧墙保持居中 / 终点段由 PD 收敛中线, 无人机得以直行入通道。
+        if (dMin < R && dAhead < this.yopoAvoidRepRange * 0.8) {
             // 找最近障碍方向(dMin 对应的射线方向)
             let mi = -1;
             for (let i = 0; i < dirs.length; i++) {
