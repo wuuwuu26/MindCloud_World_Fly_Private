@@ -1763,7 +1763,9 @@ export class Drone {
 
         let repX = 0, repZ = 0;
         let dMin = R;        // 整体最近障碍 (排斥/切向强度)
-        let dAhead = R;      // 前进方向威胁 (刹车用)
+        let dAhead = R;      // 前进方向威胁(含竖直威胁, 用于刹车/上推)
+        let dAheadH = R;     // 仅水平环射线的最前进距离(不含 fwdDownDist/groundGap/ceilHit),
+                             // 专用于竖直越障判定, 避免竖直威胁把 dAhead 拉小误触发上越/下钻。
         let openDirX = 0, openDirZ = 0, openMax = -1;
 
         const des = Math.hypot(velTargetX, velTargetZ);
@@ -1783,6 +1785,7 @@ export class Drone {
             // 前进方向威胁: 期望速度方向附近的障碍计入刹车
             const dot = dirs[i].x * udx + dirs[i].z * udz;
             if (des > 0.3 ? (dot > 0.5 && d < dAhead) : (d < dAhead)) dAhead = d;
+            if (des > 0.3 ? (dot > 0.5 && d < dAheadH) : (d < dAheadH)) dAheadH = d;
         }
 
         // 地面/屋顶间隙不足 → 上推 + 参与刹车
@@ -1975,7 +1978,11 @@ export class Drone {
         // 否则下方畅通→下钻。探测随高度动态刷新, 无人机持续爬升直到越过障碍顶。
         let vRep = 0;
         const blockDist = this.yopoAvoidStop + this.yopoAvoidVBlock;
-        if (dAhead < blockDist && des > 0.3 && p.distsHigh && p.distsHigh2 && p.distsLow) {
+        // 竖直越障只在"去往目标的水平走廊确实被挡"时才触发: 用 !goalClear(前进走廊内有障碍)且
+        // 水平前进近距(dAheadH<blockDist)双重判定。dAhead 含 fwdDownDist/groundGap/ceilHit 等竖直
+        // 威胁(用于刹车/上推), 若直接用会把 dAhead 拉小 → "往目标方向畅通却误上越/下钻"。改用
+        // 纯水平的 dAheadH + 走廊判定后, 仅在正前方确有水平障碍(而非下方净空不足)时才爬升/下钻。
+        if (!goalClear && dAheadH < blockDist && des > 0.3 && p.distsHigh && p.distsHigh2 && p.distsLow) {
             // 只从已做高层探测的 2 条方向(vProbeIdx 记录在 probe 的 highProbeIdx 中)里
             // 选最对齐前进方向的射线: 保证 dH/dH2/dL 是真实高层距离而非 mid 值。
             let bi = -1, bdot = 0.5;
@@ -2022,6 +2029,7 @@ export class Drone {
             repX = 0; repZ = 0;          // 水平排斥彻底归零(不再留 15% 残余推力)
             tanX = 0; tanZ = 0;          // 切向完全去掉(避免绕回起点)
             brake = 1.0;                 // 出口畅通即全速, 不被竖直威胁误减速
+            vRep = 0;                    // 竖直越障也解除: 走廊畅通不爬升/下钻
         }
 
         return { repX, repZ, tanX, tanZ, brake, upPush, vRep, vSafeDown };
