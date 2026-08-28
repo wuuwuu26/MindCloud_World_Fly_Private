@@ -2058,14 +2058,18 @@ export class Drone {
         const vGoThresh = this.yopoAvoidStop + 3.0;   // ~4.1m: 脚下/头顶近障视为挡路
                                                       // 不要调大: 高空飞越楼顶时"正下方"射线必然打到楼体,
                                                       // 阈值一放大就会在"往目标畅通"时无谓横向绕行。
-                                                      // 且 vGo 不受 goalClear 门控, 调大等于常态偏航。
+                                                      // vGo 现受 goalClear 门控(见下方条件): 通道畅通时不横向推离。
         const gg = Number.isFinite(p.groundGap) ? p.groundGap : R;
         // 正下方是"结构而非地形": 直下命中远高于地面 → 是建筑/悬挑而非贴地。贴地地形(无建筑)
         // 仍走 upPush/vSafeDown 正常处理, 不会被此处拦截而禁止下降(否则低空飞行无法降落)。
         const structBelow = Number.isFinite(p.vDownDist) && p.vDownDist < vGoThresh &&
             (gg - p.vDownDist > 1.5);
         const aboveBlocked = Number.isFinite(p.vUpDist) && p.vUpDist < vGoThresh;
-        if ((structBelow || aboveBlocked) && !nearGoal) {
+        // 关键修正: vGo 受 goalClear 门控——仅当"去往目标的水平通道不畅通"才做竖直障碍足迹水平绕行。
+        // 此前 vGo 不受 goalClear 约束, 导致无人机在楼顶上方(正下方命中楼体→structBelow)且去往目标
+        // 路径本已畅通时, 仍被强行横向推离, 表现为"畅通直飞却莫名绕行"。通道畅通时飞行高度足够、
+        // 无需离开楼顶足迹, 直接直飞即可; 竖直安全(upPush/vSafeDown)始终生效防撞地/顶。
+        if ((structBelow || aboveBlocked) && !nearGoal && !goalClear) {
             // 选水平最空方向离开障碍足迹: 优先"前向半球最空", 否则用全局最空(openDir),
             // 保证绕行同时尽量向目标前进, 不折返来路。
             let ox = openDirX, oz = openDirZ;
