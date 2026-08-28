@@ -1340,6 +1340,9 @@ export class Drone {
                     velTargetX = velTargetX * avoid.brake + avoid.repX + avoid.tanX;
                     velTargetZ = velTargetZ * avoid.brake + avoid.repZ + avoid.tanZ;
                 }
+                // 竖直障碍(正下/正上方有障)水平绕行: 叠加 vGo 平滑离开障碍足迹(不升不降)
+                velTargetX += avoid.vGoX;
+                velTargetZ += avoid.vGoZ;
                 // 竖直: 地面净空上推 + 竖直越障 + 下降运动学刹车。终点段同样保留(防撞地/顶/下障)。
                 velTargetY = velTargetY * avoid.brake;
                 if (avoid.vRep) velTargetY = velTargetY * 0.3 + avoid.vRep;
@@ -1352,6 +1355,11 @@ export class Drone {
                         velTargetY = -avoid.vSafeDown;
                         this._yopoGroundFloorActive = true; // 触发上爬/悬停姿态
                     }
+                }
+                // 正下/正上方有障碍: 保持高度、不升不降, 完全交给水平绕行 vGo 平滑飞过,
+                // 避免"想下降→被射线/碰撞推开→又想下降"的来回抖动。
+                if (Math.hypot(avoid.vGoX, avoid.vGoZ) > 1e-6) {
+                    velTargetY = 0;
                 }
                 this._avoidAccScale = avoid.brake;
             }
@@ -2052,7 +2060,44 @@ export class Drone {
             vRep = 0;                    // 竖直越障也解除: 走廊畅通不爬升/下钻
         }
 
-        return { repX, repZ, tanX, tanZ, brake, upPush, vRep, vSafeDown };
+        // ---- 竖直障碍水平绕行 (B) ----
+        // 正下方有"建筑/结构"(vDownDist 小且明显高于地面, 非贴地地形)或正上方有障碍(vUpDist 小)时,
+        // 不再施加下/上运动去"钻过", 改为保持高度、用水平绕行(vGo)平滑离开障碍正下/正上方足迹,
+        // 避免"想下降→被射线/碰撞推开→又想下降"的来回抖动。竖直越障(vRep)针对"正前方水平被挡、
+        // 上下有缝"; 此处针对"正下/正上方挡路"——唯一安全路径是水平绕开。nearGoal 内不启用(交 PD 收敛)。
+        let vGoX = 0, vGoZ = 0;
+        const vGoThresh = this.yopoAvoidStop + 3.0;   // ~4.1m: 脚下/头顶近障视为挡路
+        const gg = Number.isFinite(p.groundGap) ? p.groundGap : R;
+        // 正下方是"结构而非地形": 直下命中远高于地面 → 是建筑/悬挑而非贴地。贴地地形(无建筑)
+        // 仍走 upPush/vSafeDown 正常处理, 不会被此处拦截而禁止下降(否则低空飞行无法降落)。
+        const structBelow = Number.isFinite(p.vDownDist) && p.vDownDist < vGoThresh &&
+            (gg - p.vDownDist > 1.5);
+        const aboveBlocked = Number.isFinite(p.vUpDist) && p.vUpDist < vGoThresh;
+        if ((structBelow || aboveBlocked) && !nearGoal) {
+            // 选水平最空方向离开障碍足迹: 优先"前向半球最空", 否则用全局最空(openDir),
+            // 保证绕行同时尽量向目标前进, 不折返来路。
+            let ox = openDirX, oz = openDirZ;
+            if (ox * gx + oz * gz < 0.3) {
+                let best = -1, bestD = 0.3;
+                for (let i = 0; i < dirs.length; i++) {
+                    const d = dists[i];
+                    if (!Number.isFinite(d) || d <= 0) continue;
+                    if (dirs[i].x * gx + dirs[i].z * gz <= 0.3) continue;
+                    if (d > bestD) { bestD = d; best = i; }
+                }
+                if (best >= 0) { ox = dirs[best].x; oz = dirs[best].z; }
+            }
+            const om = Math.hypot(ox, oz) || 1;
+            ox /= om; oz /= om;
+            const closeness = structBelow
+                ? clamp(p.vDownDist / vGoThresh, 0, 1)
+                : clamp(p.vUpDist / vGoThresh, 0, 1);
+            const strength = this.yopoAvoidTanGain * (0.3 + 0.2 * (1 - closeness));
+            vGoX = ox * strength;
+            vGoZ = oz * strength;
+        }
+
+        return { repX, repZ, tanX, tanZ, brake, upPush, vRep, vSafeDown, vGoX, vGoZ };
     }
 
     // ---- Collision ----
