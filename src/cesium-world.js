@@ -629,6 +629,7 @@ export class CesiumWorld {
                 reportUserError('Google Photorealistic tileset API failed; falling back to ion asset', e, {
                     key: 'google-photorealistic-tileset',
                     intervalMs: 10000,
+                    autoHideMs: 10000,
                 });
             }
         }
@@ -642,9 +643,12 @@ export class CesiumWorld {
         const keyPrefix = String(label || 'Google 3D Tiles').toLowerCase().replace(/[^a-z0-9]+/g, '-');
         const onFailure = (error) => {
             const message = error && error.message ? error.message : String(error || 'unknown tile error');
+            // 顶部红条 5s 后自动收起 + 20s 去重, 把"经常报错一直挂着"变成"偶尔闪一下"；
+            // 进度文本(progressCb)只动 loading-overlay, 不影响此 banner。
             reportUserError(`${label} request failed`, error, {
                 key: `${keyPrefix}-failed-${message}`,
-                intervalMs: 10000,
+                intervalMs: 20000,
+                autoHideMs: 5000,
             });
             if (progressCb) progressCb(`${label} request failed: ${message}`, true);
         };

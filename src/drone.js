@@ -200,34 +200,35 @@ export class Drone {
         this.yopoAvoidRepRange = 20.0; // 排斥/切向/刹车作用距离 (m): 18m/s 下 20m 提供 ~1.1s 响应窗口,
                                       // 刹车距离 v²/2a≈10.8m < 20m, 更早介入且留足余量; goalClear 畅通
                                       // 阈值=本值, 故同步避免"走廊畅通判定"被过早解除。
+                                      // 注意: 本值同时就是 goalClear 的 clearThresh, 调大虽能更早绕行,
+                                      // 却会让"走廊畅通"判定过严 → 路径其实畅通时也误触发越障/绕行。
+                                      // 想加强绕行请调 RepGain/TanGain(力度), 别调这个(触发门槛)。
         this.yopoAvoidGain = 10.0;    // 通用避障增益基准: 现主要用于竖直安全(upPush/vRep=
                                       // gain*系数), 水平 rep/tan 已拆为下方独立增益以便分别调强弱。
-        this.yopoAvoidRepGain = 6.0;  // 排斥(径向推离)最大速度 (m/s): 6 比上版 4 略强, 遇障更易
-                                      // 及时推离/绕开(配合 repRange 增大更及时); 仍远低于初版 10 避免过推。
-        this.yopoAvoidTanGain = 14.0; // 切向(绕行)速度增益 (m/s): 调大→遇障时更果断朝目标侧绕行、
-                                      // 更快绕过, 解决"排斥大、切向弱→总被推回而非绕开"。
+        this.yopoAvoidRepGain = 9.0;  // 排斥(径向推离)最大速度 (m/s): 加强到 9, 遇障更果断推离/绕开
+                                      // (配合 repRange 增大更及时), 不再被"推回而非绕开"
+        this.yopoAvoidTanGain = 18.0; // 切向(绕行)速度增益 (m/s): 加强到 18, 遇障时更果断朝目标侧
+                                      // 绕行、更快绕过, 解决"排斥大、切向弱→总被推回而非绕开"。
         this.yopoAvoidDecel = 15.0;   // 安全刹车减速度 (m/s²): 已调大(原 12)→ 运动学 v_safe=√(2ad)
                                       // 更短, 触发距离减小后仍能刹停且留余量。物理上限 ~15.7(58° 倾角),
                                       // 取 15 逼近上限使减速更果断; 实际减速受 yopoAccMax 钳制。
         this.yopoAvoidQueryMs = 35;   // 射线探测节流 (ms): 18m/s 时每 0.63m 更新一次,
                                       // 探测更密 → 障碍信息更实时, 避障响应更快。
         this.yopoMinAlt = 2.5;        // 地面/屋顶最小净空 (m) — 软避障(上推)触发阈值
-        this.yopoAvoidFanHalf = 0.8;  // 扇形射线束半宽 (m): 覆盖机体半宽+余量, 防凹槽漏检
-        this.yopoAvoidFanRays = 3;    // 前向关键方向的扇形射线数(中心±两侧): 防凹窗/门洞/
-                                      // 凹墙面漏检(单中心射线会穿过凹槽)。侧向/后向用 1 条
-                                      // 中心射线(origin=机体 → 命中缓存), 帧率与安全平衡。
-        this.yopoAvoidCeilRay = true; // 额外向上探测屋顶/悬挑下沿, 防钻入矮檐
-        this.yopoAvoidCeilLook = 1.2; // 上仰探测高度 (m)
+
         this.yopoAvoidVertRay = true;     // 正上/正下竖直射线(防撞顶/撞正下方障碍)
         this.yopoAvoidVertRange = 12.0;   // 竖直射线探测范围 (m)
         // —— 竖直越障 (A+B 方案) ——
         this.yopoAvoidVStep = 8.0;        // 竖直探测抬升/下探步长 (m), *2 高层可越更高楼
-        this.yopoAvoidVClimbScale = 0.9;  // 竖直越障速度 = gain*scale; 原 6*0.5=3m/s, 现 10*0.9=9m/s,
-                                          // 高速下越障爬升更快; < droneMaxVSpeed=12 安全
+        this.yopoAvoidVClimbScale = 1.2;  // 竖直越障速度 = gain*scale = 10*1.2=12m/s, 越障爬升更猛、
+                                          // 更快翻越障碍顶; ≈droneMaxVSpeed=12 上限
         this.yopoAvoidVBlock = 12.0;      // 前进净空 < 此值即触发竖直越障 (m): 18m/s 下 stop+12≈13.1m≈0.73s,
-                                          // 比原 8m(0.44s)留更多越障提前量, 免得临到障碍才爬
-        this.yopoAvoidVClear = 0.45;      // 上层视为"畅通"的距离占比 (> R*该值 即畅通)
-        this.yopoAvoidStop = this.yopoAvoidFanHalf + 0.3; // ≈1.1m 安全净空 (贴合机体)
+                                          // 比原 8m(0.44s)留更多越障提前量, 免得临到障碍才爬。
+                                          // 不要盲目加大: 放行距离越远, 越容易在"前方其实畅通"时误爬升。
+                                          // 想加强越障请调 VClimbScale(爬升力度), 别调这个(触发门槛)。
+        this.yopoAvoidVClear = 0.32;      // 上层视为"畅通"的距离占比 (> R*该值≈11.2m 即畅通): 调低→
+                                          // 更愿判定上层可飞越, 提升越障意愿(配合 vUpDist 仍防撞顶)
+        this.yopoAvoidStop = 1.1;     // 安全净空 (m), 贴合机体半宽+余量
         this._avoidProbe = null;      // 势场射线探测缓存
         this._avoidAccScale = 1.0;    // 势场刹车缩放 (加速度前馈衰减用)
         // YOPO 多项式加速度前馈缩放: 网络 cmdAcc 过大直接叠加会猛推, 削到 0.4 更柔和.
@@ -1597,8 +1598,7 @@ export class Drone {
 
         const dirs = this.yopoAvoidRays;
         const R = this.yopoAvoidRange;
-        const nFan = this.yopoAvoidFanRays;
-        const half = this.yopoAvoidFanHalf;
+
 
         // 地面间隙先算: 用于 clamp 下探层起点, 避免贴地误检
         let groundGap = Number.POSITIVE_INFINITY;
@@ -1608,61 +1608,22 @@ export class Drone {
         }
         const groundY = Number.isFinite(groundGap) ? (this.y - groundGap) : -1e9;
 
-        // 扇形射线束: 在某高度层沿主方向发 nFan 条平行射线, 取最近障碍距离。
-        // 单条中心射线在遇建筑物内凹部分(凹窗/门洞/凹墙面)时, 会穿过凹槽而漏检,
-        // 两侧偏移射线能命中凹槽两边的墙沿, 从而把"凹进去的墙"当作障碍感知。
-        // 前向(关键避障方向)用完整扇形防凹槽漏检; 侧向/后向用单中心射线省开销。
-        // nFan=1 时中心射线 origin=机体位置 → 命中 pickLocalRay 缓存桶 → 零 GPU 开销。
-        // forceFresh=true: 跳过 pickLocalRay 缓存, 每次真实拾取。高速(12~15m/s)时
-        // 缓存 150ms TTL 内无人机已移动 1.8~2.25m, 返回陈旧距离 → 刹车距离算错
-        // (偏大) → "飞得快时避障来不及响应"撞墙。避障安全网必须用当前真实距离。
-        // 探测本身已 80ms 节流 + 位置复用, forceFresh 只影响本函数内拾取, 不污染缓存。
+        // 单条水平射线(从机体位置发出)取最近障碍距离。原"扇形束防凹槽漏检"已移除:
+        // 每个方向仅 1 条中心射线, 简化探测(牺牲凹窗/凹槽内壁漏检)。
+        // forceFresh=true: 跳过 pickLocalRay 缓存, 每次真实拾取。高速时缓存 TTL 内无人机已移动数米,
+        // 返回陈旧距离 → 刹车距离算错 → 撞墙; 避障必须用当前真实距离。节流在 _updateAvoidProbe。
         const pickF = (o, d, dist) => w.pickLocalRay(o, d, dist, true);
-        const fanDist = (dir, yLevel, fanCount) => {
-            const cnt = fanCount || 1;
-            const dlen = Math.hypot(dir.x, dir.z) || 1e-6;
-            const nx = dir.z / dlen, nz = -dir.x / dlen; // 主方向法向(水平面内垂直向量)
-            let near = R;
-            for (let k = 0; k < cnt; k++) {
-                const off = (cnt === 1) ? 0 : (2 * k / (cnt - 1) - 1) * half;
-                const o = { x: this.x + nx * off, y: yLevel, z: this.z + nz * off };
-                const hit = pickF(o, dir, R);
-                const hd = (hit && Number.isFinite(hit.distance) && hit.distance > 0.04)
-                    ? hit.distance : R;
-                if (hd < near) near = hd;
-            }
-            return near;
+        const rayDist = (dir, yLevel) => {
+            const hit = pickF({ x: this.x, y: yLevel, z: this.z }, dir, R);
+            return (hit && Number.isFinite(hit.distance) && hit.distance > 0.04) ? hit.distance : R;
         };
         // 前进方向(水平): 速度优先, 否则机体前向 -Z
         let fwdHx = 0, fwdHz = -1;
         const spdHv = Math.hypot(this.vx, this.vz);
         if (spdHv > 0.3) { fwdHx = this.vx / spdHv; fwdHz = this.vz / spdHv; }
-        // 前向方向的索引集合: 与前进方向点积 > 0.35 (即夹角 <70°) 的方向用扇形, 其余单射线
-        const fwdFanIdx = [];
-        for (let i = 0; i < dirs.length; i++) {
-            const dot = dirs[i].x * fwdHx + dirs[i].z * fwdHz;
-            if (dot > 0.35) fwdFanIdx.push(i);
-        }
-        const fanCountOf = (i) => (fwdFanIdx.indexOf(i) >= 0 ? this.yopoAvoidFanRays : 1);
 
-        // 屋顶/悬挑下沿探测: 向上看是否存在遮挡, 防止钻入低矮檐口/凹槽顶。
-        // 屋顶/悬挑下沿探测: 向上看遮挡, 防钻入低矮檐口/凹槽顶。环形布局无固定"前/后",
-        // 故按与前进方向最对齐的 2 条射线做上探(静止/无前向时回退 dirs[0]/[1])。
-        let ceilHit = false;
-        if (this.yopoAvoidCeilRay) {
-            const oUp = { x: this.x, y: this.y + this.yopoAvoidCeilLook, z: this.z };
-            const cand = [];
-            for (let i = 0; i < dirs.length; i++) {
-                const dot = dirs[i].x * fwdHx + dirs[i].z * fwdHz;
-                if (dot > 0.3) cand.push({ i, dot });
-            }
-            cand.sort((p, q) => q.dot - p.dot);
-            const probeIdx = cand.length >= 2 ? [cand[0].i, cand[1].i] : [0, 1];
-            for (const i of probeIdx) {
-                const h = pickF(oUp, dirs[i], Math.min(R, 6));
-                if (h && Number.isFinite(h.distance) && h.distance > 0.04) { ceilHit = true; break; }
-            }
-        }
+
+
 
         // 高度探测: mid(当前高度)全部环形方向; high/high2/low 只对"最对齐前进方向"
         // 的 2 条射线探测 — 竖直越障只关心前进方向能否上越/下钻, 减少射线数提帧率。
@@ -1674,9 +1635,9 @@ export class Drone {
         const yHigh2 = this.y + this.yopoAvoidVStep * 2;
         const yLow = Math.max(this.y - this.yopoAvoidVStep, groundY + 1.0);
         const lowOk = (yLow - groundY) > 1.5; // 下探层明显高于地面才算有效可钻
-        // 选最对齐前进方向的 2 条射线做高层探测
+        // 选最对齐前进方向的 3 条射线做高层探测(增多覆盖→竖直越障可选方向更多)
         const vProbeIdx = [];
-        for (let pass = 0; pass < 2; pass++) {
+        for (let pass = 0; pass < 3; pass++) {
             let bi = -1, bd = -1;
             for (let i = 0; i < dirs.length; i++) {
                 if (vProbeIdx.indexOf(i) >= 0) continue;
@@ -1687,11 +1648,11 @@ export class Drone {
         }
 
         for (let i = 0; i < dirs.length; i++) {
-            dists[i] = fanDist(dirs[i], this.y, fanCountOf(i));
+            dists[i] = rayDist(dirs[i], this.y);
             if (vProbeIdx.indexOf(i) >= 0) {
-                distsHigh[i] = fanDist(dirs[i], yHigh, 1);
-                distsHigh2[i] = fanDist(dirs[i], yHigh2, 1);
-                distsLow[i] = lowOk ? fanDist(dirs[i], yLow, 1) : dists[i];
+                distsHigh[i] = rayDist(dirs[i], yHigh);
+                distsHigh2[i] = rayDist(dirs[i], yHigh2);
+                distsLow[i] = lowOk ? rayDist(dirs[i], yLow) : dists[i];
             } else {
                 distsHigh[i] = dists[i];
                 distsHigh2[i] = dists[i];
@@ -1699,28 +1660,9 @@ export class Drone {
             }
         }
 
-        // 前下方探测: 沿前进方向向下俯视 -20°, 检测前方下方的建筑/地形抬升。
-        // YOPO 3D 导航下垂直下降轨迹(爬升后回落/到目标点下降)会撞上前方下方障碍,
-        // 水平射线(同高度)测不到; 此处专测前进方向 ±18° 两条下俯射线, 取最近值
-        // 参与刹车 + 上推, 防止"下降撞地/撞楼下沿"。
-        let fwdDownDist = R;
-        if (spdHv > 0.3 || true) {
-            const downRad = -20 * DEG2RAD;
-            const cd = Math.cos(downRad), sd = Math.sin(downRad);
-            const baseX = fwdHx * cd, baseY = sd, baseZ = fwdHz * cd;
-            const nlen = Math.hypot(fwdHx, fwdHz) || 1e-6;
-            const npx = fwdHz / nlen, npz = -fwdHx / nlen;
-            const probeDn = (off) => {
-                const o = { x: this.x + npx * off, y: this.y, z: this.z + npz * off };
-                const h = pickF(o, { x: baseX, y: baseY, z: baseZ }, R);
-                return (h && Number.isFinite(h.distance) && h.distance > 0.04) ? h.distance : R;
-            };
-            const d1 = probeDn(0);
-            const d2 = probeDn(0.5);
-            fwdDownDist = Math.min(d1, d2);
-        }
 
-        // 正上方/正下方竖直射线: 水平环@高层与前下俯视都测不到"同 x,z 正上/正下"的障碍
+
+        // 正上方/正下方竖直射线: 水平环@高层都测不到"同 x,z 正上/正下"的障碍
         // (如头顶天花板、脚下方形建筑顶)。防止上爬撞顶、垂直下降撞正下方障碍。
         let vUpDist = R, vDownDist = R;
         if (this.yopoAvoidVertRay) {
@@ -1737,8 +1679,6 @@ export class Drone {
             distsLow,
             lowOk,
             groundGap,
-            ceilHit,
-            fwdDownDist,
             vUpDist,
             vDownDist,
             highProbeIdx: vProbeIdx, // 已做高层探测的方向索引(竖直越障只能在这些方向上判断)
@@ -1772,13 +1712,25 @@ export class Drone {
         let repX = 0, repZ = 0;
         let dMin = R;        // 整体最近障碍 (排斥/切向强度)
         let dAhead = R;      // 前进方向威胁(含竖直威胁, 用于刹车/上推)
-        let dAheadH = R;     // 仅水平环射线的最前进距离(不含 fwdDownDist/groundGap/ceilHit),
+        let dAheadH = R;     // 仅水平环射线的最前进距离(不含竖直威胁),
                              // 专用于竖直越障判定, 避免竖直威胁把 dAhead 拉小误触发上越/下钻。
         let openDirX = 0, openDirZ = 0, openMax = -1;
 
         const des = Math.hypot(velTargetX, velTargetZ);
         let udx = 0, udz = 0;
         if (des > 0.3) { udx = velTargetX / des; udz = velTargetZ / des; }
+
+        // 目标方位(机体→导航目标): 提前算出, 供下方 dAheadH 的"走廊"判定使用。
+        // 无导航目标时回退到命令速度方向。
+        let gx = udx, gz = udz;
+        if (this.yopoNavTarget) {
+            const tdx = this.yopoNavTarget.x - this.x;
+            const tdz = this.yopoNavTarget.z - this.z;
+            const tl = Math.hypot(tdx, tdz);
+            if (tl > 0.5) { gx = tdx / tl; gz = tdz / tl; }
+        }
+        // 越障触发用的走廊半宽 (m): 比 goalClear 的 pathHalfWidth(2.5) 略宽, 留安全余量。
+        const surmountHalfW = 3.0;
 
         for (let i = 0; i < dirs.length; i++) {
             const d = dists[i];
@@ -1793,7 +1745,14 @@ export class Drone {
             // 前进方向威胁: 期望速度方向附近的障碍计入刹车
             const dot = dirs[i].x * udx + dirs[i].z * udz;
             if (des > 0.3 ? (dot > 0.5 && d < dAhead) : (d < dAhead)) dAhead = d;
-            if (des > 0.3 ? (dot > 0.5 && d < dAheadH) : (d < dAheadH)) dAheadH = d;
+            // dAheadH(越障专用): 只算"真挡在目标走廊里"的水平障碍 —— 用横向偏移度量, 而非锥形最小距离。
+            // 原用 dot>0.5(±60° 宽锥), 侧旁 55° 的近障也会把它拉小; 与 goalClear 的走廊判定口径不一致,
+            // 于是"往目标其实畅通"时会被(远处走廊障碍 + 侧旁近障)联手误触发上越/下钻。
+            const dotG = dirs[i].x * gx + dirs[i].z * gz;
+            if (dotG > 0) {
+                const latG = d * Math.sqrt(Math.max(0, 1 - dotG * dotG));
+                if (latG < surmountHalfW && d < dAheadH) dAheadH = d;
+            }
         }
 
         // 地面/屋顶间隙不足 → 上推 + 参与刹车
@@ -1802,26 +1761,17 @@ export class Drone {
             upPush = (this.yopoMinAlt - p.groundGap) * this.yopoAvoidGain * 0.5;
             if (p.groundGap < dAhead) dAhead = p.groundGap;
         }
-        // 前下方障碍(下降撞地/撞楼下沿): 前下方净空 < minAlt → 上推 + 刹车。
-        // 与正下方 groundGap 不同, 这里专门挡"前进方向往下看"的威胁(如前方低矮建筑/
-        // 地形抬升/目标点下降路径上的遮挡), 防止下降轨迹撞上去。
-        if (Number.isFinite(p.fwdDownDist) && p.fwdDownDist < this.yopoMinAlt) {
-            const push = (this.yopoMinAlt - p.fwdDownDist) * this.yopoAvoidGain * 0.45;
-            if (push > upPush) upPush = push;
-            if (p.fwdDownDist < dAhead) dAhead = p.fwdDownDist;
-        }
 
         // ---- 垂直下降运动学刹车 ----
         // 水平方向已有 v_safe=√(2ad) 刹车, 但垂直方向只有 upPush(净空<minAlt 才触发),
         // 高速下降(网络轨迹下降/终点下降)时 2.5m 净空根本刹不住 → 撞下方障碍(用户反馈)。
-        // 此处按正下方与前下方的**最小**净空, 限制最大下降速度:
+        // 此处按正下方净空, 限制最大下降速度:
         //   vSafeDown = √(2·a·(gap - standoff))
         // 使无人机在任意净空都能物理上刹停, 不再"全速俯冲撞地"。
         // upPush 较弱时由 vSafeDown 直接钳制 velTargetY(见 _controlYOPO 调用处)。
         let vSafeDown = null;
         const downGap = Math.min(
             Number.isFinite(p.groundGap) ? p.groundGap : R,
-            Number.isFinite(p.fwdDownDist) ? p.fwdDownDist : R,
             Number.isFinite(p.vDownDist) ? p.vDownDist : R
         );
         if (Number.isFinite(downGap) && downGap < this.yopoAvoidRange) {
@@ -1850,12 +1800,7 @@ export class Drone {
             }
         }
 
-        // 屋顶/悬挑下沿遮挡: 表明头顶上方存在内凹顶/檐口, 先别急着前进钻入。
-        // 通过降低前进速度留出反应时间, 同时加一点上/后退趋势, 避免撞上凹槽顶。
-        if (p.ceilHit) {
-            const eff = Math.max(2.0, R * 0.35); // 视为中近距离威胁
-            if (eff < dAhead) dAhead = eff;
-        }
+
 
         // 近障刹车: 双层渐进减速, 保证灵敏度 + 物理刹停。
         //   1) 运动学硬刹车: v_safe = sqrt(2*a*(d - standoff)), 保证在净空内一定刹停
@@ -1943,7 +1888,7 @@ export class Drone {
         // 用"飞行走廊"判定通畅度: 走廊 = 以"机体→导航目标"方位为中心线、半宽 pathHalfWidth 的
         // 带状区域; 仅落在走廊内(实测到该中心线的垂直偏移 < 半宽)的障碍才算"挡在路上"。
         // 走廊外的侧旁障碍(即便很近)直接忽略——直飞即可安全通过。竖直威胁
-        // (fwdDownDist/groundGap/ceilHit)一律不参与, 由 upPush/vSafeDown 单独处理垂直安全。
+        // (groundGap 等)一律不参与走廊判定, 由 upPush/vSafeDown 单独处理垂直安全。
         // 判定轴: 目标方位(机体→导航目标)为主, 但 goalClear 同时满足"命令速度方向走廊也畅通"
         // (见下双走廊判定)。单用目标方位会漏掉"网络把无人机指向建筑、但目标线暂清"→仍全速直冲
         // (即"规划往建筑物上撞"); 仅用命令速度方向(此前版本)则转弯/绕行瞬间 velTarget 偏入侧旁
@@ -1951,16 +1896,7 @@ export class Drone {
         // 还绕行")。故两者都用"走廊(横向偏移<半宽)"度量而非锥形最小距离: 真正在路径上的近障才
         // 算挡路, 侧旁/转弯偏指的大偏移障碍忽略 → 既不盲冲建筑, 也不在畅通时乱绕。无导航目标时
         // 命令速度方向回退到目标方位。
-        let gx, gz;
-        if (this.yopoNavTarget) {
-            const tdx = this.yopoNavTarget.x - this.x;
-            const tdz = this.yopoNavTarget.z - this.z;
-            const tl = Math.hypot(tdx, tdz);
-            if (tl > 0.5) { gx = tdx / tl; gz = tdz / tl; }
-            else { gx = udx; gz = udz; }
-        } else {
-            gx = udx; gz = udz;
-        }
+        // gx/gz(目标方位)已在函数开头算出, 供 dAheadH 与此处走廊判定共用。
         let goalClear = false;
         if (des > 0.3 || this.yopoNavTarget) {
             const pathHalfWidth = 2.5;                      // m, 飞行走廊半宽(机体半径+余量)
@@ -2000,8 +1936,8 @@ export class Drone {
         let vRep = 0;
         const blockDist = this.yopoAvoidStop + this.yopoAvoidVBlock;
         // 竖直越障只在"去往目标的水平走廊确实被挡"时才触发: 用 !goalClear(前进走廊内有障碍)且
-        // 水平前进近距(dAheadH<blockDist)双重判定。dAhead 含 fwdDownDist/groundGap/ceilHit 等竖直
-        // 威胁(用于刹车/上推), 若直接用会把 dAhead 拉小 → "往目标方向畅通却误上越/下钻"。改用
+        // 水平前进近距(dAheadH<blockDist)双重判定。dAhead 含竖直威胁(groundGap 等, 用于刹车/上推),
+        // 若直接用会把 dAhead 拉小 → "往目标方向畅通却误上越/下钻"。改用
         // 纯水平的 dAheadH + 走廊判定后, 仅在正前方确有水平障碍(而非下方净空不足)时才爬升/下钻。
         // 终点接管区(距目标 <yopoFinalApproachDist 或已到达)内彻底禁用竖直越障: 此时应直接 PD
         // 收敛到目标点, 爬升会偏离目标、且"明明畅通却飞起来"(双走廊/goalClear 在终点微调时可能因
@@ -2011,32 +1947,26 @@ export class Drone {
             Math.hypot(nt.x - this.x, nt.z - this.z) < this.yopoFinalApproachDist);
         if (!nearGoal && !goalClear && dAheadH < blockDist && des > 0.3 &&
             p.distsHigh && p.distsHigh2 && p.distsLow) {
-            // 只从已做高层探测的 2 条方向(vProbeIdx 记录在 probe 的 highProbeIdx 中)里
-            // 选最对齐前进方向的射线: 保证 dH/dH2/dL 是真实高层距离而非 mid 值。
-            let bi = -1, bdot = 0.5;
+            // 已做高层探测的方向(highProbeIdx)里, 任一"前进半球内"的方向上层畅通即视为可飞越——
+            // 不只看最对齐方向, 避免"正前被挡、但侧前缝可越"时错过越障(加强越障意愿/成功率)。
+            const clearD = R * this.yopoAvoidVClear; // 该层距离 > 此值视为畅通, 可飞越
             const hiIdx = p.highProbeIdx || null;
+            let upClear = false, downClear = false;
             for (let i = 0; i < dirs.length; i++) {
                 if (hiIdx && hiIdx.indexOf(i) < 0) continue; // 仅限已测高层方向
-                const dot = dirs[i].x * udx + dirs[i].z * udz;
-                if (dot > bdot) { bdot = dot; bi = i; }
-            }
-            if (bi >= 0) {
-                const dH = p.distsHigh[bi];
-                const dH2 = p.distsHigh2[bi];
-                const dL = p.distsLow[bi];
-                const clearD = R * this.yopoAvoidVClear; // 该层距离 > 此值视为畅通, 可飞越
-                const upClear = ((dH > clearD) || (dH2 > clearD)) && (p.vUpDist > clearD); // 上方水平层与正上方都畅通
-                // 下钻更保守: 仅 low 层畅通还不够(只测 2 条方向), 必须正下方与前下方
-                // 净空都充足才允许下降, 否则下钻会撞到未探测到的下方障碍(用户反馈)。
-                const downClear = (p.lowOk === true) && (dL > clearD) &&
+                if (dirs[i].x * udx + dirs[i].z * udz < 0.3) continue; // 仅前进半球
+                const dH = p.distsHigh[i], dH2 = p.distsHigh2[i], dL = p.distsLow[i];
+                // 上方水平层(任一)与正上方都畅通 → 可上越
+                if (((dH > clearD) || (dH2 > clearD)) && (p.vUpDist > clearD)) upClear = true;
+                // 下钻更保守: low 层畅通 + 正下方净空充足, 防止钻到未探测下方障碍
+                if ((p.lowOk === true) && (dL > clearD) &&
                     Number.isFinite(p.groundGap) && p.groundGap > this.yopoMinAlt &&
-                    Number.isFinite(p.fwdDownDist) && p.fwdDownDist > this.yopoMinAlt &&
-                    Number.isFinite(p.vDownDist) && p.vDownDist > this.yopoMinAlt;
-                const e = this.yopoAvoidGain * this.yopoAvoidVClimbScale;
-                if (upClear && downClear) vRep = e;       // 两侧皆可 → 优先爬升(更安全)
-                else if (upClear) vRep = e;               // 上越
-                else if (downClear) vRep = -e;            // 下钻(净空确认充足)
+                    Number.isFinite(p.vDownDist) && p.vDownDist > this.yopoMinAlt) downClear = true;
             }
+            const e = this.yopoAvoidGain * this.yopoAvoidVClimbScale;
+            if (upClear && downClear) vRep = e;       // 两侧皆可 → 优先爬升(更安全)
+            else if (upClear) vRep = e;               // 上越
+            else if (downClear) vRep = -e;            // 下钻(净空确认充足)
         }
 
         // 势场只负责"停住不撞", 不持续推离: 用"最近障碍距离 dMin"(任意方向)调制, 而非朝
@@ -2067,6 +1997,9 @@ export class Drone {
         // 上下有缝"; 此处针对"正下/正上方挡路"——唯一安全路径是水平绕开。nearGoal 内不启用(交 PD 收敛)。
         let vGoX = 0, vGoZ = 0;
         const vGoThresh = this.yopoAvoidStop + 3.0;   // ~4.1m: 脚下/头顶近障视为挡路
+                                                      // 不要调大: 高空飞越楼顶时"正下方"射线必然打到楼体,
+                                                      // 阈值一放大就会在"往目标畅通"时无谓横向绕行。
+                                                      // 且 vGo 不受 goalClear 门控, 调大等于常态偏航。
         const gg = Number.isFinite(p.groundGap) ? p.groundGap : R;
         // 正下方是"结构而非地形": 直下命中远高于地面 → 是建筑/悬挑而非贴地。贴地地形(无建筑)
         // 仍走 upPush/vSafeDown 正常处理, 不会被此处拦截而禁止下降(否则低空飞行无法降落)。

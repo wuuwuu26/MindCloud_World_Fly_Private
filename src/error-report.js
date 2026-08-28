@@ -21,6 +21,16 @@ export function reportUserError(context, error, options = {}) {
     banner.textContent = title;
     banner.style.display = 'block';
 
+    // autoHideMs: 顶部红条 N 毫秒后自动收起(高频瓦片/瞬时网络错误不再一直挂着挡画面),
+    // 仅收起 runtime-error-banner, 不会动 loading-overlay(那个由 init 流程自己管)。
+    if (Number.isFinite(options.autoHideMs) && options.autoHideMs > 0) {
+        if (banner._autoHideTimer) clearTimeout(banner._autoHideTimer);
+        banner._autoHideTimer = setTimeout(() => {
+            banner.style.display = 'none';
+            banner._autoHideTimer = null;
+        }, options.autoHideMs);
+    }
+
     if (options.overlay) {
         const overlay = document.getElementById('loading-overlay');
         const progress = document.getElementById('loading-progress');
