@@ -51,7 +51,7 @@ stop_wait() {
     local name="$1"
     if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$name"; then
         echo "  停止 $name ..."
-        docker rm -f "$name" >/dev/null 2>&1 || true
+        docker rm -fv "$name" >/dev/null 2>&1 || true
         for _ in $(seq 1 20); do
             docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$name" || break
             sleep 0.5
@@ -96,10 +96,11 @@ if [ "$DO_YOPO" = "1" ]; then
     # 15.0 中段巡航 ~12-15 m/s、端点 ~16-19 m/s, 快而可控。客户端侧已把
     # yopoPosErrMaxV 提到 15(解锁位置环巡航上限) + yopoMaxSpd=20 钳制双保险防猛冲。
     # 想更快可设 YOPO_VELOCITY=16~18(注意爆速风险); 更稳可降到 12。
-    # YOPO_CTRL_TIME_SCALE=2: 指令连续修复后的提速手段。轨迹重建从 0 起步保证位置/
-    # 速度连续(实测重规划跳变 10.4m→0.36m), 速度由控制环时间缩放提供 —— SCALE=2 时
-    # 巡航≈7-8 m/s 且重规划跳变仅 0.36m(可接受), 相比 SCALE=1(4.7m/s)提速 48%,
-    # 相比 SCALE=3(跳变0.45m)更连续。实测: SCALE 越大速度越高但重规划跳变略增。
+    # YOPO_CTRL_TIME_SCALE: 指令连续修复后的"快进"系数(ctrl_time 倍速推进)。
+    # 设为 1 = 完全跟随网络规划速度(vel_max≈15 → 巡航≤15 m/s)。
+    # 注意: SCALE>1 会把指令速度推到 vel_max*SCALE(如 2→≈30 m/s), 虽被
+    # YOPO_SPEED_CAP=15 硬上限钳回 15, 但会造成规划位置超前、无人机持续追迹滞后,
+    # 故默认保持 1。提速诉求应通过调 YOPO_VELOCITY 实现, 而非放大 SCALE。
     TRT_ENGINE="$SCRIPT_DIR/asset/yopo-trt/yopo_trt.pth"
     if [ ! -f "$TRT_ENGINE" ]; then
         echo "  [WARN] 未找到 TensorRT 引擎: $TRT_ENGINE" >&2
@@ -110,7 +111,7 @@ if [ "$DO_YOPO" = "1" ]; then
         YOPO_MODEL_PATH="$SCRIPT_DIR/third_party/yopo/saved/YOPO_40/epoch50.pth" \
         YOPO_USE_TRT=1 \
         YOPO_VELOCITY=15.0 \
-        YOPO_CTRL_TIME_SCALE=2 \
+        YOPO_CTRL_TIME_SCALE=1 \
         ./scripts/start_yopo_api.sh >/tmp/restart_yopo.log 2>&1 &
     YOPO_PID=$!
     wait_health "http://127.0.0.1:5689/yopo/status" 120 YOPO || true

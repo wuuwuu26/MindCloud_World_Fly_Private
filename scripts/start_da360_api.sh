@@ -174,11 +174,11 @@ if [[ "$build_ok" != "1" ]]; then
         echo "ERROR: failed to build $IMAGE from $BASE_IMAGE." >&2
         echo "Not starting a stale DA360 container because the frontend/server protocol may be incompatible." >&2
         echo "If Docker Hub timed out, retry this command after the network recovers, or set DA360_BASE_IMAGE to a local/mirror image." >&2
-        docker rm -f "$NAME" >/dev/null 2>&1 || true
+        docker rm -fv "$NAME" >/dev/null 2>&1 || true
         exit 1
     fi
 fi
-docker rm -f "$NAME" >/dev/null 2>&1 || true
+docker rm -fv "$NAME" >/dev/null 2>&1 || true
 
 gpu_args=()
 if [[ "${DA360_GPUS:-all}" != "none" ]]; then

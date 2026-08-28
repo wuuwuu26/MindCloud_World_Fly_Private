@@ -175,9 +175,14 @@ export class Drone {
         // 不叠加任何几何反应式避障/势场法。以下仅保留 YOPO 命令解析所需的安全与缩放参数,
         // 以及一个纯地形采样的被动地面安全网 (见 _controlYOPO 内硬性地面下限)。
         this.yopoCrashFloor = 1.0;    // 硬性地面安全下限 (m): 净空低于此值强制上爬, 防盲降撞地
-        // 期望加速度安全上限 (m/s²): 远低于物理极角上限 (~15.7, maxAngle=58°).
-        // 重规划(深度环)较慢时, 过大的加速度会让无人机在下一指令到达前冲入障碍. 限幅留余量.
-        this.yopoAccMax = 8.0;
+        // 期望加速度安全上限 (m/s²): 钳制水平+垂直合成加速度(含避障刹车/绕行/越障)的实际可达值。
+        // 原 8.0(≈39° 倾角)偏保守, 导致射线避障"减速不够及时/绕行越障不够果断"。提到 11.0(≈48°,
+        // 仍远低于物理极角上限 ~15.7/58°): 实际减速/机动加速度从 8 提到 11 → 刹停距离更短、响应更跟手,
+        // 越障爬升的垂直加速度上限也同步抬高(见文件内 aDesY clamp)。
+        // 风险: 重规划(深度环)较慢时过大加速度会让无人机在下一指令前冲入障碍——但避障刹车因子
+        // (brake=min(1, v_safe/spdFwd)) 已把速度目标压住不会无脑前冲; 且下方 yopoAvoidDecel 的
+        // 保守 v_safe 阈值(7.2)远小于本值(11), 留 ~2m+ 刹停余量, 安全性不降。
+        this.yopoAccMax = 11.0;
         // ── 几何反应式避障 (势场法, 基于 Cesium 真值射线) —— 参考 git 3b92a03 ──
         // 与 DA360 深度无关: 直接用 world.pickLocalRay 探测水平 360° 环形障碍距离 +
         // 地面/屋顶间隙 + 三层高度(当前/上/下), 生成排斥(rep)/切向绕行(tan)/
@@ -205,14 +210,16 @@ export class Drone {
                                       // 想加强绕行请调 RepGain/TanGain(力度), 别调这个(触发门槛)。
         this.yopoAvoidGain = 10.0;    // 通用避障增益基准: 现主要用于竖直安全(upPush/vRep=
                                       // gain*系数), 水平 rep/tan 已拆为下方独立增益以便分别调强弱。
-        this.yopoAvoidRepGain = 9.0;  // 排斥(径向推离)最大速度 (m/s): 加强到 9, 遇障更果断推离/绕开
+        this.yopoAvoidRepGain = 12.0; // 排斥(径向推离)最大速度 (m/s): 加强到 12, 遇障更果断推离/绕开
                                       // (配合 repRange 增大更及时), 不再被"推回而非绕开"
-        this.yopoAvoidTanGain = 18.0; // 切向(绕行)速度增益 (m/s): 加强到 18, 遇障时更果断朝目标侧
+        this.yopoAvoidTanGain = 24.0; // 切向(绕行)速度增益 (m/s): 加强到 24, 遇障时更果断朝目标侧
                                       // 绕行、更快绕过, 解决"排斥大、切向弱→总被推回而非绕开"。
-        this.yopoAvoidDecel = 15.0;   // 安全刹车减速度 (m/s²): 已调大(原 12)→ 运动学 v_safe=√(2ad)
-                                      // 更短, 触发距离减小后仍能刹停且留余量。物理上限 ~15.7(58° 倾角),
-                                      // 取 15 逼近上限使减速更果断; 实际减速受 yopoAccMax 钳制。
-        this.yopoAvoidQueryMs = 35;   // 射线探测节流 (ms): 18m/s 时每 0.63m 更新一次,
+        this.yopoAvoidDecel = 8.0;    // v_safe=√(2ad) 刹车阈值所用的【假定减速度】(m/s²), 故意取低于
+                                      // yopoAccMax(11): 让运动学刹车【提早触发】+ 留足余量(10m/s 巡航时在
+                                      // ~8m 处即开始减速, 而非更晚)。真实刹停能力由 yopoAccMax=11 提供
+                                      // (11 > 8 → 物理上一定刹得住)。二者解耦: 本值保守管"及时",
+                                      // yopoAccMax 高管"力度"(实际减速/机动加速度)。
+        this.yopoAvoidQueryMs = 20;   // 射线探测节流 (ms): 18m/s 时每 0.36m 更新一次,
                                       // 探测更密 → 障碍信息更实时, 避障响应更快。
         this.yopoMinAlt = 2.5;        // 地面/屋顶最小净空 (m) — 软避障(上推)触发阈值
 
@@ -220,8 +227,9 @@ export class Drone {
         this.yopoAvoidVertRange = 12.0;   // 竖直射线探测范围 (m)
         // —— 竖直越障 (A+B 方案) ——
         this.yopoAvoidVStep = 8.0;        // 竖直探测抬升/下探步长 (m), *2 高层可越更高楼
-        this.yopoAvoidVClimbScale = 1.2;  // 竖直越障速度 = gain*scale = 10*1.2=12m/s, 越障爬升更猛、
-                                          // 更快翻越障碍顶; ≈droneMaxVSpeed=12 上限
+        this.yopoAvoidVClimbScale = 1.6;  // 竖直越障速度 = gain*scale = 10*1.6=16m/s, 越障爬升更猛、
+                                          // 更快翻越障碍顶; 经 droneMaxVSpeed 限幅到 12 但更早命令满爬升,
+                                          // 且 yopoAccMax 抬高后垂直加速度上限同步增强, 爬升建立更快。
         this.yopoAvoidVBlock = 12.0;      // 前进净空 < 此值即触发竖直越障 (m): 18m/s 下 stop+12≈13.1m≈0.73s,
                                           // 比原 8m(0.44s)留更多越障提前量, 免得临到障碍才爬。
                                           // 不要盲目加大: 放行距离越远, 越容易在"前方其实畅通"时误爬升。
@@ -229,6 +237,13 @@ export class Drone {
         this.yopoAvoidVClear = 0.32;      // 上层视为"畅通"的距离占比 (> R*该值≈11.2m 即畅通): 调低→
                                           // 更愿判定上层可飞越, 提升越障意愿(配合 vUpDist 仍防撞顶)
         this.yopoAvoidStop = 1.1;     // 安全净空 (m), 贴合机体半宽+余量
+        // "渐进软刹车"的作用距离(m)与下限: 软刹车只做"越近越慢"的舒适减速, 物理刹停
+        // 由运动学刹车(v_safe=√(2ad))负责。此前软刹车直接复用 repRange(20m) 且无下限,
+        // 导致 20m 外就开始线性压速、10m 处仅剩 0.44、5m 处 0.16 —— 城市场景 dAhead
+        // 常在 8~20m, 巡航被长期压到指令速度的 30%~70%(用户实测 1~4 m/s 的主因)。
+        // 解耦后: 12m 内才介入, 且不低于 0.55, 近距离由运动学刹车接管保证刹得住。
+        this.yopoAvoidBrakeRange = 12.0;  // 软刹车减速区间 (m): 此距离外不减速
+        this.yopoAvoidBrakeFloor = 0.55;  // 软刹车下限: 仅靠软刹车最多减到 55% 速度
         this._avoidProbe = null;      // 势场射线探测缓存
         this._avoidAccScale = 1.0;    // 势场刹车缩放 (加速度前馈衰减用)
         // YOPO 多项式加速度前馈缩放: 网络 cmdAcc 过大直接叠加会猛推, 削到 0.4 更柔和.
@@ -1222,9 +1237,10 @@ export class Drone {
         // YOPO 导航最大水平速度。服务端默认 YOPO_VELOCITY=8.0(巡航 vel_max≈8),
         // 位置环误差贡献限幅 4 m/s + 速度前馈 12 m/s → 峰值≈16 m/s, 钳制到 13
         // 保留跟踪余量, 避免网络切换高速轨迹时位置误差把速度目标顶到上限造成"突然猛冲"。
-        // 提速到 20.0 m/s: 配合服务端 YOPO_VELOCITY=15 + 客户端 yopoPosErrMaxV=15 解锁位置环巡航,
-        // 实际巡航 ~12-15 m/s、端点 ~16-19; 硬上限 20 防爆速猛冲。避障已配套加大探测半径/刹车/增益。
-        const yopoMaxSpd = 20.0;
+        // 硬上限 15 m/s: 与服务端 YOPO_VELOCITY=15 + 服务端 YOPO_SPEED_CAP=15 对齐,
+        // 保证"所有限速最高到 15 m/s"。实际巡航 ~12-15 m/s、端点由服务端/位置环钳制;
+        // 避障已配套加大探测半径/刹车/增益。
+        const yopoMaxSpd = 15.0;
         const maxSpd = stickActive ? this.droneMaxSpeed : yopoMaxSpd;
         const rates = input.rates || { roll: 1, pitch: 1, yaw: 1 };
 
@@ -1708,6 +1724,13 @@ export class Drone {
         // 局部 clamp: 文件内多个方法各自定义局部 clamp(不同作用域),
         // 此处也需定义, 否则下方刹车软逻辑的 clamp 调用会 ReferenceError。
         const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+        // 安全刹车减速度: 必须取"实际可达值", 而非物理极角的理论值。
+        // _controlYOPO 把水平合成加速度与垂直加速度都钳制在 yopoAccMax(8 m/s²),
+        // 而 yopoAvoidDecel(15) 只是 58° 极角对应的理论上限。按 15 计算
+        // v_safe=√(2·a·d) 会把刹车能力高估近一倍 → 运动学刹车放行的速度物理上刹不住。
+        // 取两者较小值, 再乘 0.9 补偿响应滞后(射线节流 35ms + 控制环 20ms + 姿态建立),
+        // 这段时间内无人机仍按旧指令前进。
+        const aDecel = Math.min(this.yopoAvoidDecel, this.yopoAccMax) * 0.9;
 
         let repX = 0, repZ = 0;
         let dMin = R;        // 整体最近障碍 (排斥/切向强度)
@@ -1775,7 +1798,7 @@ export class Drone {
             Number.isFinite(p.vDownDist) ? p.vDownDist : R
         );
         if (Number.isFinite(downGap) && downGap < this.yopoAvoidRange) {
-            const aD = this.yopoAvoidDecel;
+            const aD = aDecel;
             const sd = this.yopoAvoidStop;
             if (downGap <= sd) {
                 vSafeDown = 0;          // 净空已不足 → 完全禁止下降
@@ -1792,7 +1815,7 @@ export class Drone {
         // 正上方净空不足时限制上推速度(对称于 vSafeDown 的下降刹车): 上推速度不超过
         // 能在正上方障碍前刹停的值, 防止上爬/上推撞顶(用户反馈正上方易撞)。
         if (Number.isFinite(p.vUpDist)) {
-            const aU = this.yopoAvoidDecel, su = this.yopoAvoidStop;
+            const aU = aDecel, su = this.yopoAvoidStop;
             if (p.vUpDist <= su) { if (upPush > 0) upPush = 0; }
             else {
                 const vSafeUp = Math.sqrt(2 * aU * (p.vUpDist - su));
@@ -1804,11 +1827,12 @@ export class Drone {
 
         // 近障刹车: 双层渐进减速, 保证灵敏度 + 物理刹停。
         //   1) 运动学硬刹车: v_safe = sqrt(2*a*(d - standoff)), 保证在净空内一定刹停
-        //      (无论多快, 物理上不可能撞上墙)。
-        //   2) 渐进软刹车: 在 repRange 内按距离平滑降速(线性缩放), 让无人机"越近越慢",
-        //      提前减速而非到 8m 才突然刹。两者取更保守(更小)的 brake。
+        //      (无论多快, 物理上不可能撞上墙)。a 用实际可达减速度 aDecel。
+        //   2) 渐进软刹车: 在 yopoAvoidBrakeRange 内按距离平滑降速(带下限), 让无人机
+        //      "越近越慢", 提前减速而非临到跟前才突然刹。两者取更保守(更小)的 brake。
+        //      职责划分: 软刹车只管舒适减速, 物理刹停由(1)负责 —— 不能再让软刹车
+        //      一路压到 0 主导限速(那正是 1~4 m/s 的成因)。
         let brake = 1;
-        const aDecel = this.yopoAvoidDecel;
         const standoff = this.yopoAvoidStop;
         const spdFwd = Math.hypot(velTargetX, velTargetZ);
         if (dAhead <= standoff) {
@@ -1816,12 +1840,19 @@ export class Drone {
         } else if (dAhead < R) {
             const vSafe = Math.sqrt(2 * aDecel * (dAhead - standoff));
             const kinBrake = spdFwd > 1e-3 ? Math.min(1, vSafe / spdFwd) : 0;
-            // 渐进软刹车: repRange→满速, standoff*2→0。让 12m/s 在 18m 处就开始减速,
-            // 越近越慢, 大幅提前避障响应(灵敏度), 同时软刹车与运动学刹车取小者。
-            const soft = clamp(
-                (dAhead - standoff * 2) / (this.yopoAvoidRepRange - standoff * 2),
+            // 渐进软刹车: 在 yopoAvoidBrakeRange 内按距离平滑降速, 并设下限
+            // yopoAvoidBrakeFloor —— 它只负责"越近越慢"的舒适减速, 物理刹停由上面的
+            // 运动学刹车 kinBrake 承担(按实际可达减速度计算, 一定刹得住)。
+            // 此前软刹车直接复用 repRange(20m) 且无下限: 20m 外就开始线性压速,
+            // 10m 处仅剩 0.44、5m 处 0.16, 而城市场景 dAhead 常在 8~20m → 巡航被
+            // 长期压到指令速度的 30%~70%(实测 1~4 m/s 的主因), 近距离更退化为 0
+            // 使无人机原地停滞。解耦后近距离由运动学刹车接管, 安全性不降反升。
+            const softT = clamp(
+                (dAhead - standoff * 2) / (this.yopoAvoidBrakeRange - standoff * 2),
                 0, 1
             );
+            const soft = this.yopoAvoidBrakeFloor +
+                (1 - this.yopoAvoidBrakeFloor) * softT;
             brake = Math.min(kinBrake, soft);
         }
 

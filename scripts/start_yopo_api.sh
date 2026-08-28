@@ -175,11 +175,11 @@ fi
 
 if [[ "$build_ok" != "1" ]]; then
     echo "ERROR: failed to build $IMAGE from $BASE_IMAGE." >&2
-    docker rm -f "$NAME" >/dev/null 2>&1 || true
+    docker rm -fv "$NAME" >/dev/null 2>&1 || true
     exit 1
 fi
 
-docker rm -f "$NAME" >/dev/null 2>&1 || true
+docker rm -fv "$NAME" >/dev/null 2>&1 || true
 
 gpu_args=()
 if [[ "${YOPO_GPUS:-all}" != "none" ]]; then
@@ -195,6 +195,8 @@ run_args=(
     # 转发速度/时间缩放相关环境变量(否则在 docker 模式下设置无效, 只能改 yaml 重启)
     -e "YOPO_VELOCITY=${YOPO_VELOCITY:-}"
     -e "YOPO_CTRL_TIME_SCALE=${YOPO_CTRL_TIME_SCALE:-}"
+    # 轨迹末端外推时长(秒), 修重规划间隔内的指令冻结锯齿; 默认 2.0 (见 yopo_server.py)
+    -e "YOPO_TRAJ_EXTEND_S=${YOPO_TRAJ_EXTEND_S:-}"
     # TensorRT 加速开关与引擎路径: YOPO_USE_TRT=1 时加载 YOPO_TRT_PATH 指向的引擎
     -e "YOPO_USE_TRT=${YOPO_USE_TRT:-}"
     -e "YOPO_TRT_PATH=${YOPO_TRT_PATH:-/opt/mindcloud-yopo/trt/yopo_trt.pth}"
@@ -241,7 +243,7 @@ fi
 
 echo "Starting YOPO container $NAME on host port $PORT -> container port 5689 ..."
 if [[ "${YOPO_DETACH:-0}" == "1" ]]; then
-    echo "Container is running in detached mode. Stop it later with: docker rm -f $NAME"
+    echo "Container is running in detached mode. Stop it later with: docker rm -fv $NAME"
 fi
 
 exec docker run "${gpu_args[@]}" "${run_args[@]}" "$IMAGE" \

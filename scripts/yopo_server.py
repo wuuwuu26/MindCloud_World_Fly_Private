@@ -33,7 +33,9 @@ import os
 import sys
 import time
 import json
+import asyncio
 import threading
+import concurrent.futures
 import numpy as np
 
 # ── YOPO module paths ─────────────────────────────────────────────
@@ -163,6 +165,45 @@ CTRL_DT = 0.02  # 50 Hz control loop (matches original YOPO)
 # Guard against an empty env string (shell exports "") which would crash float("").
 _env_tscale = os.environ.get("YOPO_CTRL_TIME_SCALE")
 CTRL_TIME_SCALE = float(_env_tscale) if _env_tscale else 1.0
+# 指令速度硬上限(m/s): 反应预算限速器已移除, 此绝对钳制保证任何配置下
+# (含 YOPO_VELOCITY / YOPO_CTRL_TIME_SCALE 调大) 指令速度都不超过该值。默认 15。
+_env_scap = os.environ.get("YOPO_SPEED_CAP")
+YOPO_SPEED_CAP = float(_env_scap) if _env_scap else 15.0
+# 轨迹末端延伸(秒): 修"提速→减速→再加速"锯齿的关键。
+# 网络轨迹时长远短于深度环重规划间隔 —— 实测 traj_time ≈ 0.67s
+#   (radio_range=5 → sgm_time=2*5/6=1.667s; YOPO_VELOCITY=15 → ratio=2.5 →
+#    segment_time=1.667/2.5=0.667s), 叠加 CTRL_TIME_SCALE=2 后仅 0.33s 真实时间
+#   就把整条轨迹走完。此后 ctrl_time 被 poly_duration 封顶 → 指令冻结在轨迹末端。
+# 客户端控制器为 velTarget = clamp(1.0*posErr, ±15) + ffVel (drone.js),
+#   冻结后 cmdPos 停止前进、cmdVel 仍是末端速度 → 无人机冲过冻结点 → posErr 转负
+#   → 被位置环拉回减速 → 下次重规划再加速 = 锯齿的真因。
+# 故轨迹走完后按【末端速度】继续线性外推: 指令位置以末端速度继续前进、速度保持
+#   末端速度, 使指令始终位于无人机前方且同速移动, posErr 稳定 ≈ 0, 消除拉回与锯齿。
+#   同时指令速度来自网络规划的末端速度而非"当前真实速度", 打破 main.js 注释所述
+#   "多项式起点速度=真实速度 → 指令速度≈真实速度 → 趋近 0" 的循环依赖。
+# 超出 TRAJ_EXTEND_S 仍无重规划(深度通道异常)则退回冻结行为, 避免无限盲飞。
+_env_extend = os.environ.get("YOPO_TRAJ_EXTEND_S")
+TRAJ_EXTEND_S = float(_env_extend) if _env_extend else 2.0
+
+# 反应预算限速器已移除: 不再按重规划间隔动态限速。无人机按网络规划速度飞行,
+# ctrl_time 推进倍率直接取 CTRL_TIME_SCALE(默认 1.0, 可用 YOPO_CTRL_TIME_SCALE 快进,
+# 见 restart_all.sh 当前设为 2 → 实际会飞 2x 网络速度)。避障改由 ① 网络 argmin(score)
+# 选出的轨迹 ② 客户端几何反应式势场 ③ DA360 深度安全壳 三层共同保证; 指令 PVA
+# 仍按同一 rate 缩放以保持自洽(见 _compute_command)。
+def _env_float(name, default):
+    """读取环境变量浮点值; 空串/非法值回退 default (避免 float("") 崩溃)。"""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+# (反应预算限速器常量 REACT_*/GOVERNOR_MIN_V/ALLOW_TIMESCALE_BOOST 已移除:
+#  无人机直接按 CTRL_TIME_SCALE 飞行, 避障交由网络 + 客户端几何/DA360 安全壳。)
+
 ARRIVE_THRESHOLD = 2.0  # metres (matches test_yopo_ros.py L132: norm(pos-goal)<2.0)
 # 终点接管距离: 网络在 goal_length (2*radio_range=10m) 内目标观测被按 goal_length
 # 归一化缩小(state_transform.normalize_obs), lattice 又全是巡航型轨迹(端点速度可
@@ -235,6 +276,9 @@ class YOPOServer:
         self.pos = np.array([0.0, 0.0, 0.0])
         self.vel = np.array([0.0, 0.0, 0.0])
         self.quat = np.array([0.0, 0.0, 0.0, 1.0])
+        # 最近一次里程计的采集时刻(见 _current_state): 用于把 pos 外推到"当前",
+        # 使重规划的多项式起点=无人机真实当前状态, 而非"发请求时的状态"。
+        self.odom_time = None
 
         # Desired trajectory state (updated by polynomial evaluation)
         self.desire_pos = None
@@ -250,7 +294,13 @@ class YOPOServer:
         self.optimal_poly_z = None
         self.last_position_cmd = None
         self.poly_duration = None  # 当前多项式的时长(s): 网络轨迹=traj_time, 终点接管=规划时长T
-        self.last_nav_time = None
+        # 轨迹走完后是否按末端速度外推(见 TRAJ_EXTEND_S): 网络轨迹=是; 终点接管=否
+        # (终点接管必须停在目标点, 外推会冲过目标)。
+        self.poly_extend = False
+        # ctrl_time 的有效推进倍率(纯时间重参数化的 rate): 反应预算限速器已移除,
+        # 直接取 CTRL_TIME_SCALE(默认 1.0, 可用 YOPO_CTRL_TIME_SCALE 开启"快进";
+        # restart_all.sh 当前设为 2 → 飞 2x 网络速度)。
+        self._time_rate = CTRL_TIME_SCALE
         self.last_control_time = None
         self.last_fwd_obstacle_dist = None
         self._lock = threading.Lock()
@@ -345,7 +395,6 @@ class YOPOServer:
         self.optimal_poly_x = None
         self.optimal_poly_y = None
         self.optimal_poly_z = None
-        self.last_nav_time = None
         print(f"New goal: ({x:.1f}, {y:.1f}, {z:.1f})")
         # Reset simple avoidance state on new goal
         # Reset 终点平滑, 避免上一目标的方向惯性
@@ -466,6 +515,35 @@ class YOPOServer:
         endstate_w_ros = np.matmul(Rotation_wc, endstate_c)  # [1, 3, 3]
         return endstate_w_ros
 
+    def _current_state(self, max_dt=1.0):
+        """返回 (pos, vel): 无人机【当前时刻】的位置与速度(一阶外推)。
+
+        为什么不能直接用 self.pos: navigate() 是阻塞长任务(深度清洗 + 网络推理),
+        而 WS transport 在单线程 asyncio 事件循环里【同步】调用它(_ws_handler →
+        _ws_handle_message → srv.navigate), 期间同一条 WS 连接上的 control 消息
+        全部排队饿死 → self.pos 冻结在 navigate() 开头(客户端发请求那一刻)采集的
+        值。直接拿它当多项式起点, 轨迹是从"发请求时的位置"起步, 而无人机此时已
+        前进 v*dt —— 起点落在机体后方, 指令位置瞬间回跳 → 位置环把无人机往回拉
+        → 减速 → 下次重规划再加速(速度锯齿)。
+
+        故以最近一次里程计的时间戳为基准, 用速度做一阶外推得到真正的当前位置,
+        保证重规划的多项式起点 C0=当前位置、C1=当前速度。
+
+        注: 网络观测 obs 仍用"深度采集时刻"的状态(_process_odom 在推理前调用),
+        这是正确的 —— 深度图与当时的位姿对应; 只有【轨迹起点】需要外推到当前。
+
+        max_dt 上限防止里程计长期不更新(暂停/断流)时外推失控。
+        """
+        pos = self.pos.copy()
+        vel = self.vel.copy()
+        if self.odom_time is not None:
+            dt = min(max(time.time() - self.odom_time, 0.0), max_dt)
+            pos = pos + vel * dt
+        return pos, vel
+
+    # 反应预算限速器(_safe_speed)已移除: 不再按重规划间隔计算 v_safe 来限
+    # 速。ctrl_time 推进倍率由 _build_polynomial 直接取 CTRL_TIME_SCALE。
+
     def _build_polynomial(self, endstate_w_ros):
         """Build polynomial trajectory from inference output. FAST (~1ms).
 
@@ -479,11 +557,14 @@ class YOPOServer:
         # 深度推理慢(1-2s)时, 两次规划之间 ctrl_time 触顶、无人机沿旧轨迹末端
         # 直线滑行, 参考状态 desire_* 会冻结在旧轨迹末端并滞后于真实位置。
         # 若仍从 desire_* 起步, 新指令会猛拉回滞后点 → 衔接处跳动/不连续。
-        # 故起点用无人机【真实里程计状态】self.pos/self.vel, 保证规划前后
+        # 故起点用无人机【真实里程计状态】外推到当前时刻, 保证规划前后
         # 位置 C0、速度 C1 连续; 加速度取最近指令加速度(self.desire_acc,
         # 飞行/滑行期间≈真实加速度)作为 C2 估计。
-        start_pos_ros = self._vec_mc_to_ros(self.pos)
-        start_vel_ros = self._vec_mc_to_ros(self.vel)
+        # 注意: 不能直接 self.pos —— 它在 navigate() 阻塞期间会冻结成陈旧值
+        # (详见 _current_state 注释), 必须按里程计时间戳外推到"当前"。
+        start_pos_mc, start_vel_mc = self._current_state()
+        start_pos_ros = self._vec_mc_to_ros(start_pos_mc)
+        start_vel_ros = self._vec_mc_to_ros(start_vel_mc)
         start_acc_ros = self._vec_mc_to_ros(self.desire_acc) if self.desire_acc is not None else np.zeros(3)
 
         # 3D 导航: 完全信任网络预测的 z(垂直)终端状态 —— 不强制终点高度=目标高度,
@@ -493,6 +574,12 @@ class YOPOServer:
         # 导航降级为 2D": 目标高度与当前高度差距大时, 整条轨迹被纵向拖拽, 且网络
         # 预测的垂直位移/速度被丢弃 → 无人机"一开始就往目标高度冲/不动"。删除后
         # 恢复网络原生的 3D 轨迹(与 docstring 及官方 test_yopo_ros.py 完全一致)。
+
+        # ctrl_time 推进倍率 = CTRL_TIME_SCALE。反应预算限速器已移除: 不再按
+        # v_safe/vel_max 把 rate 压到 <1 来动态限速, 无人机按网络规划速度飞行
+        # (默认 1.0, 可用 YOPO_CTRL_TIME_SCALE 开启"快进")。
+        # 指令 PVA 仍按同一 rate 缩放(见 _compute_command), 保证位置/速度/加速度自洽。
+        self._time_rate = CTRL_TIME_SCALE
 
         self.optimal_poly_x = Poly5Solver(
             start_pos_ros[0], start_vel_ros[0], start_acc_ros[0],
@@ -525,13 +612,14 @@ class YOPOServer:
         # 终点接管 _plan_final_approach 独立设置 ctrl_time=0, 与此一致。
         self.ctrl_time = 0.0
         self.poly_duration = self.traj_time
+        self.poly_extend = True
 
     def _make_final_approach_polys(self):
         """构建终点接管(到目标点的五次多项式), 返回 (px, py, pz, T, start_pos_ros)。"""
         # 与 _build_polynomial 一致: 起点用【真实里程计状态】, 保证与上一阶段
         # (网络规划)轨迹在衔接处 C0/C1/C2 连续, 不出现拉回式跳动。
-        start_pos_mc = self.pos.copy()
-        start_vel_mc = self.vel.copy()
+        # 与 _build_polynomial 一致: 起点取【当前时刻】状态(见 _current_state)。
+        start_pos_mc, start_vel_mc = self._current_state()
         start_acc_mc = self.desire_acc.copy() if self.desire_acc is not None else np.zeros(3)
 
         # 时长: 平均速度 ≤ vel_max 且留出减速时间, 夹在 [0.8, 3.0]s
@@ -568,6 +656,8 @@ class YOPOServer:
         self.optimal_poly_x, self.optimal_poly_y, self.optimal_poly_z = px, py, pz
         self.ctrl_time = 0.0
         self.poly_duration = T
+        # 终点接管禁止外推: 必须精确停在目标点(外推会冲过目标)。
+        self.poly_extend = False
 
     def _preprocess_depth(self, depth_raw, mask_raw=None):
         """Normalize depth to [0,1], build validity mask, return (1, C, H, W) array.
@@ -644,6 +734,7 @@ class YOPOServer:
         self.pos = np.array(pos, dtype=np.float64)
         self.vel = np.array(vel, dtype=np.float64)
         self.quat = np.array(quat, dtype=np.float64)
+        self.odom_time = time.time()
 
         # ── 1. Depth processing (ERP mean-fill + optional mask) ──
         if depth_encoding == "32FC1":
@@ -738,11 +829,7 @@ class YOPOServer:
         time2 = time.time()
 
         # ── 4. Trajectory planning ──
-        # Compute real elapsed time since last call (depth capture is slow)
-        dt_real = 0.0
-        if self.last_nav_time is not None:
-            dt_real = min(now - self.last_nav_time, self.traj_time * 2)
-        self.last_nav_time = now
+        # 反应预算限速器已移除: 不再测量/平滑重规划间隔来动态限速。
 
         # Replan on every navigate call (each carries a new depth frame).
         # ctrl_time is reset to 0 inside _build_polynomial (matches original
@@ -784,6 +871,7 @@ class YOPOServer:
                   f"post={1000*(time4-time3):.1f}ms total={total:.1f}ms "
                   f"ctrl_t={self.ctrl_time:.3f}s replan={need_replan}")
 
+
         if self.count < 5 or self.count % 60 == 0:
             cmd_pos = cmd["position"]
             print(f"[YOPO #{self.count}] pos=({self.pos[0]:.1f},{self.pos[1]:.1f},{self.pos[2]:.1f}) "
@@ -819,6 +907,7 @@ class YOPOServer:
         self.pos = np.array(pos, dtype=np.float64)
         self.vel = np.array(vel, dtype=np.float64)
         self.quat = np.array(quat, dtype=np.float64)
+        self.odom_time = time.time()
 
         # Arrival check
         dist_to_goal = float(np.linalg.norm(self.pos - self.goal))
@@ -851,13 +940,18 @@ class YOPOServer:
                 }
 
             # Advance ctrl_time by real dt (capped at CTRL_DT), then scale by
-            # CTRL_TIME_SCALE so the planned trajectory is traversed faster.
-            # 路径本身(空间形状/避障)完全不变, 只是时间上"快进", 巡航速度
-            # ≈ vel_max * CTRL_TIME_SCALE。封顶用 poly_duration: 终点接管多项式
-            # 时长可能大于 lattice traj_time, 若按 traj_time 封顶会中途截断。
+            # the time-scale rate (CTRL_TIME_SCALE) so the planned trajectory is
+            # traversed at the configured speed (反应预算限速器已移除)。
+            # 真实巡航速度 ≈ vel_max * rate; 指令 PVA 同样按 rate 缩放(见 _compute_command)。
+            # 封顶用 poly_duration: 终点接管多项式时长可能大于 lattice traj_time,
+            # 若按 traj_time 封顶会中途截断。
             dt = now - self.last_control_time if self.last_control_time else 0.0
-            dt = min(max(dt, 0.0), CTRL_DT) * CTRL_TIME_SCALE
+            dt = min(max(dt, 0.0), CTRL_DT) * self._time_rate
             cap = self.poly_duration if self.poly_duration else self.traj_time
+            # 网络轨迹超出 poly_duration 后继续外推 TRAJ_EXTEND_S(见 TRAJ_EXTEND_S 注释),
+            # 使指令位置继续前进而非冻结; 终点接管(poly_extend=False)严格封顶在 T, 保证停在目标点。
+            if self.poly_extend:
+                cap += TRAJ_EXTEND_S
             self.ctrl_time = min(self.ctrl_time + dt, cap)
             self.last_control_time = now
 
@@ -928,29 +1022,63 @@ class YOPOServer:
                 "yaw_dot": 0.0,
             }
 
-        t = min(self.ctrl_time, self.poly_duration if self.poly_duration else self.traj_time)
+        T = self.poly_duration if self.poly_duration else self.traj_time
+        extend_s = TRAJ_EXTEND_S if self.poly_extend else 0.0
+        t = min(self.ctrl_time, T + extend_s)
 
         # Evaluate polynomial in ROS frame
-        pos_ros = np.array([
-            self.optimal_poly_x.get_position(t),
-            self.optimal_poly_y.get_position(t),
-            self.optimal_poly_z.get_position(t),
-        ])
-        vel_ros = np.array([
-            self.optimal_poly_x.get_velocity(t),
-            self.optimal_poly_y.get_velocity(t),
-            self.optimal_poly_z.get_velocity(t),
-        ])
-        acc_ros = np.array([
-            self.optimal_poly_x.get_acceleration(t),
-            self.optimal_poly_y.get_acceleration(t),
-            self.optimal_poly_z.get_acceleration(t),
-        ])
+        if t > T and extend_s > 0.0:
+            # 轨迹已走完: 按末端速度线性外推, 指令位置继续以 v(T) 前进、速度保持 v(T)。
+            # 避免指令冻结在末端导致无人机冲过冻结点被位置环拉回(锯齿根因, 见 TRAJ_EXTEND_S)。
+            # C0/C1 在 t=T 处连续(位置/速度都取多项式的终端值), 加速度置 0(匀速直线)。
+            dt_ext = t - T
+            pos_ros = np.array([
+                self.optimal_poly_x.get_position(T) + self.optimal_poly_x.get_velocity(T) * dt_ext,
+                self.optimal_poly_y.get_position(T) + self.optimal_poly_y.get_velocity(T) * dt_ext,
+                self.optimal_poly_z.get_position(T) + self.optimal_poly_z.get_velocity(T) * dt_ext,
+            ])
+            vel_ros = np.array([
+                self.optimal_poly_x.get_velocity(T),
+                self.optimal_poly_y.get_velocity(T),
+                self.optimal_poly_z.get_velocity(T),
+            ])
+            acc_ros = np.zeros(3)
+        else:
+            pos_ros = np.array([
+                self.optimal_poly_x.get_position(t),
+                self.optimal_poly_y.get_position(t),
+                self.optimal_poly_z.get_position(t),
+            ])
+            vel_ros = np.array([
+                self.optimal_poly_x.get_velocity(t),
+                self.optimal_poly_y.get_velocity(t),
+                self.optimal_poly_z.get_velocity(t),
+            ])
+            acc_ros = np.array([
+                self.optimal_poly_x.get_acceleration(t),
+                self.optimal_poly_y.get_acceleration(t),
+                self.optimal_poly_z.get_acceleration(t),
+            ])
 
-        # Convert to MindCloud frame
+        # ── 纯时间重参数化: 指令 PVA 三者必须自洽 ──
+        # cmdPos = p(ctrl_time), 而 ctrl_time 以 rate 倍真实时间推进, 故指令位置的
+        # 真实前进速率是 p'(t)*rate。若指令速度仍输出 p'(t)(不缩放), 则"位置暗含的
+        # 速度"与"指令速度"相差 rate 倍 —— 二者打架: 无人机只能靠客户端位置环
+        # P 项(clamp ±15)硬追, 并稳定滞后于规划位置(实测可达十几米), 等于
+        # "不在规划的位置上飞行", 避障形同虚设。
+        # 故输出速度乘 rate、加速度乘 rate², 使位置/速度/加速度描述同一实际运动。
+        rate = float(getattr(self, "_time_rate", 1.0))
         pos_mc = self._vec_ros_to_mc(pos_ros)
-        vel_mc = self._vec_ros_to_mc(vel_ros)
-        acc_mc = self._vec_ros_to_mc(acc_ros)
+        vel_mc = self._vec_ros_to_mc(vel_ros) * rate
+        acc_mc = self._vec_ros_to_mc(acc_ros) * (rate * rate)
+
+        # 绝对速度上限(反应预算限速器已移除后的硬兜底): 指令速度向量模长
+        # 不得超过 YOPO_SPEED_CAP(默认 15 m/s), 保证"所有限速最高到 15 m/s"。
+        # 仅截断超过上限的部分、方向保持不变; 正常巡航(rate=1, vel_max≤15)下不触发。
+        speed_cap = float(YOPO_SPEED_CAP)
+        _sp = float(np.linalg.norm(vel_mc))
+        if _sp > speed_cap and _sp > 1e-6:
+            vel_mc = vel_mc * (speed_cap / _sp)
 
         # Update desire state for plan_from_reference (critical for stable tracking)
         self.desire_pos = pos_mc
@@ -1033,6 +1161,8 @@ def status():
         resp["traj_num"] = srv.lattice_primitive.traj_num
         resp["vel_max"] = srv.lattice_primitive.vel_max
         resp["acc_max"] = srv.lattice_primitive.acc_max
+    # 时间重参数化倍率(反应预算限速器已移除, 仅剩 CTRL_TIME_SCALE 快进因子):
+    resp["time_rate"] = round(float(getattr(srv, "_time_rate", 1.0)), 3)
     return jsonify(resp)
 
 
@@ -1273,13 +1403,42 @@ def _ws_handle_message(raw):
         return {"error": f"unknown ws message type: {t}"}
 
 
+def _is_ws_navigate_text(raw):
+    """text JSON 帧是否为 navigate(base64 回退路径)。
+
+    control 必须留在事件循环内立即执行, 绝不能被线程池排队 —— 否则 50Hz 控制环
+    会被 navigate 的推理耗时卡住(self.pos 冻结 → 见 _current_state)。
+    """
+    try:
+        return json.loads(raw).get("type") == "navigate"
+    except Exception:
+        return False
+
+
+# navigate() 是阻塞长任务(深度清洗 + 网络推理)。若在 WS 事件循环里同步执行,
+# 会在其整个耗时内饿死同一条连接上的 control 消息, 使 self.pos/self.vel 冻结在
+# navigate() 开头的采集值 → 重规划的多项式起点陈旧、落在机体后方 → 指令回跳拉拽
+# (详见 _current_state 注释)。放进线程池后可让 control 继续被即时处理。
+# max_workers=1 是必须的: 两次 navigate 共享 self._last_depth_input /
+# self._last_obs_input, 并发执行会让推理读到另一帧的深度或观测。
+_ws_nav_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="ws-navigate")
+
+
 async def _ws_handler(websocket):
     remote = getattr(websocket, "remote_address", "unknown")
     print(f"[WS] client connected {remote}")
+    loop = asyncio.get_running_loop()
     try:
         async for raw in websocket:
             try:
-                resp = _ws_handle_message(raw)
+                # 二进制帧恒为 navigate(见 _ws_handle_message 的 bytes 分支);
+                # text 帧按 type 判定。仅 navigate 走线程池, control 保持同步即时。
+                if isinstance(raw, (bytes, bytearray)) or _is_ws_navigate_text(raw):
+                    resp = await loop.run_in_executor(
+                        _ws_nav_executor, _ws_handle_message, raw)
+                else:
+                    resp = _ws_handle_message(raw)
             except Exception as e:
                 resp = {"error": str(e)}
             try:
