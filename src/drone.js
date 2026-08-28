@@ -197,13 +197,13 @@ export class Drone {
         })();
         this.yopoAvoidRange = 35.0;   // 障碍探测半径 (m) — 18m/s 巡航需更长前瞻: 刹车距离 v²/2a≈13.5m,
                                       // 35m 给足探测滞后+响应余量, 障碍更早进入感知。
-        this.yopoAvoidRepRange = 15.0; // 排斥/切向作用距离 (m): 已调小(原 26)→ 障碍更近才触发
-                                      // 主动避障, 畅通时更早解除、少绕行。配合更大 decel 仍能刹停:
-                                      // 18m/s 下 15m 提供 ~0.83s 窗口, 刹车距离 v²/2a≈10.8m < 15m。
+        this.yopoAvoidRepRange = 20.0; // 排斥/切向/刹车作用距离 (m): 18m/s 下 20m 提供 ~1.1s 响应窗口,
+                                      // 刹车距离 v²/2a≈10.8m < 20m, 更早介入且留足余量; goalClear 畅通
+                                      // 阈值=本值, 故同步避免"走廊畅通判定"被过早解除。
         this.yopoAvoidGain = 10.0;    // 通用避障增益基准: 现主要用于竖直安全(upPush/vRep=
                                       // gain*系数), 水平 rep/tan 已拆为下方独立增益以便分别调强弱。
-        this.yopoAvoidRepGain = 4.0;  // 排斥(径向推离)最大速度 (m/s): 调小→绕行时不再被猛推离、
-                                      // 机体不被推离航线过远; 贴障保持由碰撞系统兜底。
+        this.yopoAvoidRepGain = 6.0;  // 排斥(径向推离)最大速度 (m/s): 6 比上版 4 略强, 遇障更易
+                                      // 及时推离/绕开(配合 repRange 增大更及时); 仍远低于初版 10 避免过推。
         this.yopoAvoidTanGain = 14.0; // 切向(绕行)速度增益 (m/s): 调大→遇障时更果断朝目标侧绕行、
                                       // 更快绕过, 解决"排斥大、切向弱→总被推回而非绕开"。
         this.yopoAvoidDecel = 15.0;   // 安全刹车减速度 (m/s²): 已调大(原 12)→ 运动学 v_safe=√(2ad)
@@ -1936,15 +1936,13 @@ export class Drone {
         // 带状区域; 仅落在走廊内(实测到该中心线的垂直偏移 < 半宽)的障碍才算"挡在路上"。
         // 走廊外的侧旁障碍(即便很近)直接忽略——直飞即可安全通过。竖直威胁
         // (fwdDownDist/groundGap/ceilHit)一律不参与, 由 upPush/vSafeDown 单独处理垂直安全。
-        // 判定轴必须是"目标方位"而非"期望速度方向(轨迹瞬时前进方向)": 无人机走 YOPO 轨迹,
-        // 转弯/绕行瞬间 velTarget 会偏入侧旁建筑, 若用它作轴走廊会被误判"被挡" → goalClear 失效
-        // → 持续切向绕行(即"到目标点畅通却还绕行")。改用目标方位作轴后, 只要无人机→目标的
-        // 直线走廊畅通就直飞目标, 不被轨迹瞬时方向带偏(无导航目标时回退到期望速度方向)。
-        // 判定轴 = 机体→导航目标的真实方位(用户语义"到目标点畅通")。
-        // 此前版本用期望速度方向(轨迹瞬时前进方向)作轴, 而无人机走的是 YOPO 轨迹, 转弯/
-        // 绕行瞬间 velTarget 可能偏入侧旁建筑 → 走廊判定"被挡" → goalClear 失效 → 持续绕行
-        // (即本次"还是绕行")。改用目标方位作轴: 只要无人机→目标的直线走廊畅通, 就直飞目标,
-        // 不再被轨迹瞬时方向带偏。无导航目标时回退到期望速度方向。
+        // 判定轴: 目标方位(机体→导航目标)为主, 但 goalClear 同时满足"命令速度方向走廊也畅通"
+        // (见下双走廊判定)。单用目标方位会漏掉"网络把无人机指向建筑、但目标线暂清"→仍全速直冲
+        // (即"规划往建筑物上撞"); 仅用命令速度方向(此前版本)则转弯/绕行瞬间 velTarget 偏入侧旁
+        // 建筑、且其横向偏移其实很大→会被误判"被挡"→ goalClear 失效→持续切向绕行("到目标畅通却
+        // 还绕行")。故两者都用"走廊(横向偏移<半宽)"度量而非锥形最小距离: 真正在路径上的近障才
+        // 算挡路, 侧旁/转弯偏指的大偏移障碍忽略 → 既不盲冲建筑, 也不在畅通时乱绕。无导航目标时
+        // 命令速度方向回退到目标方位。
         let gx, gz;
         if (this.yopoNavTarget) {
             const tdx = this.yopoNavTarget.x - this.x;
@@ -1958,18 +1956,33 @@ export class Drone {
         let goalClear = false;
         if (des > 0.3 || this.yopoNavTarget) {
             const pathHalfWidth = 2.5;                      // m, 飞行走廊半宽(机体半径+余量)
-            const clearThresh = this.yopoAvoidRepRange;     // 走廊内 25m 无障碍才算畅通
-            let dPath = R;                                  // 走廊内最近障碍距离
+            const clearThresh = this.yopoAvoidRepRange;     // 走廊内无近障(>作用距离)才算畅通
+            // 双走廊判定:
+            //   dPath — 沿"机体→目标"方位的走廊净空(到目标的路畅通否)
+            //   dCmd  — 沿"命令速度方向(实际前进方向)"的走廊净空(网络/轨迹正指向的路面畅通否)
+            // 两者都畅通才解除避障直飞。仅用目标走廊会漏掉"网络把无人机指向建筑、但目标线暂清"
+            // 的情况→仍全速直冲(即'规划往建筑物上撞'); 两者皆查可杜绝。用走廊(横向偏移<半宽)
+            // 而非 dAhead 锥形最小, 避免转弯瞬间速度偏入侧旁建筑(横向偏移大)被误判挡路→持续
+            // 绕行(此前'到目标畅通却还绕行'的根因)。
+            let dPath = R, dCmd = R;
+            const cx = udx, cz = udz, cMag = Math.hypot(cx, cz);
+            const cxn = cMag > 0.3 ? cx / cMag : gx;        // 无有效前进速度时回退目标方位
+            const czn = cMag > 0.3 ? cz / cMag : gz;
             for (let i = 0; i < dirs.length; i++) {
                 const dd = dists[i];
                 if (!Number.isFinite(dd) || dd <= 0) continue;
-                const dot = dirs[i].x * gx + dirs[i].z * gz;
-                if (dot <= 0) continue;                     // 身后不算前进路径
-                // 障碍到前进线的垂直偏移 = dd * sin(夹角)
-                const lateral = dd * Math.sqrt(Math.max(0, 1 - dot * dot));
-                if (lateral < pathHalfWidth && dd < dPath) dPath = dd;
+                const dotT = dirs[i].x * gx + dirs[i].z * gz;
+                if (dotT > 0) {
+                    const latT = dd * Math.sqrt(Math.max(0, 1 - dotT * dotT));
+                    if (latT < pathHalfWidth && dd < dPath) dPath = dd;
+                }
+                const dotC = dirs[i].x * cxn + dirs[i].z * czn;
+                if (dotC > 0) {
+                    const latC = dd * Math.sqrt(Math.max(0, 1 - dotC * dotC));
+                    if (latC < pathHalfWidth && dd < dCmd) dCmd = dd;
+                }
             }
-            if (dPath > clearThresh) goalClear = true;
+            if (dPath > clearThresh && dCmd > clearThresh) goalClear = true;
         }
 
         // ---- 竖直越障 (A) ----
