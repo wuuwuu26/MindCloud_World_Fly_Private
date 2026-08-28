@@ -1995,7 +1995,14 @@ export class Drone {
         // 水平前进近距(dAheadH<blockDist)双重判定。dAhead 含 fwdDownDist/groundGap/ceilHit 等竖直
         // 威胁(用于刹车/上推), 若直接用会把 dAhead 拉小 → "往目标方向畅通却误上越/下钻"。改用
         // 纯水平的 dAheadH + 走廊判定后, 仅在正前方确有水平障碍(而非下方净空不足)时才爬升/下钻。
-        if (!goalClear && dAheadH < blockDist && des > 0.3 && p.distsHigh && p.distsHigh2 && p.distsLow) {
+        // 终点接管区(距目标 <yopoFinalApproachDist 或已到达)内彻底禁用竖直越障: 此时应直接 PD
+        // 收敛到目标点, 爬升会偏离目标、且"明明畅通却飞起来"(双走廊/goalClear 在终点微调时可能因
+        // 速度方向偏指侧旁建筑而失效)。竖直安全(upPush/vSafeDown)仍保留防撞地/顶。
+        const nt = this.yopoNavTarget;
+        const nearGoal = nt && (this.yopoArrived ||
+            Math.hypot(nt.x - this.x, nt.z - this.z) < this.yopoFinalApproachDist);
+        if (!nearGoal && !goalClear && dAheadH < blockDist && des > 0.3 &&
+            p.distsHigh && p.distsHigh2 && p.distsLow) {
             // 只从已做高层探测的 2 条方向(vProbeIdx 记录在 probe 的 highProbeIdx 中)里
             // 选最对齐前进方向的射线: 保证 dH/dH2/dL 是真实高层距离而非 mid 值。
             let bi = -1, bdot = 0.5;
