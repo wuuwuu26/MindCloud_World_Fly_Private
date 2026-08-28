@@ -90,7 +90,8 @@ export class Drone {
 
         this.droneMaxAngle   = 58;
         this.droneAngleRate  = 280;
-        this.droneMaxVSpeed  = 12.0;
+        this.droneMaxVSpeed  = 14.0;          // 竖直速度硬上限 (m/s): 12→14, 让竖直越障爬升(vRep=19)真正到 ~14
+                                              // (原 12 把爬升钳死, 越障偏慢); 同步提升高度跟踪响应。yopoAccMax=11 支持。
         this.droneMaxSpeed   = DRONE_MAX_SUPPORTED_SPEED;
 
         // Cascaded PID gains
@@ -212,9 +213,9 @@ export class Drone {
                                       // gain*系数), 水平 rep/tan 已拆为下方独立增益以便分别调强弱。
         this.yopoAvoidRepGain = 12.0; // 排斥(径向推离)最大速度 (m/s): 加强到 12, 遇障更果断推离/绕开
                                       // (配合 repRange 增大更及时), 不再被"推回而非绕开"
-        this.yopoAvoidTanGain = 36.0; // 切向(绕行)速度增益 (m/s): 加强到 36, 遇障时更果断朝目标侧
-                                      // 绕行、更快绕过, 解决"排斥大、切向弱→总被推回而非绕开"。
-                                      // 配合 _controlYOPO 内"侧向速度预算预留", 绕行分量不再被前向淹没。
+        this.yopoAvoidTanGain = 30.0; // 切向(绕行)速度增益 (m/s): 30(此前 36 实测绕行偏快, 回收一档),
+                                      // 遇障时仍果断朝目标侧绕行。配合 _controlYOPO 内"侧向速度预算预留"
+                                      // (上限 55%), 绕行分量不被前向淹没, 速度也更柔和。
         this.yopoAvoidDecel = 8.0;    // v_safe=√(2ad) 刹车阈值所用的【假定减速度】(m/s²), 故意取低于
                                       // yopoAccMax(11): 让运动学刹车【提早触发】+ 留足余量(10m/s 巡航时在
                                       // ~8m 处即开始减速, 而非更晚)。真实刹停能力由 yopoAccMax=11 提供
@@ -227,16 +228,16 @@ export class Drone {
         this.yopoAvoidVertRay = true;     // 正上/正下竖直射线(防撞顶/撞正下方障碍)
         this.yopoAvoidVertRange = 12.0;   // 竖直射线探测范围 (m)
         // —— 竖直越障 (A+B 方案) ——
-        this.yopoAvoidVStep = 8.0;        // 竖直探测抬升/下探步长 (m), *2 高层可越更高楼
-        this.yopoAvoidVClimbScale = 1.6;  // 竖直越障速度 = gain*scale = 10*1.6=16m/s, 越障爬升更猛、
-                                          // 更快翻越障碍顶; 经 droneMaxVSpeed 限幅到 12 但更早命令满爬升,
+        this.yopoAvoidVStep = 9.0;        // 竖直探测抬升/下探步长 (m), *2 高层可越更高楼(8→9: 探测略高, 可越更高障碍)
+        this.yopoAvoidVClimbScale = 1.9;  // 竖直越障速度 = gain*scale = 10*1.9=19m/s, 越障爬升更猛、
+                                          // 更快翻越障碍顶; 经 droneMaxVSpeed(已提至 14)限幅到 14 但更早命令满爬升,
                                           // 且 yopoAccMax 抬高后垂直加速度上限同步增强, 爬升建立更快。
         this.yopoAvoidVBlock = 12.0;      // 前进净空 < 此值即触发竖直越障 (m): 18m/s 下 stop+12≈13.1m≈0.73s,
                                           // 比原 8m(0.44s)留更多越障提前量, 免得临到障碍才爬。
                                           // 不要盲目加大: 放行距离越远, 越容易在"前方其实畅通"时误爬升。
                                           // 想加强越障请调 VClimbScale(爬升力度), 别调这个(触发门槛)。
-        this.yopoAvoidVClear = 0.32;      // 上层视为"畅通"的距离占比 (> R*该值≈11.2m 即畅通): 调低→
-                                          // 更愿判定上层可飞越, 提升越障意愿(配合 vUpDist 仍防撞顶)
+        this.yopoAvoidVClear = 0.38;      // 上层视为"畅通"的距离占比 (> R*该值≈13.3m 即畅通): 调高→
+                                          // 更愿判定上层可飞越, 提升越障意愿(0.32→0.38, 配合 vUpDist 仍防撞顶)
         this.yopoAvoidStop = 1.1;     // 安全净空 (m), 贴合机体半宽+余量
         // "渐进软刹车"的作用距离(m)与下限: 软刹车只做"越近越慢"的舒适减速, 物理刹停
         // 由运动学刹车(v_safe=√(2ad))负责。此前软刹车直接复用 repRange(20m) 且无下限,
@@ -1359,15 +1360,16 @@ export class Drone {
                     // 此前 velTarget=前进*brake+rep+tan 后再整体被 maxSpd 限幅, 前向分量占大头、
                     // 切向被按比例削掉 → "边全速前冲边轻蹭", 绕不过去。
                     // 现将侧向绕行矢量单独保留, 障碍越近/绕行越强, 越压低前向分量,
-                    // 让速度矢量真正偏向切向(贴着障碍滑过去)。侧向最多占 70% 速度预算,
-                    // 前向至少保留 30%, 避免完全停滞; 绕过后 dAhead 增大、steer 归零, 自动恢复全速。
+                    // 让速度矢量真正偏向切向(贴着障碍滑过去)。侧向最多占 55% 速度预算(此前 70%,
+                    // 实测绕行偏快), 前向至少保留 30%, 避免完全停滞; 绕过后 dAhead 增大、steer 归零,
+                    // 自动恢复全速。
                     const fwdX = velTargetX * avoid.brake;
                     const fwdZ = velTargetZ * avoid.brake;
                     const steerX = avoid.repX + avoid.tanX;
                     const steerZ = avoid.repZ + avoid.tanZ;
                     const steerMag = Math.hypot(steerX, steerZ);
                     if (steerMag > 1e-3) {
-                        const lateralBudget = Math.min(maxSpd * 0.70, steerMag);
+                        const lateralBudget = Math.min(maxSpd * 0.55, steerMag);
                         const fwdAllow = Math.max(maxSpd * 0.30, maxSpd - lateralBudget);
                         const fwdMag = Math.hypot(fwdX, fwdZ);
                         if (fwdMag > fwdAllow) {
