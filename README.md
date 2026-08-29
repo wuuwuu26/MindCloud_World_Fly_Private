@@ -25,8 +25,18 @@ cd MindCloud_World_Fly_Private
 
 ```bash
 # 常用方式
-./restart_all.sh --detach          # Docker 后台运行
-docker rm -fv google-tiles-flight mindcloud-da360-api mindcloud-yopo-api   # 停止全部后台容器（与 restart_all.sh 一致，带 -v 清理匿名卷）
+./restart_all.sh --detach          # 后台运行（Docker detach）
+
+# 只重启部分服务（其余保留）
+./restart_all.sh --no-da360        # 只重启 YOPO + 主飞行
+./restart_all.sh --no-yopo         # 只重启 DA360 + 主飞行
+./restart_all.sh --no-main         # 只重启 DA360 + YOPO
+
+# 查看某服务日志（容器名见下方表格）
+docker logs -f mindcloud-yopo-api
+
+# 停止全部后台容器（与 restart_all.sh 的停止逻辑一致，带 -v 清理匿名卷）
+docker rm -fv google-tiles-flight mindcloud-da360-api mindcloud-yopo-api
 ```
 
 三个容器的名字由 [restart_all.sh](file:///workspace/restart_all.sh) 顶部的 `MAIN_NAME` / `DA360_NAME` / `YOPO_NAME` 定义（与各入口脚本的默认容器名一致）：
