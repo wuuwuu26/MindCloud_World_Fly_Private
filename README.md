@@ -229,9 +229,9 @@ Tab         设置面板
 ./launch.sh --setup-input
 ```
 
-![](asset/display/screenshot-20260703-011815.png)
-![](asset/display/20260703-005006.jpg)
-![](asset/display/20260703-005023.jpg)
+![YOPO 导航界面展示](asset/display/screen.png)
+
+> **YOPO 导航界面展示**：右下角为机头 360° ERP 全景 RGB 与 DA360 深度图，左下角为 Target Map 俯视小地图（无人机与目标点的相对位置），右侧面板用于选取目标点、开始/停止导航，并显示导航状态、到目标距离与推理计数。
 
 ## 全景相机实现原理
 

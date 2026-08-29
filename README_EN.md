@@ -297,9 +297,12 @@ connected from the settings panel; to check Linux input permissions:
 ./launch.sh --setup-input
 ```
 
-![](asset/display/screenshot-20260703-011815.png)
-![](asset/display/20260703-005006.jpg)
-![](asset/display/20260703-005023.jpg)
+![YOPO navigation interface](asset/display/screen.png)
+
+> **YOPO navigation interface**: the bottom-right corner shows the nose-mounted 360° ERP panorama
+> RGB and the DA360 depth map, the bottom-left corner holds the Target Map top-down minimap (the
+> drone's position relative to the goal), and the panel on the right picks the goal, starts/stops
+> navigation, and displays navigation status, distance to the goal and the inference count.
 
 ## How the Panoramic Camera Works
 
