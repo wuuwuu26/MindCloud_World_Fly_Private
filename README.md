@@ -88,6 +88,19 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 - 本地开发模式需要 Python 3
 - DA360 深度推理需要 NVIDIA GPU、NVIDIA Container Toolkit、Python 3 + pip，以及可访问模型下载地址的网络
 
+### 已验证运行环境
+
+本项目已在以下设备完整验证可运行（DA360 深度 + YOPO 导航 + 主飞行三者同时拉起）：
+
+| 项目 | 配置 |
+|------|------|
+| GPU | NVIDIA GeForce RTX 4070 Laptop GPU（8 GB 显存） |
+| 驱动 / CUDA | 595.84 / 13.2 |
+| DA360 配置 | `DA360_large` + `DA360_INPUT_SCALE=0.65`（模型输入 672×336），单卡 8GB 下约 92% 占用 |
+| YOPO 配置 | TensorRT 加速，`YOPO_VELOCITY=15` |
+
+> 显存更小（如 6GB 及以下）的 GPU 可下调 `DA360_INPUT_SCALE` 或 `da360UploadScale` 降低占用；显存更充裕的卡可上调以提升深度精度。
+
 ## Docker 构建说明
 
 本项目共三套独立构建的容器，各自的镜像名、基础镜像与重建触发方式都不同：
@@ -153,7 +166,7 @@ curl http://127.0.0.1:5688/health
 
 停止或重启 DA360 直接重跑 `restart_all.sh`（或 `docker rm -fv mindcloud-da360-api`）。
 
-注意，默认使用 `DA360_large`，DA360 服务端以 `DA360_INPUT_SCALE=0.65` 推理，模型输入约为 `672x336`（checkpoint 基准 1036×518 × 0.65，按 patch=14 取整）。全景 RGB 默认 `768x384` ERP，右下角显示即此原始尺寸；只有发送给 DA360 的深度请求会单独缩小，前端默认按 `da360UploadScale=0.5` 上传 `384x192` 的 JPEG，再由服务端 resize 到 `672x336` 模型输入、推理后将深度贴回 `384x192`（恰好等于 YOPO 消费的 384×192 ERP 深度）。前端默认 `depthMs=33`（深度请求最小间隔 ≈30Hz），推理未完成时不会堆积请求。
+注意，默认使用 `DA360_large`，DA360 服务端以 `DA360_INPUT_SCALE=0.65` 推理，模型输入约为 `672x336`（checkpoint 基准 1036×518 × 0.65，按 patch=14 取整；已在本机 RTX 4070 Laptop GPU 8GB 上验证可稳定运行）。全景 RGB 默认 `768x384` ERP，右下角显示即此原始尺寸；只有发送给 DA360 的深度请求会单独缩小，前端默认按 `da360UploadScale=0.5` 上传 `384x192` 的 JPEG，再由服务端 resize 到 `672x336` 模型输入、推理后将深度贴回 `384x192`（恰好等于 YOPO 消费的 384×192 ERP 深度）。前端默认 `depthMs=33`（深度请求最小间隔 ≈30Hz），推理未完成时不会堆积请求。
 
 默认不建议换模型；实验中 `DA360_large` 的 fast 档比 `DA360_small` 保留了更好的深度排序和边缘一致性。只有显存、功耗或部署体积受限时，再自行覆盖模型名：
 
