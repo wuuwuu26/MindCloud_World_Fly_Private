@@ -353,6 +353,14 @@ export class Drone {
         // (slower) real deceleration still stops inside the standoff. The physical stop is guaranteed by
         // construction; this only trades a bit of early slowing for never crashing.
         this.yopoAvoidBrakeDecel = 3.0;
+        // Maximum deceleration (m/s^2) the ray-avoidance layer is allowed to COMMAND when braking
+        // hard. This is the authoritative, strong brake: while the kinematic *plan* uses the
+        // conservative yopoAvoidBrakeDecel (3) so it can always stop with margin, the *actual*
+        // deceleration is pushed up to near the physical tilt limit (~14 m/s^2, ~55 deg) so the drone
+        // really does slam the brakes instead of drifting into the wall ("deceleration not strong
+        // enough / still hitting obstacles"). It is well below droneMaxAngle (58 deg) so the attitude
+        // controller stays stable, and the passive collision handler is the final backstop.
+        this.yopoAvoidBrakeAccel = 14.0;
         this._avoidProbe = null;      // Potential-field ray probe cache
         this._avoidAccScale = 1.0;    // Potential-field brake scale (used to attenuate the acceleration feed-forward)
         // YOPO polynomial acceleration feed-forward scale: adding the network's cmdAcc raw would
@@ -1490,6 +1498,11 @@ export class Drone {
         // mid range (4-25 m) onwards. When the path is clear its output is zero -> navigation is
         // unaffected.
         this._avoidAccScale = 1.0;
+        // True when the ray-avoidance layer is actively braking. While true the network's
+        // acceleration feed-forward is suppressed (the ray layer takes priority over the YOPO
+        // navigation plan) and a hard braking deceleration is commanded -- so the drone actually
+        // slows instead of the network's forward acceleration cancelling the brake.
+        let braking = false;
         // During the final-approach takeover (yopoNearGoalHold: within 12 m of the goal or
         // already arrived) the PD already converges straight onto the goal point.
         // In this phase the potential field still keeps "detour (tan) + slowdown (brake) +
@@ -1504,6 +1517,7 @@ export class Drone {
             this._updateAvoidProbe();
             const avoid = this._avoidanceVelocity(velTargetX, velTargetZ);
             if (avoid) {
+                braking = avoid.brake < 0.95;
                 if (yopoNearGoalHold) {
                     // Final-approach takeover: add only the detour (tan) and slowdown (brake),
                     // not the normal-direction rep (which would push it off the goal and swing)
@@ -1674,9 +1688,11 @@ export class Drone {
             } else if (cmdAgeMs > 80) {
                 ffScale = 1.0 - (cmdAgeMs - 80) / 120;
             }
-            // Attenuate the acceleration feed-forward while the potential field brakes:
-            // otherwise the polynomial ffAcc would still "push" the drone toward the obstacle
-            ffScale *= this._avoidAccScale || 1.0;
+            // While the ray-avoidance layer is actively braking, the network's acceleration
+            // feed-forward is SUPPRESSED entirely (it may point straight at the obstacle and would
+            // otherwise cancel the brake). This is what makes the ray layer take priority over the
+            // YOPO navigation plan. When not braking we only attenuate it by the brake scale.
+            ffScale *= braking ? 0 : (this._avoidAccScale || 1.0);
             aDesX += this.yopoCmdAcc.x * ffScale;
             aDesY += (this.yopoCmdAcc.y || 0) * ffScale;
             aDesZ += this.yopoCmdAcc.z * ffScale;
@@ -1688,6 +1704,21 @@ export class Drone {
             }
         }
 
+        // ── Authoritative braking feed-forward (ray layer overrides the network) ──
+        // When the ray avoidance is braking, actively command deceleration along the CURRENT velocity
+        // direction at up to yopoAvoidBrakeAccel. This makes the real deceleration strong and
+        // immediate instead of waiting for the P velocity loop to chase a lower setpoint, directly
+        // fixing "deceleration not strong enough / still hitting obstacles". It is added on top of the
+        // velocity loop and is the reason the ray layer wins over the YOPO plan.
+        if (braking) {
+            const spd = Math.hypot(this.vx, this.vz);
+            if (spd > 0.2) {
+                const aB = this.yopoAvoidBrakeAccel * (1 - avoid.brake);
+                aDesX += -(this.vx / spd) * aB;
+                aDesZ += -(this.vz / spd) * aB;
+            }
+        }
+
         // ── Desired acceleration safety ceiling (prevents "acceleration too large -> hits an
         // obstacle before the next command") ──
         // When replanning (the depth loop) is slow, an excessively large combined acceleration
@@ -1695,7 +1726,10 @@ export class Drone {
         // combined horizontal acceleration and the vertical acceleration are each clamped to
         // yopoAccMax, leaving braking and reaction margin (the equivalent max tilt drops from
         // 58 deg to ~atan(8/9.81) ~= 39 deg).
-        const aMaxCmd = this.yopoAccMax;
+        // While the ray layer is braking, allow the deceleration to use a higher ceiling
+        // (yopoAvoidBrakeAccel, near the physical tilt limit) so the drone can actually slam the
+        // brakes. During normal flight the ceiling stays at yopoAccMax.
+        const aMaxCmd = braking ? Math.max(this.yopoAccMax, this.yopoAvoidBrakeAccel) : this.yopoAccMax;
         const aH = Math.hypot(aDesX, aDesZ);
         if (aH > aMaxCmd) {
             const s = aMaxCmd / aH;
@@ -2159,6 +2193,25 @@ export class Drone {
                 const latG = d * Math.sqrt(Math.max(0, 1 - dotG * dotG));
                 if (latG < surmountHalfW && d < dAheadH) dAheadH = d;
             }
+        }
+
+        // Authoritative threat: also brake on where the drone is ACTUALLY moving (inertia / drift /
+        // the network commanding a curve while the body still carries velocity into the wall), not just
+        // on where the network commands. Otherwise the network can point the command around the
+        // obstacle while the airframe keeps closing on it and the ray brake never fires. If the actual
+        // velocity heading sees a nearer obstacle than the commanded heading, adopt that nearer
+        // distance as the threat.
+        const spdAct = Math.hypot(this.vx, this.vz);
+        if (spdAct > 0.5) {
+            const adx = this.vx / spdAct, adz = this.vz / spdAct;
+            let dAheadAct = R;
+            for (let i = 0; i < dirs.length; i++) {
+                const d = dists[i];
+                if (!Number.isFinite(d) || d <= 0) continue;
+                const dotA = dirs[i].x * adx + dirs[i].z * adz;
+                if (dotA > 0.5 && d < dAheadAct) dAheadAct = d;
+            }
+            if (dAheadAct < dAhead) dAhead = dAheadAct;
         }
 
         // Insufficient ground/roof clearance -> push up and take part in braking

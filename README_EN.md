@@ -439,6 +439,7 @@ Key parameters (all in the `src/drone.js` constructor):
 | `yopoAvoidTanGain` | 34.0 | Tangential detour gain (m/s); higher = more decisive detour |
 | `yopoAvoidDecel` | 8.0 | Assumed deceleration used by the *vertical* brake threshold (m/s²) |
 | `yopoAvoidBrakeDecel` | 3.0 | *Horizontal* brake planning deceleration (m/s²): deliberately far below the physical max to leave ~2x margin for the real (slower) deceleration |
+| `yopoAvoidBrakeAccel` | 14.0 | Max *actual* deceleration the ray layer may command while braking (m/s²): near the physical tilt limit (~55 deg, below `droneMaxAngle` 58 deg). It injects a deceleration feed-forward opposing velocity AND **suppresses the network's acceleration feed-forward**, so the ray layer takes priority over the YOPO plan |
 | `yopoAvoidBrakeReaction` | 0.35 | Brake reaction time (s): end-to-end lag, converted to a reaction distance subtracted from the stopping room |
 | `yopoAvoidVClear` | 0.38 | "Clear" fraction for the upper layer; lower = stronger clearing willingness |
 | `yopoAvoidVClimbScale` | 1.9 | Vertical clearing climb strength |
