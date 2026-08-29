@@ -6,6 +6,13 @@
 
 # MindCloud World Fly with YOPO
 
+![YOPO navigation interface](asset/display/screen.png)
+
+> **YOPO navigation interface**: the bottom-right corner shows the nose-mounted 360° ERP panorama
+> RGB and the DA360 depth map, the bottom-left corner holds the Target Map top-down minimap (the
+> drone's position relative to the goal), and the panel on the right picks the goal, starts/stops
+> navigation, and displays navigation status, distance to the goal and the inference count.
+
 A browser-based FPV drone flying through Google Photorealistic 3D Tiles, with YOPO end-to-end
 neural-network autonomous navigation (3D obstacle avoidance). Pick a city, place a spawn point,
 then fly with the keyboard, a gamepad or an RC transmitter — or set a goal and let YOPO fly there
@@ -296,13 +303,6 @@ connected from the settings panel; to check Linux input permissions:
 ./launch.sh --input-status
 ./launch.sh --setup-input
 ```
-
-![YOPO navigation interface](asset/display/screen.png)
-
-> **YOPO navigation interface**: the bottom-right corner shows the nose-mounted 360° ERP panorama
-> RGB and the DA360 depth map, the bottom-left corner holds the Target Map top-down minimap (the
-> drone's position relative to the goal), and the panel on the right picks the goal, starts/stops
-> navigation, and displays navigation status, distance to the goal and the inference count.
 
 ## How the Panoramic Camera Works
 
