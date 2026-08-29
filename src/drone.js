@@ -1503,6 +1503,11 @@ export class Drone {
         // navigation plan) and a hard braking deceleration is commanded -- so the drone actually
         // slows instead of the network's forward acceleration cancelling the brake.
         let braking = false;
+        // Cached ray-avoidance result. `avoid` is declared inside the potential-field block below,
+        // but the authoritative braking feed-forward further down needs its `brake` value too --
+        // so we hoist a reference and the brake value to this outer scope.
+        let avoid = null;
+        let avoidBrake = 1.0;
         // During the final-approach takeover (yopoNearGoalHold: within 12 m of the goal or
         // already arrived) the PD already converges straight onto the goal point.
         // In this phase the potential field still keeps "detour (tan) + slowdown (brake) +
@@ -1515,9 +1520,10 @@ export class Drone {
         if (this.yopoAvoidEnabled && this.yopoNavTarget &&
             !stickActive && !this.yopoArrived) {
             this._updateAvoidProbe();
-            const avoid = this._avoidanceVelocity(velTargetX, velTargetZ);
+            avoid = this._avoidanceVelocity(velTargetX, velTargetZ);
             if (avoid) {
                 braking = avoid.brake < 0.95;
+                avoidBrake = avoid.brake;
                 if (yopoNearGoalHold) {
                     // Final-approach takeover: add only the detour (tan) and slowdown (brake),
                     // not the normal-direction rep (which would push it off the goal and swing)
@@ -1713,7 +1719,7 @@ export class Drone {
         if (braking) {
             const spd = Math.hypot(this.vx, this.vz);
             if (spd > 0.2) {
-                const aB = this.yopoAvoidBrakeAccel * (1 - avoid.brake);
+                const aB = this.yopoAvoidBrakeAccel * (1 - avoidBrake);
                 aDesX += -(this.vx / spd) * aB;
                 aDesZ += -(this.vz / spd) * aB;
             }
