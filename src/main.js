@@ -904,9 +904,57 @@ function updateYOPOMinimap() {
     }
 }
 
+// ── YOPO pipeline performance counters (debug aid) ──
+// The avoidance probe runs inside this render loop, so its cost shows up directly as frame-rate
+// loss, which in turn slows panorama capture, DA360 depth and command replanning. These counters
+// make that visible instead of guesswork: read them from the browser console with
+//   __yopoPerf()
+const _perf = {
+    frames: 0, winStart: 0, fps: 0,
+    probeMsSum: 0, probeMsMax: 0, probeCycles: 0, rayTotal: 0,
+    depthOk: 0, cmdOk: 0, winMs: 0,
+};
+window.__yopoPerf = () => ({
+    fps: +_perf.fps.toFixed(1),
+    probeMsAvg: +(_perf.probeCycles ? _perf.probeMsSum / _perf.probeCycles : 0).toFixed(2),
+    probeMsMax: +_perf.probeMsMax.toFixed(2),
+    probeRaysAvg: +(_perf.probeCycles ? _perf.rayTotal / _perf.probeCycles : 0).toFixed(1),
+    probeHz: +(_perf.winMs ? _perf.probeCycles / (_perf.winMs / 1000) : 0).toFixed(1),
+    depthHz: +(_perf.winMs ? _perf.depthOk / (_perf.winMs / 1000) : 0).toFixed(1),
+    cmdHz: +(_perf.winMs ? _perf.cmdOk / (_perf.winMs / 1000) : 0).toFixed(1),
+    ringAgeMaxMs: drone ? +(drone._avoidPerf ? drone._avoidPerf.ringAgeMax : 0).toFixed(0) : 0,
+    windowMs: +_perf.winMs.toFixed(0),
+});
+
 function gameLoop(now) {
     const frameDt = Math.min(MAX_PHYSICS_FRAME_DT, Math.max(0.001, (now - lastFrameTime) / 1000));
     lastFrameTime = now;
+
+    if (_perf.winStart === 0) _perf.winStart = now;
+    _perf.frames++;
+    if (drone && drone._avoidPerf) {
+        const ap = drone._avoidPerf;
+        if (ap.cycles !== _perf.probeCycles) {
+            // New probe cycle(s) since the last frame
+            const dCycles = ap.cycles - _perf.probeCycles;
+            _perf.probeMsSum += ap.probeMs;
+            if (ap.probeMs > _perf.probeMsMax) _perf.probeMsMax = ap.probeMs;
+            _perf.rayTotal += ap.rays;
+            _perf.probeCycles += dCycles;
+        }
+    }
+    if (now - _perf.winStart >= 1000) {
+        _perf.winMs = now - _perf.winStart;
+        _perf.fps = _perf.frames / (_perf.winMs / 1000);
+        _perf.frames = 0;
+        _perf.winStart = now;
+        _perf.probeMsSum = 0;
+        _perf.probeMsMax = 0;
+        _perf.probeCycles = 0;
+        _perf.rayTotal = 0;
+        _perf.depthOk = 0;
+        _perf.cmdOk = 0;
+    }
 
     try {
         if (mode === 'placement') {
@@ -1071,9 +1119,13 @@ function updateFlight(dt) {
                         depthResult.mask
                     );
                     const t2 = performance.now();
+                    const navMs = t2 - t1;
+                    // A very fast navigate() means the client-side throttle returned a cached
+                    // command instead of really reaching the server, so it is not a fresh replan.
+                    const navCached = navMs < 30;
+                    _perf.depthOk++;
+                    if (!navCached) _perf.cmdOk++;
                     if (drone.yopoInferenceCount < 5 || drone.yopoInferenceCount % 20 === 0) {
-                        const navMs = t2 - t1;
-                        const navCached = navMs < 30;   // < 30 ms means the client-side 33 ms throttle hit and returned a cached command instead of really calling the server
                         console.log(`YOPO timing: depth=${(t1-t0).toFixed(0)}ms navigate=${navMs.toFixed(0)}ms total=${(t2-t0).toFixed(0)}ms${navCached ? ' [nav-cache]' : ''} src=${depthResult.source}`);
                     }
 
@@ -1233,8 +1285,11 @@ function setupYOPOUI() {
             // window keeps refreshing with the nav loop (previously depthSuppress=true froze the
             // window on the last image).
             panoramaSensor.depthSuppress = false;
-            panoramaSensor.captureIntervalOverride = 50;  // 20 Hz panorama requests: update() skips automatically while capturing, so raising the request rate
-            // only starts the next capture sooner after one completes (6 faces take ~300-600 ms); it does not take extra main-thread time.
+            // update() skips automatically while a capture is in flight, so this only sets the
+            // idle gap between two captures. 50 ms of dead time per cycle is pure latency for the
+            // depth loop, so drop it to roughly one render frame and let the next capture start as
+            // soon as the previous one finishes (6 faces still take ~300-600 ms).
+            panoramaSensor.captureIntervalOverride = 12;
         }
         drone.yopoArrived = false;
         drone.yopoInferenceCount = 0;
@@ -1583,7 +1638,7 @@ async function confirmYOPOTarget(x, y, z) {
                     // the setGoal path). Keep it false so the window keeps requesting depth maps
                     // as the nav loop refreshes RGB.
                     panoramaSensor.depthSuppress = false;
-                    panoramaSensor.captureIntervalOverride = 50;  // 20 Hz panorama requests (same reason as above)
+                    panoramaSensor.captureIntervalOverride = 12;  // Same as above: no idle gap between captures
                 }
     drone.yopoArrived = false;
     drone.yopoInferenceCount = 0;

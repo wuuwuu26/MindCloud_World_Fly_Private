@@ -433,11 +433,13 @@ Key parameters (all in the `src/drone.js` constructor):
 |-----------|---------|---------|
 | `yopoAvoidEnabled` | `true` | Master switch of the geometric layer |
 | `yopoAvoidRayCount` | 36 | Number of 360° rays (10° spacing) |
-| `yopoAvoidRange` | 35.0 | Obstacle detection radius (m) |
-| `yopoAvoidRepRange` | 20.0 | Repulsion / tangential / braking range (m) |
-| `yopoAvoidRepGain` | 12.0 | Maximum radial push-away speed (m/s) |
-| `yopoAvoidTanGain` | 30.0 | Tangential detour gain (m/s); higher = more decisive detour |
-| `yopoAvoidDecel` | 8.0 | Assumed deceleration used by the brake threshold (m/s²) |
+| `yopoAvoidRange` | 55.0 | Obstacle detection radius (m); ray length is free, lengthening only helps |
+| `yopoAvoidRepRange` | 20.0 | Repulsion / tangential / braking range (m); also `goalClear`'s clear threshold — do **not** raise |
+| `yopoAvoidRepGain` | 15.0 | Maximum radial push-away speed (m/s) |
+| `yopoAvoidTanGain` | 34.0 | Tangential detour gain (m/s); higher = more decisive detour |
+| `yopoAvoidDecel` | 8.0 | Assumed deceleration used by the *vertical* brake threshold (m/s²) |
+| `yopoAvoidBrakeDecel` | 3.0 | *Horizontal* brake planning deceleration (m/s²): deliberately far below the physical max to leave ~2x margin for the real (slower) deceleration |
+| `yopoAvoidBrakeReaction` | 0.35 | Brake reaction time (s): end-to-end lag, converted to a reaction distance subtracted from the stopping room |
 | `yopoAvoidVClear` | 0.38 | "Clear" fraction for the upper layer; lower = stronger clearing willingness |
 | `yopoAvoidVClimbScale` | 1.9 | Vertical clearing climb strength |
 | `droneMaxVSpeed` | 14.0 | Hard vertical speed ceiling (m/s) |
@@ -446,6 +448,46 @@ Key parameters (all in the `src/drone.js` constructor):
 > **not** raise `yopoAvoidRepRange` — it is also `goalClear`'s clearance threshold, so a larger value
 > makes "the path is actually clear" cases get misjudged as blocked. After changing frontend
 > parameters, press **Ctrl+F5** in the browser for them to take effect.
+
+#### High-speed responsiveness (ray budget & adaptive action range)
+
+The root cause of "avoidance is too late + depth/command updates are too slow when flying fast" is a
+single choke point: a full ring probe casts 47 `forceFresh` `scene.pickFromRay` calls (each is a full
+GPU render plus a read-back stall) and runs synchronously inside the render frame loop — so a single
+probe can take tens to over a hundred ms. That both stales the avoidance data and collapses the frame
+rate, which in turn slows panorama capture, DA360 depth and command replanning. Instead of throttling
+the whole probe (which would only stale the forward direction that decides braking), the high-speed
+profile bounds the number of GPU picks per cycle:
+
+- **Core cone `yopoAvoidCoreDeg` (±25°)**: keeps the full 10° resolution and is re-probed every cycle
+  at every speed — this is the sector that decides the braking distance; dropping resolution there would
+  open ~20° gaps (a ~10 m hole at 30 m) right where a miss is least affordable.
+- **Outer cone `yopoAvoidConeDeg` (±55°, narrows to ±45° at speed)**: re-probed every cycle but
+  downsampled at speed.
+- **Periphery `yopoAvoidSliceMax`**: rotated through round-robin slices (~3 cycles ≈ 60 ms to refresh
+  the full ring); directions not re-probed this cycle carry their last measured distance, so the
+  repulsion/detour sums always see a complete 360° ring.
+- **Vertical layers (high/high2/low)**: only emitted when the previous cycle found the goal corridor
+  blocked, saving 9 rays in the normal case.
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `yopoAvoidRange` | 55.0 | Obstacle detection radius (m); ray length is free, so lengthening only helps |
+| `yopoAvoidFastSpeed` | 6.0 | Speed (m/s) at which the high-speed profile starts |
+| `yopoAvoidRefSpeed` | 15.0 | Speed (m/s) at which the high-speed profile is fully applied |
+| `yopoAvoidStrideHi` | 2 | Ring ray stride at speed (2 → 20° spacing) |
+| `yopoAvoidCoreDeg` | 25 | Core cone half-angle (°), always full 10° resolution |
+| `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 45 | Outer cone half-angle (°), low / high speed |
+| `yopoAvoidSliceMax` | 6 | Peripheral rays polled per cycle |
+| `yopoAvoidRepRangeHi` | 38.0 | Repulsion/detour/brake action range at speed (m) |
+| `yopoAvoidBrakeReaction` | 0.28 | Brake reaction time (s): the lag (attitude build-up + control loop) is converted to a reaction
+| | | distance `spd × reaction` subtracted from the stopping room, so at 15 m/s braking starts ~3 m
+| | | earlier and still stops inside the standoff |
+
+Measured picks per cycle: low speed 47 → 19, high speed 47 → 15 (24 when blocked). `yopoAvoidRepRange`
+(= `goalClear`'s clear threshold) does **not** scale with speed, so widening the high-speed action range
+does not make "the path is actually clear" get mis-judged as blocked. Run `__yopoPerf()` in the browser
+console to read live metrics (`fps` / `probeMsAvg` / `probeHz` / `depthHz` / `cmdHz` / `ringAgeMaxMs`).
 
 ### Start the YOPO Backend
 

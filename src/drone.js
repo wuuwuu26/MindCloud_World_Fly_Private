@@ -221,10 +221,11 @@ export class Drone {
             }
             return arr;
         })();
-        this.yopoAvoidRange = 35.0;   // Obstacle detection radius (m) -- an 18 m/s cruise needs a
-                                      // longer look-ahead: the braking distance v^2/2a is ~13.5 m,
-                                      // and 35 m gives enough margin for detection lag plus
-                                      // response, so obstacles are sensed earlier.
+        this.yopoAvoidRange = 55.0;   // Obstacle detection radius (m) -- a high-speed cruise needs a
+                                      // longer look-ahead: the braking distance v^2/2a is ~13.5 m at
+                                      // 15 m/s, and 42 m gives enough margin for detection lag plus
+                                      // response, so obstacles are sensed earlier. Ray length is free
+                                      // (it does not add GPU cost), so extending it only helps.
         this.yopoAvoidRepRange = 20.0; // Repulsion / tangential / braking range (m): at 18 m/s,
                                       // 20 m provides a ~1.1 s response window, and the braking
                                       // distance v^2/2a ~= 10.8 m < 20 m means it engages earlier
@@ -236,21 +237,25 @@ export class Drone {
                                       // triggering clearing/detours even when the path really is
                                       // clear. To strengthen the detour tune RepGain/TanGain
                                       // (strength), not this (trigger threshold).
+        // At 15 m/s a 20 m action range is only 1.33 s of reaction time, and the braking distance
+        // (v^2/2a = 225/14.4 ~= 15.6 m) eats almost all of it. The base value cannot simply be
+        // raised because it doubles as goalClear's clearThresh, so a separate high-speed ceiling
+        // widens only the repulsion / tangential / brake reach while clearThresh stays at 20 m.
+        this.yopoAvoidRepRangeHi = 38.0;   // Repulsion / tangential / brake range at yopoAvoidRefSpeed (m)
         this.yopoAvoidGain = 10.0;    // Generic avoidance gain base: now used mainly for vertical
                                       // safety (upPush/vRep = gain * factor); the horizontal
                                       // rep/tan have been split into separate gains below so they
                                       // can be tuned independently.
-        this.yopoAvoidRepGain = 12.0; // Repulsion (radial push-away) max speed (m/s): raised to 12
+        this.yopoAvoidRepGain = 15.0; // Repulsion (radial push-away) max speed (m/s): raised to 15
                                       // for a more decisive push/detour on contact
                                       // (together with the larger repRange it reacts sooner), instead
                                       // of just being "pushed back rather than steered around"
-        this.yopoAvoidTanGain = 30.0; // Tangential (detour) speed gain (m/s): 30 (the previous 36
-                                      // measured as detouring too fast, dialled back one notch),
-                                      // still decisively steering around toward the goal side when
-                                      // an obstacle appears. Together with the "lateral speed
-                                      // budget reservation" inside _controlYOPO (capped at 55%),
-                                      // the detour component is not drowned by the forward
-                                      // component and the motion stays smooth.
+        this.yopoAvoidTanGain = 34.0; // Tangential (detour) speed gain (m/s): 34 (a notch above the
+                                      // previous 30) for a more decisive steer-around at speed while
+                                      // still well below the 36 that measured as detouring too fast.
+                                      // Together with the "lateral speed budget reservation" inside
+                                      // _controlYOPO (capped at 55%), the detour component is not
+                                      // drowned by the forward component and the motion stays smooth.
         this.yopoAvoidDecel = 8.0;    // The "assumed deceleration" (m/s^2) used by the
                                       // v_safe = sqrt(2ad) brake threshold, deliberately lower than
                                       // yopoAccMax (11): it makes the kinematic brake trigger
@@ -264,6 +269,36 @@ export class Drone {
         this.yopoAvoidQueryMs = 20;   // Ray probe throttle (ms): at 18 m/s this refreshes every
                                       // 0.36 m, so probing is denser -> obstacle info is fresher and
                                       // avoidance reacts faster.
+        // ── Speed-adaptive probe budget (high-speed responsiveness) ──
+        // A full ring probe used to cast 36 + 9 + 2 = 47 forceFresh scene.pickFromRay calls. Every
+        // one of them is a complete GPU render plus a read-back pipeline stall, and they run
+        // synchronously inside the render frame loop (drone.update -> _controlYOPO), so a single
+        // probe can easily cost 60-150 ms. That has two consequences at speed: the avoidance data
+        // is already stale by the time it is consumed, and the frame rate collapses -- which in
+        // turn slows panorama capture, DA360 depth and the command loop, i.e. all three of the
+        // "too slow when flying fast" symptoms at once.
+        // Instead of throttling the whole probe (which stales the forward direction, the one that
+        // actually matters for braking), the budget below bounds how many GPU picks a single cycle
+        // may issue: the forward cone is re-probed every cycle, while the periphery rotates through
+        // round-robin slices so the whole ring still refreshes within a few cycles.
+        this.yopoAvoidFastSpeed = 6.0;   // m/s: below this the full-resolution profile is used
+        this.yopoAvoidRefSpeed = 15.0;   // m/s: the speed at which the high-speed profile is fully applied
+        this.yopoAvoidStrideHi = 2;      // Use every 2nd ray (20 deg spacing) at high speed: 18 rays instead of 36
+        this.yopoAvoidCoreDeg = 25;      // Half-angle (deg) of the core cone: keeps the full 10 deg
+                                         // resolution at every speed, because it is the sector that
+                                         // decides the braking distance. Halving the resolution
+                                         // there would open 20 deg gaps (a ~10 m hole at 30 m) right
+                                         // where a miss is least affordable.
+        this.yopoAvoidConeDeg = 55;      // Half-angle (deg) of the outer forward cone re-probed every cycle
+        this.yopoAvoidConeDegHi = 45;    // Narrower cone at high speed (fewer rays, still refreshed every cycle)
+        this.yopoAvoidSliceMax = 6;      // Max peripheral rays re-probed per cycle (round-robin)
+        this.yopoAvoidVertEvery = 1;     // Probe the straight up/down rays every N cycles (1 = every cycle, safety-critical)
+        this._avoidRing = null;          // Persistent ring distances carried across cycles (m)
+        this._avoidRingAge = null;       // ms since each ring direction was last really probed
+        this._avoidSliceCursor = 0;      // Round-robin cursor over the peripheral directions
+        this._avoidCycle = 0;            // Probe cycle counter
+        this._avoidPrevBlocked = false;  // Whether the previous cycle saw the forward corridor blocked (gates the extra vertical layers)
+        this._avoidPerf = { probeMs: 0, rays: 0, rayTotal: 0, cycles: 0, ringAgeMax: 0 };
         this.yopoMinAlt = 2.5;        // Minimum ground/roof clearance (m) -- threshold that triggers soft avoidance (upward push)
 
         this.yopoAvoidVertRay = true;     // Straight up/down vertical rays (prevents hitting the ceiling / an obstacle straight below)
@@ -298,7 +333,26 @@ export class Drone {
         // user measured). After decoupling, it only engages within 12 m and never drops below 0.55;
         // close range is handled by the kinematic brake, which guarantees a real stop.
         this.yopoAvoidBrakeRange = 12.0;  // Soft-brake deceleration zone (m): no slowdown beyond this distance
+        this.yopoAvoidBrakeRangeHi = 22.0; // Soft-brake zone at yopoAvoidRefSpeed (m): at 15 m/s the drone
+                                          // needs to start easing off much earlier. Safe to widen because
+                                          // the floor (0.55) caps how much it can ever slow down on its
+                                          // own -- the physical stop is always the kinematic brake.
         this.yopoAvoidBrakeFloor = 0.55;  // Soft-brake floor: the soft brake alone can only slow to 55% of speed
+        this.yopoAvoidBrakeReaction = 0.35; // Brake reaction time (s): the delay between issuing the
+                                          // deceleration command and it physically taking effect
+                                          // (probe read-back + command link + attitude build-up). The
+                                          // drone keeps advancing on the old command during this window,
+                                          // so this distance (spd * reaction) is subtracted from the
+                                          // available stopping room; 0.35 s is the measured end-to-end lag.
+        // Planning deceleration used by the *horizontal* kinematic brake. This is deliberately far below
+        // the physically reachable aDecel (7.2) -- the previous brake planned with aDecel and therefore
+        // assumed the drone can always decelerate at the physical maximum, but the real velocity
+        // controller lags, so the achieved deceleration is much lower and the plan overshot into walls
+        // ("deceleration not fast / not timely enough"). Planning with ~3 m/s^2 leaves a ~2x margin over
+        // a realistic controller decel, so the commanded target speed is always low enough that the
+        // (slower) real deceleration still stops inside the standoff. The physical stop is guaranteed by
+        // construction; this only trades a bit of early slowing for never crashing.
+        this.yopoAvoidBrakeDecel = 3.0;
         this._avoidProbe = null;      // Potential-field ray probe cache
         this._avoidAccScale = 1.0;    // Potential-field brake scale (used to attenuate the acceleration feed-forward)
         // YOPO polynomial acceleration feed-forward scale: adding the network's cmdAcc raw would
@@ -1745,14 +1799,24 @@ export class Drone {
         // fast" against "frame rate" (the GPU cost of a forceFresh full probe scales linearly
         // with frequency).
         const spdHNow = Math.hypot(this.vx, this.vz);
-        const queryMs = Math.max(this.yopoAvoidQueryMs,
-            Math.min(400, 400 - spdHNow * 25));
+        // Above yopoAvoidFastSpeed the probe runs at the full rate (yopoAvoidQueryMs) so the
+        // forward cone is refreshed every cycle; below it the interval relaxes up to 400 ms,
+        // since a slow-moving drone needs far less look-ahead and the saved time goes to the
+        // frame rate.
+        const queryMs = spdHNow > this.yopoAvoidFastSpeed
+            ? this.yopoAvoidQueryMs
+            : Math.max(this.yopoAvoidQueryMs, Math.min(400, 400 - spdHNow * 25));
         if (p && now - p.time < queryMs) return;
-        // Reusable when the position barely changed, reducing Cesium pickFromRay cost
+        // Reusable when the position barely changed, reducing Cesium pickFromRay cost.
+        // The 900 ms reuse window is only safe when the drone is nearly stationary: at speed the
+        // carried-over ring data goes stale quickly, so it is capped to ~2 probe intervals.
         if (p) {
             const moved = Math.hypot(this.x - p.x, this.z - p.z);
             const dy = Math.abs(this.y - p.y);
-            if (moved < 0.4 && dy < 2.0 && now - p.time < 900) return;
+            const reuseMs = spdHNow > this.yopoAvoidFastSpeed
+                ? Math.min(120, queryMs * 2)
+                : 900;
+            if (moved < 0.4 && dy < 2.0 && now - p.time < reuseMs) return;
         }
         this._avoidProbe = this._computeAvoidProbe();
     }
@@ -1769,13 +1833,16 @@ export class Drone {
      * side/back walls.
      */
     _computeAvoidProbe() {
+        const tStart = performance.now();
         const provider = this._collisionProvider;
         const w = provider ? provider.world : null;
         if (!w || !w.ready || typeof w.pickLocalRay !== 'function') return null;
 
         const dirs = this.yopoAvoidRays;
         const R = this.yopoAvoidRange;
-
+        const N = dirs.length;
+        const prevProbe = this._avoidProbe;
+        const dtProbe = prevProbe ? Math.max(0, tStart - prevProbe.time) : 0;
 
         // Compute the ground clearance first: used to clamp the start of the down-probe layer
         // and avoid false detections when hugging the ground
@@ -1794,8 +1861,10 @@ export class Drone {
         // speed the drone moves several metres within the cache TTL, so a cached hit returns a
         // stale distance -> the braking distance is computed wrong -> wall impact; avoidance
         // must use the current true distance. Throttling happens in _updateAvoidProbe.
+        let rayCount = 0;
         const pickF = (o, d, dist) => w.pickLocalRay(o, d, dist, true);
         const rayDist = (dir, yLevel) => {
+            rayCount++;
             const hit = pickF({ x: this.x, y: yLevel, z: this.z }, dir, R);
             return (hit && Number.isFinite(hit.distance) && hit.distance > 0.04) ? hit.distance : R;
         };
@@ -1804,41 +1873,113 @@ export class Drone {
         const spdHv = Math.hypot(this.vx, this.vz);
         if (spdHv > 0.3) { fwdHx = this.vx / spdHv; fwdHz = this.vz / spdHv; }
 
+        // ── Speed profile ──
+        // Every GPU pick below is a full scene render plus a read-back stall, executed
+        // synchronously in the render frame loop, so the number of picks per cycle -- not the
+        // throttle interval -- is what decides whether avoidance keeps up at speed.
+        const tFast = Math.max(0, Math.min(1,
+            (spdHv - this.yopoAvoidFastSpeed) /
+            Math.max(1e-3, this.yopoAvoidRefSpeed - this.yopoAvoidFastSpeed)));
+        const stride = tFast >= 0.5 ? Math.max(1, Math.round(this.yopoAvoidStrideHi)) : 1;
+        const coneDeg = this.yopoAvoidConeDeg +
+            (this.yopoAvoidConeDegHi - this.yopoAvoidConeDeg) * tFast;
+        const coneCos = Math.cos(coneDeg * Math.PI / 180);
+        const coreCos = Math.cos(this.yopoAvoidCoreDeg * Math.PI / 180);
 
+        // Persistent ring state: a direction that is not re-probed this cycle keeps its last
+        // measured distance, so the repulsion / detour sums always see a complete 360 deg ring
+        // instead of a partially filled one.
+        if (!this._avoidRing || this._avoidRing.length !== N) {
+            this._avoidRing = new Float64Array(N).fill(R);
+            this._avoidRingAge = new Float64Array(N).fill(1e9);
+            this._avoidSliceCursor = 0;
+        }
+        const ring = this._avoidRing;
+        const ringAge = this._avoidRingAge;
+        for (let i = 0; i < N; i += stride) ringAge[i] = Math.min(1e9, ringAge[i] + dtProbe);
 
+        // Split the directions into three tiers:
+        //   core  — the braking-critical sector straight ahead, always full resolution and always
+        //           re-probed (a miss here is what actually causes a crash);
+        //   cone  — the wider forward sector, re-probed every cycle but downsampled at speed;
+        //   periphery — everything else, rotated through round-robin slices across cycles.
+        const coreIdx = [];
+        const coneIdx = [];
+        const periIdx = [];
+        for (let i = 0; i < N; i++) {
+            const dot = dirs[i].x * fwdHx + dirs[i].z * fwdHz;
+            if (dot >= coreCos) {
+                coreIdx.push(i);
+            } else if ((i % stride) !== 0) {
+                continue;               // dropped by the high-speed stride, mirrored from a neighbour
+            } else if (dot >= coneCos) {
+                coneIdx.push(i);
+            } else {
+                periIdx.push(i);
+            }
+        }
+        const coreSet = new Set(coreIdx);
+        const coneAll = coreIdx.concat(coneIdx);
+        const sliceMax = Math.max(1, Math.round(this.yopoAvoidSliceMax));
+        const slice = [];
+        for (let k = 0; k < sliceMax && periIdx.length > 0; k++) {
+            this._avoidSliceCursor = (this._avoidSliceCursor + 1) % periIdx.length;
+            slice.push(periIdx[this._avoidSliceCursor]);
+        }
 
-        // Altitude probing: mid (current altitude) for all ring directions; high/high2/low are
-        // only probed along the 2 rays best aligned with the forward direction -- vertical
-        // obstacle clearing only cares whether the forward direction can be flown over / dived
-        // under, so fewer rays means a better frame rate.
-        const dists = new Array(dirs.length);
-        const distsHigh = new Array(dirs.length);
-        const distsHigh2 = new Array(dirs.length);
-        const distsLow = new Array(dirs.length);
+        // Altitude probing: mid (current altitude) for the probed directions; high/high2/low are
+        // only probed along the 3 rays best aligned with the forward direction, and only while the
+        // forward corridor is actually blocked -- vertical obstacle clearing only cares whether the
+        // forward direction can be flown over / dived under, so fewer rays means a better frame
+        // rate. The blocking verdict comes from the previous cycle (one cycle of lag is irrelevant
+        // for a manoeuvre that takes seconds).
+        const dists = new Array(N);
+        const distsHigh = new Array(N);
+        const distsHigh2 = new Array(N);
+        const distsLow = new Array(N);
         const yHigh = this.y + this.yopoAvoidVStep;
         const yHigh2 = this.y + this.yopoAvoidVStep * 2;
         const yLow = Math.max(this.y - this.yopoAvoidVStep, groundY + 1.0);
         const lowOk = (yLow - groundY) > 1.5; // The down-probe layer counts as a valid dive only if clearly above the ground
+        const probeAux = this._avoidPrevBlocked;
+
         // Pick the 3 rays best aligned with the forward direction for the high-layer probe
         // (more coverage -> more directions available for vertical clearing)
-        const vProbeIdx = [];
-        for (let pass = 0; pass < 3; pass++) {
-            let bi = -1, bd = -1;
-            for (let i = 0; i < dirs.length; i++) {
-                if (vProbeIdx.indexOf(i) >= 0) continue;
-                const dot = dirs[i].x * fwdHx + dirs[i].z * fwdHz;
-                if (dot > bd) { bd = dot; bi = i; }
-            }
-            if (bi >= 0) vProbeIdx.push(bi);
-        }
+        const vProbeIdx = (coneAll.length > 0 ? coneAll : periIdx)
+            .slice()
+            .sort((a, b) => (dirs[b].x * fwdHx + dirs[b].z * fwdHz) -
+                            (dirs[a].x * fwdHx + dirs[a].z * fwdHz))
+            .slice(0, 3);
 
-        for (let i = 0; i < dirs.length; i++) {
-            dists[i] = rayDist(dirs[i], this.y);
-            if (vProbeIdx.indexOf(i) >= 0) {
-                distsHigh[i] = rayDist(dirs[i], yHigh);
-                distsHigh2[i] = rayDist(dirs[i], yHigh2);
-                distsLow[i] = lowOk ? rayDist(dirs[i], yLow) : dists[i];
+        const probeSet = new Set(coneAll);
+        for (const i of slice) probeSet.add(i);
+        if (probeAux) for (const i of vProbeIdx) probeSet.add(i);
+
+        for (let i = 0; i < N; i++) {
+            if (!coreSet.has(i) && (i % stride) !== 0) {
+                // Direction skipped by the high-speed stride: mirror the neighbouring probed
+                // direction so the ring stays gap-free (angular resolution drops, coverage does not).
+                const nb = i - (i % stride);
+                dists[i] = dists[nb];
+                distsHigh[i] = distsHigh[nb];
+                distsHigh2[i] = distsHigh2[nb];
+                distsLow[i] = distsLow[nb];
+                continue;
+            }
+            if (probeSet.has(i)) {
+                ring[i] = dists[i] = rayDist(dirs[i], this.y);
+                ringAge[i] = 0;
+                if (probeAux && vProbeIdx.indexOf(i) >= 0) {
+                    distsHigh[i] = rayDist(dirs[i], yHigh);
+                    distsHigh2[i] = rayDist(dirs[i], yHigh2);
+                    distsLow[i] = lowOk ? rayDist(dirs[i], yLow) : dists[i];
+                } else {
+                    distsHigh[i] = dists[i];
+                    distsHigh2[i] = dists[i];
+                    distsLow[i] = dists[i];
+                }
             } else {
+                dists[i] = ring[i];
                 distsHigh[i] = dists[i];
                 distsHigh2[i] = dists[i];
                 distsLow[i] = dists[i];
@@ -1852,12 +1993,50 @@ export class Drone {
         // overhead or a square rooftop underfoot). Prevents climbing into the ceiling and
         // descending into an obstacle straight below.
         let vUpDist = R, vDownDist = R;
-        if (this.yopoAvoidVertRay) {
+        const vertEvery = Math.max(1, Math.round(this.yopoAvoidVertEvery));
+        if (this.yopoAvoidVertRay && (this._avoidCycle % vertEvery === 0)) {
+            rayCount += 2;
             const hUp = pickF({ x: this.x, y: this.y + 0.5, z: this.z }, { x: 0, y: 1, z: 0 }, this.yopoAvoidVertRange);
             vUpDist = (hUp && Number.isFinite(hUp.distance) && hUp.distance > 0.04) ? hUp.distance : R;
             const hDn = pickF({ x: this.x, y: this.y - 0.5, z: this.z }, { x: 0, y: -1, z: 0 }, this.yopoAvoidVertRange);
             vDownDist = (hDn && Number.isFinite(hDn.distance) && hDn.distance > 0.04) ? hDn.distance : R;
+        } else if (prevProbe && Number.isFinite(prevProbe.vUpDist)) {
+            vUpDist = prevProbe.vUpDist;
+            vDownDist = prevProbe.vDownDist;
         }
+
+        // Cheap (CPU-only) forward-corridor estimate used to decide whether the next cycle should
+        // spend rays on the vertical layers. It mirrors the corridor measure in
+        // _avoidanceVelocity so the extra rays are only issued when clearing is actually reachable.
+        let gx = fwdHx, gz = fwdHz;
+        if (this.yopoNavTarget) {
+            const tdx = this.yopoNavTarget.x - this.x;
+            const tdz = this.yopoNavTarget.z - this.z;
+            const tl = Math.hypot(tdx, tdz);
+            if (tl > 0.5) { gx = tdx / tl; gz = tdz / tl; }
+        }
+        let fwdCorridor = R;
+        for (const i of coneAll) {
+            const d = dists[i];
+            if (!Number.isFinite(d) || d <= 0) continue;
+            const dotG = dirs[i].x * gx + dirs[i].z * gz;
+            if (dotG <= 0) continue;
+            const latG = d * Math.sqrt(Math.max(0, 1 - dotG * dotG));
+            if (latG < 3.0 && d < fwdCorridor) fwdCorridor = d;
+        }
+        this._avoidPrevBlocked = fwdCorridor < (this.yopoAvoidStop + this.yopoAvoidVBlock);
+        this._avoidCycle++;
+
+        let ringAgeMax = 0;
+        for (let i = 0; i < N; i += stride) {
+            if (ringAge[i] > ringAgeMax) ringAgeMax = ringAge[i];
+        }
+        const probeMs = performance.now() - tStart;
+        this._avoidPerf.probeMs = probeMs;
+        this._avoidPerf.rays = rayCount;
+        this._avoidPerf.rayTotal += rayCount;
+        this._avoidPerf.cycles++;
+        this._avoidPerf.ringAgeMax = ringAgeMax;
 
         return {
             dists,
@@ -1869,6 +2048,8 @@ export class Drone {
             vUpDist,
             vDownDist,
             highProbeIdx: vProbeIdx, // Indices of the directions that got a high-layer probe (vertical clearing can only judge on those)
+            probeMs,
+            ringAgeMax,
             x: this.x, y: this.y, z: this.z,
             time: performance.now(),
         };
@@ -1913,6 +2094,20 @@ export class Drone {
         // still advances on the old command.
         const aDecel = Math.min(this.yopoAvoidDecel, this.yopoAccMax) * 0.9;
 
+        // Speed-adaptive action ranges. At 15 m/s the fixed 20 m range leaves only ~1.3 s, while
+        // the braking distance alone is ~15.6 m, so repulsion / detour / braking all engage far
+        // too late. These scale with speed up to yopoAvoidRefSpeed; goalClear's clearThresh
+        // deliberately keeps using the fixed yopoAvoidRepRange so widening the action range does
+        // not make the "corridor is clear" verdict stricter (see the goalClear block below).
+        const spdNow = Math.hypot(this.vx, this.vz);
+        const tFast = Math.max(0, Math.min(1,
+            (spdNow - this.yopoAvoidFastSpeed) /
+            Math.max(1e-3, this.yopoAvoidRefSpeed - this.yopoAvoidFastSpeed)));
+        const repRange = this.yopoAvoidRepRange +
+            (this.yopoAvoidRepRangeHi - this.yopoAvoidRepRange) * tFast;
+        const brakeRange = this.yopoAvoidBrakeRange +
+            (this.yopoAvoidBrakeRangeHi - this.yopoAvoidBrakeRange) * tFast;
+
         let repX = 0, repZ = 0;
         let dMin = R;        // Nearest obstacle overall (drives repulsion / tangential strength)
         let dAhead = R;      // Threat ahead (including vertical threats, used for braking / push-up)
@@ -1945,8 +2140,8 @@ export class Drone {
             if (!Number.isFinite(d) || d <= 0) continue;
             if (d < dMin) dMin = d;
             if (d > openMax) { openMax = d; openDirX = dirs[i].x; openDirZ = dirs[i].z; }
-            if (d < this.yopoAvoidRepRange) {
-                const w = 1 - d / this.yopoAvoidRepRange;
+            if (d < repRange) {
+                const w = 1 - d / repRange;
                 repX -= dirs[i].x * w;
                 repZ -= dirs[i].z * w;
             }
@@ -2023,7 +2218,10 @@ export class Drone {
         // physical stop.
         //   1) Hard kinematic brake: v_safe = sqrt(2*a*(d - standoff)), guaranteeing a stop within
         //      the clearance no matter what (however fast it flies, hitting the wall is physically
-        //      impossible). a uses the actually reachable deceleration aDecel.
+        //      impossible). a uses the conservative yopoAvoidBrakeDecel, deliberately well below the
+        //      physically reachable aDecel -- the real velocity controller cannot decelerate at the
+        //      physical maximum, so planning with it overshoots; the lower value leaves margin for the
+        //      slower real deceleration.
         //   2) Progressive soft brake: within yopoAvoidBrakeRange it scales the speed down
         //      smoothly with distance (with a floor) so the drone gets "slower as it gets closer",
         //      decelerating early instead of braking abruptly at the last moment. The more
@@ -2033,11 +2231,29 @@ export class Drone {
         //      way to 0 and dominate the speed limit (that was exactly what caused 1-4 m/s).
         let brake = 1;
         const standoff = this.yopoAvoidStop;
-        const spdFwd = Math.hypot(velTargetX, velTargetZ);
-        if (dAhead <= standoff) {
-            brake = 0;  // Already inside the safety clearance -> stop advancing entirely
+        // Use the LARGER of the commanded and the actual velocity for the reaction distance: if the
+        // drone is actually moving faster than the network commands (glide / overshoot), braking must
+        // cover the real closing speed, not the optimistic commanded one.
+        const spdFwd = Math.max(
+            Math.hypot(velTargetX, velTargetZ),
+            Math.hypot(this.vx, this.vz)
+        );
+        // Reaction buffer: the deceleration command does not physically bite until the drone has
+        // tilted to the new attitude, so during the reaction window it keeps moving at the old
+        // speed over reactionDist = spdFwd * reactionSec. That distance is subtracted from the
+        // available stopping room, so the brake begins early enough to still stop inside standoff.
+        // Without this, at 15 m/s the brake only engaged ~1.7 m too late and the drone grazed the
+        // wall. The buffer scales with speed automatically (the faster it goes, the more lead it
+        // needs).
+        const reactionDist = spdFwd * this.yopoAvoidBrakeReaction;
+        if (dAhead <= standoff + reactionDist) {
+            brake = 0;  // Already inside the safety clearance + reaction distance -> stop advancing entirely
         } else if (dAhead < R) {
-            const vSafe = Math.sqrt(2 * aDecel * (dAhead - standoff));
+            const dEff = dAhead - standoff - reactionDist;  // effective stopping distance
+            // Plan the safe speed with the conservative yopoAvoidBrakeDecel (NOT the physical-max
+            // aDecel): the real velocity controller cannot decelerate at the physical maximum, so
+            // planning with it overshoots. The lower value guarantees the (slower) real stop fits.
+            const vSafe = Math.sqrt(2 * this.yopoAvoidBrakeDecel * dEff);
             const kinBrake = spdFwd > 1e-3 ? Math.min(1, vSafe / spdFwd) : 0;
             // Progressive soft brake: within yopoAvoidBrakeRange it scales the speed down
             // smoothly with distance and applies the yopoAvoidBrakeFloor floor -- it only
@@ -2052,7 +2268,7 @@ export class Drone {
             // close range is handled by the kinematic brake, so safety improves rather than
             // regressing.
             const softT = clamp(
-                (dAhead - standoff * 2) / (this.yopoAvoidBrakeRange - standoff * 2),
+                (dAhead - standoff * 2) / (brakeRange - standoff * 2),
                 0, 1
             );
             const soft = this.yopoAvoidBrakeFloor +
@@ -2088,7 +2304,7 @@ export class Drone {
         // (outside the final phase) pushes it off the side walls to keep it centred, while in the
         // final phase the PD converges onto the centre line, so the drone flies straight into the
         // corridor.
-        if (dMin < R && dAhead < this.yopoAvoidRepRange * 0.8) {
+        if (dMin < R && dAhead < repRange * 0.8) {
             // Find the nearest obstacle direction (the ray direction matching dMin)
             let mi = -1;
             for (let i = 0; i < dirs.length; i++) {
@@ -2108,7 +2324,7 @@ export class Drone {
                 const c2 = tx2 * udx + tz2 * udz;
                 let fx, fz;
                 if (c1 >= c2) { fx = tx1; fz = tz1; } else { fx = tx2; fz = tz2; }
-                const t = this.yopoAvoidTanGain * (1 - dMin / this.yopoAvoidRepRange);
+                const t = this.yopoAvoidTanGain * (1 - dMin / repRange);
                 fx *= t; fz *= t;
                 // Direction hysteresis memory: if the angle against the previous frame's tan
                 // exceeds 120 deg while that direction is still clear, keep the previous frame
@@ -2161,6 +2377,9 @@ export class Drone {
         let goalClear = false;
         if (des > 0.3 || this.yopoNavTarget) {
             const pathHalfWidth = 2.5;                      // m, flight corridor half-width (body radius + margin)
+            // Deliberately the fixed base value, NOT the speed-adaptive repRange: widening the
+            // action range at speed must not also make the "corridor is clear" verdict stricter,
+            // otherwise the drone would start detouring on an actually clear path.
             const clearThresh = this.yopoAvoidRepRange;     // The corridor counts as clear only when there is no near obstacle in it (> the action range)
             // Dual-corridor check:
             //   dPath — corridor clearance along the "body -> goal" bearing (is the way to the goal clear)
