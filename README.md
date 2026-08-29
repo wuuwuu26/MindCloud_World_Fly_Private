@@ -143,7 +143,7 @@ curl http://127.0.0.1:5688/health
 
 停止或重启 DA360 直接重跑 `restart_all.sh`（或 `docker rm -f mindcloud-da360-api`）。
 
-注意，默认使用 `DA360_large`，DA360 服务端以实时优先的 `DA360_INPUT_SCALE=0.65` 推理，模型输入约为 `672x336`；在 RTX 4070 Ti SUPER 上真实 HTTP 端到端约 70 ms。右下角 RGB 全景仍保持原始显示尺寸；只有发送给 DA360 的深度请求会单独缩小，前端默认按 `da360UploadScale=0.2` 上传约 `134x67` 的 JPEG，再由服务端 resize 到模型输入尺寸。前端默认 `depthMs=100`，推理未完成时不会堆积请求。
+注意，默认使用 `DA360_large`，DA360 服务端以 `DA360_INPUT_SCALE=0.65` 推理，模型输入约为 `672x336`（checkpoint 基准 1036×518 × 0.65，按 patch=14 取整）。全景 RGB 默认 `768x384` ERP，右下角显示即此原始尺寸；只有发送给 DA360 的深度请求会单独缩小，前端默认按 `da360UploadScale=0.5` 上传 `384x192` 的 JPEG，再由服务端 resize 到 `672x336` 模型输入、推理后将深度贴回 `384x192`（恰好等于 YOPO 消费的 384×192 ERP 深度）。前端默认 `depthMs=33`（深度请求最小间隔 ≈30Hz），推理未完成时不会堆积请求；单帧 HTTP 端到端约 70 ms 量级（依 GPU 不同而变化）。
 
 默认不建议换模型；实验中 `DA360_large` 的 fast 档比 `DA360_small` 保留了更好的深度排序和边缘一致性。只有显存、功耗或部署体积受限时，再自行覆盖模型名：
 
@@ -206,7 +206,7 @@ Tab         设置面板
 
 ## 全景相机实现原理
 
-全景 RGB 默认从机头 360 相机位置采集，输出 `672x336` ERP 图。实现方式是对 Cesium/Google Tiles 渲染结果进行 6 个方向采样，然后在 GPU 中按 ERP 射线模型重投影：
+全景 RGB 默认从机头 360 相机位置采集，输出 `768x384` ERP 图。实现方式是对 Cesium/Google Tiles 渲染结果进行 6 个方向采样，然后在 GPU 中按 ERP 射线模型重投影：
 
 ```text
 yaw   = pi - (u + 0.5) / W * 2pi
