@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
-"""将 YOPO PyTorch 权重固化为 TensorRT 引擎 (fp16), 供 yopo_server.py 的
-_TrtYopoModel 直接反序列化加载。
+"""Freeze the YOPO PyTorch weights into a TensorRT engine (fp16) that yopo_server.py's
+_TrtYopoModel can deserialize directly.
 
-用法 (在含 torch + tensorrt + onnx 的 GPU 机器 / 容器内执行):
+Usage (on a GPU machine / container with torch + tensorrt + onnx):
     python scripts/yopo_trt_transfer.py \
         --model third_party/yopo/saved/YOPO_40/epoch50.pth \
         --out  asset/yopo-trt/yopo_trt.pth
 
-流程:
-    1) torch.onnx.export 把 YopoNetwork(depth, obs) 导出为 ONNX,
-       输入 depth=[1, C, H, W]、obs=[1, 9]; 输出 endstate、score。
-    2) TensorRT Builder 解析 ONNX, 以 FP16 构建引擎并序列化写到 --out。
-       (--out 文件本质是 TensorRT 序列化引擎, 与 yopo_server 的
-        trt.Runtime.deserialize_cuda_engine 对应; 命名沿用 .pth 仅为了与
-        start_yopo_api.sh / yopo_server.py 里约定的 YOPO_TRT_PATH 一致。)
+Pipeline:
+    1) torch.onnx.export turns YopoNetwork(depth, obs) into ONNX with
+       inputs depth=[1, C, H, W] and obs=[1, 9], outputs endstate and score.
+    2) The TensorRT builder parses the ONNX, builds an FP16 engine and serializes
+       it to --out. (The --out file is really a serialized TensorRT engine, matching
+       yopo_server's trt.Runtime.deserialize_cuda_engine; it keeps the .pth suffix
+       only to stay consistent with the YOPO_TRT_PATH convention used by
+       start_yopo_api.sh / yopo_server.py.)
 
-注意:
-    - 引擎与构建时的 GPU 架构 (SM) 绑定, 需在与部署相同的 GPU 上构建。
-    - 推理端必须 YOPO_USE_TRT=1 且 YOPO_TRT_PATH 指向本文件才会启用。
+Notes:
+    - An engine is bound to the GPU architecture (SM) it was built on, so build it
+      on the same GPU class you deploy to.
+    - Inference only picks it up when YOPO_USE_TRT=1 and YOPO_TRT_PATH points to
+      this file.
 """
 import argparse
 import os
@@ -25,7 +28,7 @@ import sys
 
 import torch
 
-# ── YOPO 源码路径 (与 yopo_server.py 保持一致) ──────────────────
+# ── YOPO source path (kept in sync with yopo_server.py) ─────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 YOPO_DIR = os.path.join(SCRIPT_DIR, "..", "third_party", "yopo")
 if os.path.isdir(YOPO_DIR):
@@ -37,12 +40,14 @@ from policy.yopo_network import YopoNetwork  # noqa: E402
 
 def export_onnx(model, out_onnx, in_channels, height, width):
     model.eval()
-    # 与真实推理保持一致: 模型/输入都放 cuda (state_transform 内部旋转矩阵在 cuda,
-    # prepare_input 要求 obs 同设备, 否则 matmul 报设备不匹配)。
+    # Keep this identical to real inference: model and inputs live on cuda (the rotation
+    # matrix inside state_transform is on cuda, and prepare_input requires obs on the
+    # same device, otherwise matmul raises a device mismatch).
     model.to('cuda')
     dummy_depth = torch.zeros(1, in_channels, height, width, dtype=torch.float32, device='cuda')
-    # obs 与真实推理保持一致: 先经 state_transform.prepare_input 扩成 4D,
-    # 才能和 4D 的 depth_feature 在 dim=1 拼接 (forward 里 state_backbone 为空 Sequential)。
+    # obs mirrors real inference too: state_transform.prepare_input first expands it to
+    # 4D so it can be concatenated with the 4D depth_feature along dim=1 (state_backbone
+    # is an empty Sequential inside forward).
     dummy_obs_raw = torch.zeros(1, 9, dtype=torch.float32, device='cuda')
     dummy_obs = model.state_transform.prepare_input(dummy_obs_raw)
     with torch.inference_mode():
@@ -54,16 +59,18 @@ def export_onnx(model, out_onnx, in_channels, height, width):
             output_names=["endstate", "score"],
             opset_version=17,
         )
-    print(f"[ONNX] 导出完成: {out_onnx}  "
+    print(f"[ONNX] export done: {out_onnx}  "
           f"(depth={tuple(dummy_depth.shape)}, obs={tuple(dummy_obs.shape)})")
 
 
 def build_trt(out_onnx, out_engine, fp16=True, workspace_gb=2):
-    """把 ONNX 解析为 TensorRT 引擎并序列化。
+    """Parse the ONNX into a TensorRT engine and serialize it.
 
-    兼容两种 API:
-      - TensorRT < 10: 需显式 EXPLICIT_BATCH flag + FP16 flag, 用 build_engine + serialize。
-      - TensorRT >= 10: 默认即为 explicit batch, FP16 改用 config.set_precision。
+    Supports both APIs:
+      - TensorRT < 10: needs an explicit EXPLICIT_BATCH flag plus the FP16 flag,
+        and uses build_engine + serialize.
+      - TensorRT >= 10: explicit batch is the default and FP16 switches to
+        config.set_precision.
     """
     import tensorrt as trt
     logger = trt.Logger(trt.Logger.WARNING)
@@ -80,7 +87,7 @@ def build_trt(out_onnx, out_engine, fp16=True, workspace_gb=2):
     if not parser.parse(blob):
         for i in range(parser.num_errors):
             print("[ONNX parse error]", parser.get_error(i).desc(), file=sys.stderr)
-        raise RuntimeError("TensorRT 解析 ONNX 失败")
+        raise RuntimeError("TensorRT failed to parse the ONNX")
     config = builder.create_builder_config()
     ws = int(workspace_gb * (1024 ** 3))
     if trt_ver < (10, 0):
@@ -95,20 +102,20 @@ def build_trt(out_onnx, out_engine, fp16=True, workspace_gb=2):
             config.set_precision(getattr(trt, "float16", trt.DataType.HALF))
         engine_bytes = builder.build_serialized_network(network, config)
     if engine_bytes is None:
-        raise RuntimeError("TensorRT 引擎构建返回空 (显存/算子不支持?)")
+        raise RuntimeError("TensorRT engine build returned empty (out of memory / unsupported op?)")
     with open(out_engine, "wb") as f:
         f.write(engine_bytes)
-    print(f"[TRT] 引擎构建完成: {out_engine}  (fp16={fp16}, tensorrt {trt.__version__})")
+    print(f"[TRT] engine built: {out_engine}  (fp16={fp16}, tensorrt {trt.__version__})")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="YOPO PyTorch -> TensorRT 引擎")
+    ap = argparse.ArgumentParser(description="YOPO PyTorch -> TensorRT engine")
     ap.add_argument("--model",
                     default=os.path.join(YOPO_DIR, "saved", "YOPO_40", "epoch50.pth"))
     ap.add_argument("--out",
                     default=os.path.join(SCRIPT_DIR, "..", "asset", "yopo-trt", "yopo_trt.pth"))
     ap.add_argument("--onnx", default="",
-                    help="中间 ONNX 路径 (默认: --out 同目录的 yopo_trt.onnx)")
+                    help="Intermediate ONNX path (default: yopo_trt.onnx next to --out)")
     ap.add_argument("--fp16", action="store_true", default=True)
     ap.add_argument("--no-fp16", dest="fp16", action="store_false")
     ap.add_argument("--workspace-gb", type=int, default=2)
@@ -132,8 +139,8 @@ def main():
     onnx_path = args.onnx or os.path.join(out_dir, "yopo_trt.onnx")
     export_onnx(model, onnx_path, in_channels, height, width)
     build_trt(onnx_path, args.out, fp16=args.fp16, workspace_gb=args.workspace_gb)
-    print("[done] TensorRT 引擎已生成 ->", args.out)
-    print("       交由 yopo_server 通过 YOPO_USE_TRT=1 + YOPO_TRT_PATH 加载。")
+    print("[done] TensorRT engine written ->", args.out)
+    print("       yopo_server loads it via YOPO_USE_TRT=1 + YOPO_TRT_PATH.")
 
 
 if __name__ == "__main__":

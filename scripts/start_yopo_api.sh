@@ -23,7 +23,7 @@ set -Eeuo pipefail
 #
 #   Note on depth images:
 #       DA360 uses a 360 equirectangular RGB image and runs a depth-estimation
-#       model server (port 5688).  YOPO 原版 expects a 192x384 ERP panorama
+#       model server (port 5688).  Upstream YOPO expects a 192x384 ERP panorama
 #       depth map in metres (encoding '32FC1') plus a uint8 validity mask
 #       (255=valid).  DA360's raw output is already ERP, so it is resized
 #       directly to 192x384 instead of being reprojected into a pinhole.
@@ -96,18 +96,19 @@ if [[ ! -s "$MODEL_PATH" ]]; then
     exit 1
 fi
 
-# ── TensorRT 自动启用 ──────────────────────────────────────────────
-# 引擎文件存在且用户未显式设置 YOPO_USE_TRT 时, 默认启用 TRT 加速, 使
-# restart_all.sh / launch.sh 等任意启动入口一键即可跑在加速模式。
-# 显式 YOPO_USE_TRT=0 可强制回退 PyTorch eager。
+# ── TensorRT auto-enable ──────────────────────────────────────────
+# When the engine file exists and the user has not explicitly set YOPO_USE_TRT,
+# TRT acceleration is enabled by default so any entry point (restart_all.sh /
+# launch.sh, etc.) runs in accelerated mode out of the box.
+# An explicit YOPO_USE_TRT=0 forces a fallback to PyTorch eager.
 TRT_ENGINE_HOST="$PROJECT_ROOT/asset/yopo-trt/yopo_trt.pth"
 if [[ -z "${YOPO_USE_TRT:-}" ]]; then
     if [[ -f "$TRT_ENGINE_HOST" ]]; then
         YOPO_USE_TRT=1
-        echo "YOPO TRT: 检测到引擎 $TRT_ENGINE_HOST → 自动启用 YOPO_USE_TRT=1 (推理加速)"
+        echo "YOPO TRT: engine detected at $TRT_ENGINE_HOST -> auto-enabling YOPO_USE_TRT=1 (inference acceleration)"
     else
         YOPO_USE_TRT=0
-        echo "YOPO TRT: 未找到引擎 $TRT_ENGINE_HOST (运行 scripts/yopo_trt_transfer.py 生成) → 回退 PyTorch eager"
+        echo "YOPO TRT: engine not found at $TRT_ENGINE_HOST (run scripts/yopo_trt_transfer.py to generate) -> falling back to PyTorch eager"
     fi
 fi
 export YOPO_USE_TRT
@@ -119,7 +120,7 @@ echo "YOPO TRT:   YOPO_USE_TRT=$YOPO_USE_TRT"
 MODEL_PATH="$(readlink -f "$MODEL_PATH")"
 MODEL_BASENAME="$(basename "$MODEL_PATH")"
 
-# Local mode: run Python script directly (no docker -> 重启最快, 推荐用于调参迭代)
+# Local mode: run the Python script directly (no docker -> fastest restart, recommended for tuning iterations)
 if [[ "$MODE" == "local" ]]; then
     PYTHON_BIN="${YOPO_PYTHON:-python3}"
     exec "$PYTHON_BIN" "$SCRIPT_DIR/yopo_server.py" \
@@ -192,16 +193,16 @@ run_args=(
     -p "$PORT:5689"
     -p 5690:5690
     -e "YOPO_NO_WARMUP=${YOPO_NO_WARMUP:-0}"
-    # 转发速度/时间缩放相关环境变量(否则在 docker 模式下设置无效, 只能改 yaml 重启)
+    # Forward speed/time-scale related env vars (otherwise ignored in docker mode, requiring a yaml edit + restart)
     -e "YOPO_VELOCITY=${YOPO_VELOCITY:-}"
     -e "YOPO_CTRL_TIME_SCALE=${YOPO_CTRL_TIME_SCALE:-}"
-    # 轨迹末端外推时长(秒), 修重规划间隔内的指令冻结锯齿; 默认 2.0 (见 yopo_server.py)
+    # Trajectory end extrapolation duration (seconds), smooths command freezes between replans; default 2.0 (see yopo_server.py)
     -e "YOPO_TRAJ_EXTEND_S=${YOPO_TRAJ_EXTEND_S:-}"
-    # TensorRT 加速开关与引擎路径: YOPO_USE_TRT=1 时加载 YOPO_TRT_PATH 指向的引擎
+    # TensorRT acceleration toggle and engine path: loads the engine at YOPO_TRT_PATH when YOPO_USE_TRT=1
     -e "YOPO_USE_TRT=${YOPO_USE_TRT:-}"
     -e "YOPO_TRT_PATH=${YOPO_TRT_PATH:-/opt/mindcloud-yopo/trt/yopo_trt.pth}"
     -v "$MODEL_PATH:/models/$MODEL_BASENAME:ro"
-    # TensorRT 引擎持久化目录(重规划加速权重, 跨容器重建保留)
+    # TensorRT engine persistence directory (holds the acceleration weights, survives container rebuilds)
     -v "$PROJECT_ROOT/asset/yopo-trt:/opt/mindcloud-yopo/trt:rw"
 )
 
@@ -222,12 +223,13 @@ if [[ "${YOPO_DETACH:-0}" == "1" ]]; then
     run_args=(-d "${run_args[@]}")
 fi
 
-# ── 自动构建 TensorRT 引擎 (启用 TRT 但宿主引擎缺失时) ──
-# 在容器内用 GPU 把当前模型固化为引擎, 存到 asset/yopo-trt (挂载 rw), 使
-# restart_all.sh / launch.sh 等任意入口一键即可获得 TRT 加速, 无需手动预处理。
+# ── Auto-build TensorRT engine (when TRT enabled but host engine missing) ──
+# Solidify the current model into an engine inside the container using the GPU,
+# and store it in asset/yopo-trt (mounted rw) so any entry point (restart_all.sh
+# / launch.sh, etc.) gains TRT acceleration out of the box, no manual pre-processing.
 if [[ "${YOPO_USE_TRT:-0}" == "1" && "${MODE}" != "local" ]]; then
     if [[ ! -f "$TRT_ENGINE_HOST" ]]; then
-        echo "YOPO TRT: 未找到引擎 $TRT_ENGINE_HOST, 尝试在容器内用 GPU 自动构建 ..."
+        echo "YOPO TRT: engine not found at $TRT_ENGINE_HOST, attempting in-container GPU auto-build ..."
         docker run --rm "${gpu_args[@]}" \
             -v "$SCRIPT_DIR/yopo_trt_transfer.py:/opt/mindcloud-yopo/scripts/yopo_trt_transfer.py:ro" \
             -v "$YOPO_SRC_DIR:/opt/mindcloud-yopo/third_party/yopo:ro" \
@@ -236,8 +238,8 @@ if [[ "${YOPO_USE_TRT:-0}" == "1" && "${MODE}" != "local" ]]; then
             "$IMAGE" python /opt/mindcloud-yopo/scripts/yopo_trt_transfer.py \
                 --model "/models/$MODEL_BASENAME" \
                 --out /opt/mindcloud-yopo/trt/yopo_trt.pth \
-        && echo "YOPO TRT: 引擎构建成功 -> $TRT_ENGINE_HOST" \
-        || echo "YOPO TRT: 自动构建失败 (容器可能缺少 tensorrt/GPU), 将回退 PyTorch eager" >&2
+        && echo "YOPO TRT: engine built successfully -> $TRT_ENGINE_HOST" \
+        || echo "YOPO TRT: auto-build failed (container may lack tensorrt/GPU), falling back to PyTorch eager" >&2
     fi
 fi
 

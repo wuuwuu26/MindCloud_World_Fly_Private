@@ -38,7 +38,7 @@ const SETTINGS_IDS = [
     'phys-mass', 'phys-thrust', 'phys-drag-cd', 'phys-drag-area',
     'phys-drone-size', 'phys-collision-radius',
     'clean-mode-toggle', 'osd-toggle',
-    // SimpleFlight 增益（全局持久化，不参与 per-mode 快照）
+    // SimpleFlight gains (persisted globally, excluded from per-mode snapshots)
     'sf-pos-kp', 'sf-vel-kp', 'sf-vel-ki', 'sf-vel-kd',
     'sf-angle-kp', 'sf-angle-kd', 'sf-rate-kp', 'sf-rate-ki',
     'sf-alt-kp', 'sf-alt-kd', 'sf-yaw-rate-kp',
@@ -2040,7 +2040,7 @@ export class Controller {
         this._bindSliderNum('ctrl-vel-kd', 'ctrl-vel-kd-num');
         this._bindSliderNum('ctrl-alt-kd', 'ctrl-alt-kd-num');
 
-        // SimpleFlight 增益滑块
+        // SimpleFlight gain sliders
         this._bindSliderNum('sf-pos-kp', 'sf-pos-kp-num');
         this._bindSliderNum('sf-vel-kp', 'sf-vel-kp-num');
         this._bindSliderNum('sf-vel-ki', 'sf-vel-ki-num');

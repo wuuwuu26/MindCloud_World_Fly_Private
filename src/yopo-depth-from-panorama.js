@@ -37,14 +37,19 @@ const DEFAULT_WIDTH_ERP = 384;   // YOPO_360 ERP image_width  (columns)
 const DEFAULT_HEIGHT_ERP = 192;  // YOPO_360 ERP image_height (rows)
 const DEFAULT_HFOV_DEG = 90;
 const DEFAULT_MAX_DISTANCE = 20.0;
-// DA360 相对深度上限: relative_to_nearest 中近处物体 rel 通常 <40, 超过视为
-// 远景/天空伪值(单目模型 1/disp 对远景输出数百), 标定须过滤以防 scale 被压小。
+// Upper bound on DA360 relative depth: in relative_to_nearest, nearby objects usually have
+// rel < 40; anything above is treated as a distant/sky artefact (the monocular model's
+// 1/disp outputs values in the hundreds for distant scenery), and calibration must filter
+// those out so the scale is not squeezed down.
 const DA360_REL_MAX = 40;
-// scale 物理合理范围: relative_to_nearest 场景最近点通常 0.5~30m (低空贴近 0.5m,
-// 高空最近结构数十米), 超出即标定被污染, 回退历史值。可用 ?da360ScaleMin/Max 覆盖。
+// Physically plausible range for scale: the nearest point of a relative_to_nearest scene is
+// usually 0.5-30 m (hugging the ground at 0.5 m, tens of metres for the nearest structure at
+// altitude). Outside that range calibration is considered polluted and the historical value
+// is reused. Overridable with ?da360ScaleMin/Max.
 const DA360_SCALE_MIN = 0.5;
 const DA360_SCALE_MAX = 30.0;
-// scale 时间平滑系数(新值占比): 0.5 即与历史各半, 抑制 DA360 帧间相对深度漂移。
+// Temporal smoothing factor for scale (weight of the new value): 0.5 means half new / half
+// historical, damping the frame-to-frame relative-depth drift of DA360.
 const DA360_SCALE_SMOOTH = 0.5;
 
 export class YOPODepthFromPanorama {
@@ -55,34 +60,45 @@ export class YOPODepthFromPanorama {
         this.lastRelativeDepth = null;
         this.lastScaleTimestamp = 0;
         this.scaleConfidence = 0;
-        this._erpFrameCount = 0;       // ERP 帧计数
-        // 标定策略: 每获取到一张 DA360 深度图就标定一次(见 _refreshDepth)。
-        // raycast 开销由 pickLocalRay 的 150ms 方向分桶缓存吸收, 无需降频。
-        // ── 预测式深度缓存 (降低延迟用) ──
-        // 深度刷新(打 DA360)在后台异步进行, 导航环每帧直接复用最近一次
-        // 已处理好的 ERP 深度, 把 DA360 的 140ms 等待"藏"到后台, 使深度环
-        // 周期从 ~230ms(DA360+YOPO) 降到 ≈YOPO 推理时间, 控制更跟手。
+        this._erpFrameCount = 0;       // ERP frame counter
+        // Calibration policy: calibrate once for every DA360 depth map obtained (see
+        // _refreshDepth). The raycast cost is absorbed by pickLocalRay's 150 ms
+        // direction-bucketed cache, so no downsampling is needed.
+        // ── Predictive depth cache (for lower latency) ──
+        // The depth refresh (calling DA360) runs asynchronously in the background, and the
+        // nav loop just reuses the most recent processed ERP depth every frame, hiding
+        // DA360's 140 ms wait in the background. That shrinks the depth-loop period from
+        // ~230 ms (DA360+YOPO) to roughly the YOPO inference time, making control more
+        // responsive.
         this._depthCache = null;       // {depth, mask, scale, confidence, time}
-        this._refreshing = false;      // 是否有 DA360 刷新在途
-        this._depthCacheTtlMs = 150;   // 缓存新鲜度阈值; 超过则本帧同步等真实深度
-        // DA360 刷新最小间隔 (ms): 深度环高频触发时(如 navigate 走 33ms 节流缓存)若不
-        // 限频会持续打 DA360, 慢推理叠加排队反而拖慢实时性。限频后缓存复用, 深度环以
-        // navigate 频率运行, DA360 在后台以 <=minInterval 的节奏更新缓存。
-        // GPU 后处理提速后刷新本身更便宜: 30→10→5→3ms, 真实深度获取频率进一步提高 (DA360 在途
-        // 由 _refreshing 互斥保证, 不会并发打爆; 间隔越小缓存越新鲜, YOPO 越实时)。
-        // 该值同时作为"运动指令(重规划)更新频率"的基准 —— main.js 会把 navigate 客户端节流
-        // (_requestInterval) 直接绑定到此值, 保证两者频率严格一致且一并提高。
+        this._refreshing = false;      // whether a DA360 refresh is in flight
+        this._depthCacheTtlMs = 150;   // cache freshness threshold; beyond it the frame waits synchronously for real depth
+        // Minimum interval between DA360 refreshes (ms): when the depth loop fires at a high
+        // rate (e.g. navigate throttled to 33 ms), not rate-limiting would keep hammering
+        // DA360, and slow inference plus queuing would actually hurt real-time behaviour.
+        // With rate limiting the cache is reused: the depth loop runs at the navigate rate
+        // while DA360 updates the cache in the background at <= minInterval.
+        // The faster GPU post-processing made refreshes cheaper: 30 -> 10 -> 5 -> 3 ms,
+        // further raising the real depth rate (in-flight DA360 requests are guarded by the
+        // _refreshing mutex so they never pile up; a shorter interval keeps the cache
+        // fresher and YOPO more real-time).
+        // This value is also the baseline for the "motion command (replan) update rate" --
+        // main.js binds the navigate client-side throttle (_requestInterval) straight to it,
+        // keeping both rates strictly identical and raising them together.
         this._minRefreshIntervalMs = 3;
-        // ── GPU 后处理 (懒初始化) ──
-        // rawDepth/resize/flip/mask 这些逐像素循环在 CPU 主线程跑, 384x192 每次几万次
-        // 插值+翻转, 是深度环周期的固定开销。用 WebGL2 单次 draw 完成
-        // "bilinear resize + 水平翻转 + mask + clamp" 全部步骤, CPU 只 readPixels 读回
-        // 最终结果, 显著缩短 _refreshDepth 耗时 → 提高深度获取频率/实时性。
-        // 创建失败(无 WebGL2)时自动回退 CPU 路径, 不影响功能。
+        // ── GPU post-processing (lazy init) ──
+        // These per-pixel loops (rawDepth/resize/flip/mask) run on the CPU main thread: at
+        // 384x192 that is tens of thousands of interpolations plus a flip every time, a fixed
+        // cost of every depth-loop cycle. A single WebGL2 draw performs
+        // "bilinear resize + horizontal flip + mask + clamp" in one pass and the CPU only
+        // reads the final result back, significantly shortening _refreshDepth -> higher depth
+        // rate / better real-time behaviour.
+        // If creation fails (no WebGL2) it automatically falls back to the CPU path;
+        // functionality is unaffected.
         this._gpu = null;
     }
 
-    /** 懒初始化 GPU 后处理管线。返回是否可用。 */
+    /** Lazily initialize the GPU post-processing pipeline. Returns whether it is usable. */
     _ensureGpu() {
         if (this._gpu) return this._gpu.ok;
         const gpu = { ok: false };
@@ -95,15 +111,17 @@ export class YOPODepthFromPanorama {
             });
             if (!gl) return (this._gpu = gpu) && false;
 
-            // 顶点着色器: 全屏三角形
+            // Vertex shader: full-screen triangle
             const vsSrc = `#version 300 es
                 in vec2 a_pos;
                 void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }`;
-            // 片元着色器: 采样深度纹理, 完成 bilinear resize + mask + clamp。
-            // u_tex 为 R32F 深度纹理。注意: RGB 全景已在 panorama-sensor 渲染时水平
-            // 翻转为 YOPO 训练视角(左半=左方向), DA360 输出的深度布局跟随输入 RGB
-            // (逐像素对齐), 因此这里【不再翻转】列序 —— 深度直接就是 YOPO 锚点视角。
-            // 无效像素(NaN/<=0)写 0 便于下游 mask 判定。
+            // Fragment shader: sample the depth texture and do bilinear resize + mask +
+            // clamp. u_tex is an R32F depth texture. Note: the RGB panorama is already
+            // flipped horizontally at render time in panorama-sensor into the YOPO training
+            // view (left half = left direction), and the DA360 depth layout follows the input
+            // RGB (pixel-aligned), so the column order is NOT flipped here -- the depth is
+            // already in the YOPO anchor view. Invalid pixels (NaN/<=0) are written as 0 so
+            // the downstream mask check is easy.
             const fsSrc = `#version 300 es
                 precision highp float;
                 precision highp sampler2D;
@@ -117,7 +135,7 @@ export class YOPODepthFromPanorama {
                     float srcY = (u_srcSize.y - 1.0) * dstUv.y;
                     vec2 srcUv = vec2(srcX, srcY) / u_srcSize;
                     float v = texture(u_tex, srcUv).r;
-                    // mask: 有效(v>1e-3 且有限)为 255, 否则 0
+                    // mask: 255 when valid (v > 1e-3 and finite), otherwise 0
                     float m = (v > 1e-3) ? 255.0 : 0.0;
                     outColor = vec4(v, m, 0.0, 1.0);
                 }`;
@@ -149,7 +167,7 @@ export class YOPODepthFromPanorama {
             gpu.uTex = gl.getUniformLocation(prog, 'u_tex');
             gpu.uSrcSize = gl.getUniformLocation(prog, 'u_srcSize');
             gpu.uDstSize = gl.getUniformLocation(prog, 'u_dstSize');
-            // 单通道纹理单元
+            // Single-channel texture unit
             gpu.tex = gl.createTexture();
             gpu.fb = gl.createFramebuffer();
             gpu.pbo = null;
@@ -163,15 +181,16 @@ export class YOPODepthFromPanorama {
     }
 
     /**
-     * GPU 后处理: 把 rawDepth(Float32Array) resize 到 dstW×dstH 并做水平翻转,
-     * 同时生成 mask(Uint8Array)。返回 {depth, mask}。失败时返回 null。
+     * GPU post-processing: resize rawDepth (Float32Array) to dstW x dstH with a horizontal
+     * flip, and generate the mask (Uint8Array) at the same time.
+     * Returns {depth, mask}, or null on failure.
      */
     _gpuResizeFlip(rawDepth, rawW, rawH, dstW, dstH) {
         if (!this._ensureGpu()) return null;
         const gl = this._gpu.gl;
         const n = rawW * rawH;
         if (!this._gpu.floatTex || this._gpu.floatTex.n < n) {
-            // (重)建 R32F 纹理: 只在尺寸增大时重建
+            // (Re)create the R32F texture: only rebuilt when the size grows
             const old = this._gpu.floatTex;
             if (old) { gl.deleteTexture(old.tex); }
             const tex = gl.createTexture();
@@ -180,7 +199,7 @@ export class YOPODepthFromPanorama {
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-            // 预分配一个足够大的存储
+            // Pre-allocate storage large enough
             gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, rawW, rawH);
             this._gpu.floatTex = { tex, n };
             this._gpu.nRaw = n;
@@ -189,7 +208,7 @@ export class YOPODepthFromPanorama {
         gl.bindTexture(gl.TEXTURE_2D, ftex);
         gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, rawW, rawH, gl.RED, gl.FLOAT, rawDepth);
 
-        // 输出缓冲: depth(R32F) + mask(R8) 两张 FBO 附件
+        // Output buffers: depth (R32F) + mask (R8) as two FBO attachments
         const outW = dstW, outH = dstH;
         let outDepth = this._gpu.outDepthTex;
         if (!outDepth || outDepth.w !== outW || outDepth.h !== outH) {
@@ -212,7 +231,7 @@ export class YOPODepthFromPanorama {
             this._gpu.outMaskTex = { tex: mt, w: outW, h: outH };
         }
 
-        // 渲染到 FBO (MRT: depth + mask)
+        // Render to the FBO (MRT: depth + mask)
         gl.bindFramebuffer(gl.FRAMEBUFFER, this._gpu.fb);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._gpu.outDepthTex.tex, 0);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, this._gpu.outMaskTex.tex, 0);
@@ -234,8 +253,10 @@ export class YOPODepthFromPanorama {
         gl.drawBuffers(drawBufs);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-        // 读回: 复用缓冲(尺寸不变不重建), 减少每帧 GC 压力与分配开销。
-        // 输出数组复用给调用方(调用方在下一次刷新前用完, 见 _refreshDepth 用法)。
+        // Read-back: buffers are reused (not recreated while the size is unchanged), which
+        // reduces per-frame GC pressure and allocation cost.
+        // The output arrays are reused for the caller (the caller consumes them before the
+        // next refresh, see how _refreshDepth uses them).
         const nOut = outW * outH;
         if (!this._gpu.depthBuf || this._gpu.depthBuf.length !== nOut) {
             this._gpu.depthBuf = new Float32Array(nOut);
@@ -384,9 +405,11 @@ export class YOPODepthFromPanorama {
             const norm = Math.hypot(dir.x, dir.y, dir.z);
             if (norm < 1e-9) return;
             const n = { x: dir.x / norm, y: dir.y / norm, z: dir.z / norm };
-            // forceFresh=true: 标定射线必须返回当前真实距离, 不走 pickLocalRay 的方向分桶
-            // 缓存(缓存命中会返回 ≤150ms/≤0.5m 漂移的陈旧距离, 导致标定 scale 偏差)。
-            // 代价是每次深度图 4 条射线都真实 GPU 拾取, 但保证米制标定始终新鲜。
+            // forceFresh=true: calibration rays must return the current true distance and
+            // must not use pickLocalRay's direction-bucketed cache (a cache hit returns a
+            // stale distance with <= 150 ms / <= 0.5 m drift, biasing the calibration scale).
+            // The cost is that all 4 rays per depth map do a real GPU pick, but the metric
+            // calibration always stays fresh.
             const hit = this.world.pickLocalRay(pos, n, maxDistance, true);
             if (hit && hit.distance > 0.2 && hit.distance < maxDistance) {
                 samples.push({ dir: n, distance: hit.distance });
@@ -399,11 +422,15 @@ export class YOPODepthFromPanorama {
                 add(c * 0.5, r * 0.5);
             }
         }
-        // 高空补充标定点: 前向 2x2 网格的射线在开阔/高空场景可能全部落空(命中天空
-        // → pickLocalRay 返回 null), 导致 calibrationPoints 不足、scale 回退历史值
-        // (高空下历史 scale 可能严重偏小 → 深度图被压缩成"四面近障")。补充:
-        //   1. 正前方 add(0,0): 前方最近障碍, 避障最关心的方向
-        //   2. 正下方 add(0,-1): 地面距离≈无人机高度, 高空时唯一稳定可命中点
+        // Extra calibration points for high altitude: the forward 2x2 grid rays can all miss
+        // in open / high-altitude scenes (hitting the sky -> pickLocalRay returns null),
+        // leaving too few calibrationPoints and falling back to the historical scale (which
+        // can be far too small at altitude -> the depth map is squeezed into "obstacles on
+        // all sides"). Added:
+        //   1. straight ahead add(0,0): the nearest obstacle ahead, the direction avoidance
+        //      cares about most
+        //   2. straight down add(0,-1): ground distance ~= drone altitude, the only reliably
+        //      hittable point at high altitude
         add(0, 0);
         add(0, -1);
         return samples;
@@ -450,12 +477,17 @@ export class YOPODepthFromPanorama {
      * @returns {number|null}
      */
     _samplePanoramaDepth(panoDepth, panoWidth, panoHeight, dir) {
-        // YOPO_360 训练视角的 ERP 采样 (与 sensor_simulator.cu / primitive.py 一致):
-        //   yaw = PI - (u+0.5)/W * 2PI  =>  yaw 随列号递增, u=0.5 中心=前方
-        //   body NWU: x=fwd, y=left, z=up => 左半(u<0.5)=左方向, 右半(u>0.5)=右方向
-        // RGB 全景已在 panorama-sensor 渲染时翻转为该视角, DA360 深度布局跟随,
-        // 故此处直接按此约定采样(不再采用 Cesium shader 的镜像布局)。
-        // MindCloud 系: forward=-z, right=+x, up=+y → MC 右(+x) 对应 YOPO 右方向。
+        // ERP sampling in the YOPO_360 training view (consistent with sensor_simulator.cu /
+        // primitive.py):
+        //   yaw = PI - (u+0.5)/W * 2PI  =>  yaw increases with the column index, u=0.5 is the
+        //   centre = straight ahead
+        //   body NWU: x=fwd, y=left, z=up => left half (u<0.5) = left direction, right half
+        //   (u>0.5) = right direction
+        // The RGB panorama is already flipped into that view at render time in
+        // panorama-sensor and the DA360 depth layout follows it, so we sample directly with
+        // this convention (no longer using the mirrored layout of the Cesium shader).
+        // MindCloud frame: forward=-z, right=+x, up=+y -> MC right (+x) maps to the YOPO
+        // right direction.
         const yaw = Math.atan2(dir.x, -dir.z);
         const pitch = Math.asin(Math.max(-1, Math.min(1, dir.y)));
         let u = 0.5 + yaw / (2 * Math.PI);
@@ -501,18 +533,23 @@ export class YOPODepthFromPanorama {
         const ratios = [];
         for (const p of calibrationPoints) {
             const rel = this._samplePanoramaDepth(panoDepth, panoWidth, panoHeight, p.dir);
-            // 只信任"近/中距离"标定点: DA360 是单目深度模型, 输出 relative_to_nearest
-            // (场景最近点=1.0)。对高空俯瞰的地面/远景/天空, 1/disp 会输出巨大伪值
-            // (rel 可达数百), 用它算 scale = 真实距离/rel 会把 scale 压到极小(实测
-            // 0.39) → 整幅深度图被缩成"四面近障", YOPO 误判处处是墙, 只敢选急转/
-            // 俯冲的规避轨迹而无法朝目标前进。真实近处物体的 rel 通常 <40, 过滤掉
-            // 巨大 rel 的不可靠远点, 只用可靠近距标定。
+            // Only trust "near / mid-range" calibration points: DA360 is a monocular depth
+            // model that outputs relative_to_nearest (nearest scene point = 1.0). For ground
+            // seen from high altitude, for distant scenery and for the sky, 1/disp yields
+            // huge fake values (rel in the hundreds); computing scale = true distance / rel
+            // from those squeezes the scale to something tiny (0.39 measured) -> the whole
+            // depth map is shrunk into "obstacles on all sides", YOPO mistakes everything for
+            // a wall and only dares to pick sharp-turn / dive avoidance trajectories instead
+            // of flying toward the goal. Real nearby objects usually have rel < 40, so the
+            // unreliable far points with huge rel are filtered out and only reliable close
+            // range points calibrate.
             if (rel !== null && rel > 1e-3 && rel < DA360_REL_MAX) {
                 ratios.push(p.distance / rel);
             }
         }
         if (ratios.length < 2) {
-            // 标定点不足(全被过滤): 回退历史 scale, 避免单点离群主导
+            // Not enough calibration points (all filtered out): fall back to the historical
+            // scale so a single outlier cannot dominate
             return { scale: this.lastScale, confidence: this.scaleConfidence * 0.7 };
         }
         ratios.sort((a, b) => a - b);
@@ -522,14 +559,18 @@ export class YOPODepthFromPanorama {
         let scale = inliers.length > 0
             ? inliers.reduce((a, b) => a + b, 0) / inliers.length
             : median;
-        // 物理合理性钳制: relative_to_nearest 场景最近点通常 0.3~8m, 故 scale 应落在
-        // [DA360_SCALE_MIN, DA360_SCALE_MAX]。超出范围说明标定被 DA360 远点伪值污染,
-        // 回退历史 scale, 防止输出荒谬米制(如 0.39m 的中位数)误导网络。
+        // Physical plausibility clamp: the nearest point of a relative_to_nearest scene is
+        // usually 0.3-8 m, so scale should land in [DA360_SCALE_MIN, DA360_SCALE_MAX].
+        // Landing outside means calibration was polluted by DA360's far-point artefacts, so
+        // fall back to the historical scale and avoid feeding the network absurd metric
+        // values (such as a 0.39 m median).
         if (!Number.isFinite(scale) || scale < DA360_SCALE_MIN || scale > DA360_SCALE_MAX) {
             return { scale: this.lastScale, confidence: this.scaleConfidence * 0.6 };
         }
-        // 时间平滑: 新 scale 与历史混合, 抵抗 DA360 帧间相对深度漂移导致的 scale 跳变
-        // (跳变会让同一场景在"近障/开阔"间反复, 网络决策抖动、飞行不连贯)。
+        // Temporal smoothing: blend the new scale with the history to resist scale jumps
+        // caused by DA360's frame-to-frame relative-depth drift (jumps make the same scene
+        // flip between "near obstacle" and "wide open", making the network's decisions
+        // jittery and the flight incoherent).
         scale = this.lastScale * (1 - DA360_SCALE_SMOOTH) + scale * DA360_SCALE_SMOOTH;
         const confidence = Math.min(1.0, inliers.length / Math.max(3, calibrationPoints.length * 0.8));
         this.lastScale = scale;
@@ -649,17 +690,22 @@ export class YOPODepthFromPanorama {
      *          scale: number, confidence: number}|null>}
      */
     async captureYOPODepthERP(cameraTransform, options = {}) {
-        // ── 预测式深度流水线 (降低延迟) ──
-        // 触发/维持一次后台 DA360 刷新(写入 _depthCache)。本帧只要缓存存在就
-        // 直接复用(零等待), 把 DA360 的 ~1.6s 推理完全"藏"到后台。导航环因此
-        // 以 YOPO 推理频率(而非 DA360+YOPO 串行)运行, 命令重规划 ≈5Hz 而非 ≈0.4Hz。
+        // ── Predictive depth pipeline (lower latency) ──
+        // Trigger / keep alive one background DA360 refresh (which writes _depthCache). As
+        // long as a cache exists, this frame reuses it directly (zero wait), hiding DA360's
+        // ~1.6 s inference completely in the background. The nav loop therefore runs at the
+        // YOPO inference rate (instead of DA360+YOPO serialized), replanning commands at
+        // ~5 Hz instead of ~0.4 Hz.
         //
-        // 关键修正: 前台绝不每帧重复打 DA360。早期实现里前台在缓存过期(>150ms)
-        // 时同步 await 一次真实深度, 而缓存 TTL(150ms) 远小于一个导航周期
-        // (≥ depth+navigate), 导致每个周期都走"过期→同步等"分支, 与后台刷新
-        // 同时打 DA360——双重请求挤占 GPU, 既没省到延迟(深度仍 1654ms), 还把
-        // YOPO 推理拖到 830ms。现在: 只要有过缓存就用缓存; 仅在"从无到有"的首帧
-        // 等一次真实深度, 且复用后台那个请求(不另开第二个)。
+        // Key fix: the foreground must never call DA360 again every frame. In the early
+        // implementation the foreground awaited real depth synchronously whenever the cache
+        // expired (> 150 ms), and the cache TTL (150 ms) was far shorter than one nav cycle
+        // (>= depth+navigate), so every cycle took the "expired -> wait synchronously" branch
+        // and hit DA360 together with the background refresh -- two requests competing for
+        // the GPU, which saved no latency (depth still 1654 ms) and dragged YOPO inference
+        // out to 830 ms. Now: any existing cache is used; only on the very first frame
+        // ("from nothing to something") do we wait once for real depth, and we reuse that
+        // background request instead of opening a second one.
         this._maybeRefreshDepth(cameraTransform, options);
 
         if (this._depthCache) {
@@ -675,8 +721,9 @@ export class YOPODepthFromPanorama {
             return { depth: c.depth, mask: c.mask, encoding: '32FC1', scale: c.scale, confidence: c.confidence, source: 'da360' };
         }
 
-        // 首帧: 缓存尚未建立。等"正在进行的那一次"后台刷新完成即可(单请求,
-        // 不另开第二个), 避免双请求抢 GPU。绝不悬停靠猜。
+        // First frame: the cache is not built yet. Just wait for the one background refresh
+        // already in flight (a single request, do not open a second one) so two requests do
+        // not fight over the GPU. Never hover and guess.
         if (this._refreshing && this._refreshPromise) {
             await this._refreshPromise;
         } else {
@@ -694,11 +741,14 @@ export class YOPODepthFromPanorama {
         return { depth: c.depth, mask: c.mask, encoding: '32FC1', scale: c.scale, confidence: c.confidence, source: 'da360' };
     }
 
-    // 触发后台 DA360 刷新(若当前无刷新在途), 并返回该 Promise 供首帧 await。
-    // 同一时刻最多一个在途请求 → 绝不会对 DA360 发双重请求。
-    // 限频: 距上次刷新启动 < _minRefreshIntervalMs 且已有缓存时跳过(复用缓存),
-    // 让深度环以 navigate 频率运行、DA360 以 <=minInterval 节奏后台更新。
-    // 首帧(无缓存)不跳过, 保证尽快建立深度缓存。
+    // Trigger a background DA360 refresh (if none is in flight) and return the Promise so
+    // the first frame can await it.
+    // At most one request is in flight at a time -> DA360 is never hit twice.
+    // Rate limiting: skip (reuse the cache) when a cache already exists and less than
+    // _minRefreshIntervalMs passed since the last refresh started, so the depth loop runs at
+    // the navigate rate while DA360 updates in the background at <= minInterval.
+    // The first frame (no cache yet) is never skipped, guaranteeing the depth cache is built
+    // as soon as possible.
     _maybeRefreshDepth(cameraTransform, options) {
         if (this._refreshing) return this._refreshPromise;
         const now = performance.now();
@@ -714,8 +764,9 @@ export class YOPODepthFromPanorama {
         return this._refreshPromise;
     }
 
-    // 打 DA360 取原始深度 → ERP 后处理 → 写入 this._depthCache。
-    // 同时承担标定降频逻辑(原 captureYOPODepthERP 内的 Cesium raycast)。
+    // Call DA360 for raw depth -> ERP post-processing -> write into this._depthCache.
+    // Also owns the calibration rate logic (the Cesium raycast that used to live inside
+    // captureYOPODepthERP).
     async _refreshDepth(cameraTransform, options) {
         const width = Math.max(16, options.width || DEFAULT_WIDTH_ERP);
         const height = Math.max(16, options.height || DEFAULT_HEIGHT_ERP);
@@ -741,23 +792,29 @@ export class YOPODepthFromPanorama {
 
         // Recover metric scale via sparse Cesium raycasts (same calibration as
         // the pinhole path). Skipped when calibrate=false or no rays hit.
-        // 每帧标定: 每获取到一张 DA360 深度图就做一次 Cesium raycast 标定, 保证
-        // scale 始终跟随当前深度图(DA360 每帧的全局 shift 会变, 帧间复用旧 scale
-        // 会有米制误差)。raycast 开销已被 pickLocalRay 的 150ms 方向分桶缓存吸收:
-        // DA360 频率 ~22Hz(45ms) < 缓存 TTL(150ms), 4 条标定射线大多命中缓存,
-        // 实际 GPU 拾取很少; 位移/转向后自动落新桶触发真实拾取, 无需额外降频。
-        // 保留位移>1.5m 强制标定作为缓存穿透兜底(纯 CPU 侧判断, 无额外开销)。
+        // Calibrate every frame: run one Cesium raycast calibration for every DA360 depth
+        // map obtained, so the scale always follows the current depth map (DA360's global
+        // shift changes every frame, and reusing an old scale across frames introduces
+        // metric error). The raycast cost is absorbed by pickLocalRay's 150 ms
+        // direction-bucketed cache: the DA360 rate is ~22 Hz (45 ms) < the cache TTL
+        // (150 ms), so most of the 4 calibration rays hit the cache and real GPU picks are
+        // rare; after moving/turning they naturally land in new buckets and trigger real
+        // picks, so no extra downsampling is needed.
+        // Keeping the "moved > 1.5 m forces calibration" rule as a cache-penetration
+        // backstop (a pure CPU-side check, no extra cost).
         let scale = this.lastScale;
         let confidence = this.scaleConfidence;
         this._erpFrameCount += 1;
-        // 每帧标定(只要开启了 calibrate)。
+        // Calibrate every frame (as long as calibrate is enabled).
         const doCalibrate = calibrate;
         if (doCalibrate) {
-            // 自适应 raycast 距离: 高空中固定 20m 的 Cesium raycast 射不到地面/
-            // 远处物体, 命中的标定点不足, 会退回缓存旧 scale, 导致高空深度被
-            // 错误缩放成"四周全近距"的假近障, YOPO 因而持续大幅掉头、无法朝
-            // 目标飞行。根据无人机高度放大 raycast 距离, 使高空也能命中地面/
-            // 远处建筑来正确恢复 metric scale。
+            // Adaptive raycast distance: at high altitude a fixed 20 m Cesium raycast cannot
+            // reach the ground / distant objects, so too few calibration points hit and it
+            // falls back to the cached old scale, wrongly scaling the high-altitude depth
+            // into fake "everything is near" obstacles -- YOPO then keeps making large
+            // turns and cannot fly toward the goal. Scale the raycast distance with the drone
+            // altitude so it still hits the ground / distant buildings at altitude and
+            // recovers the metric scale correctly.
             const droneH = cameraTransform && cameraTransform.position
                 ? (cameraTransform.position.y || 0) : 0;
             const calibMaxDist = Math.max(maxDistance, Math.abs(droneH) * 1.5 + 20);
@@ -770,24 +827,30 @@ export class YOPODepthFromPanorama {
         }
 
         // Resize depth (bilinear) and mask (nearest) to the YOPO ERP resolution.
-        // ── GPU 后处理 (优先): WebGL2 单次 draw 完成 resize + 水平翻转 + mask,
-        //    CPU 只读回。GPU 不可用(无 WebGL2/驱动)时回退 CPU 路径。 ──
+        // ── GPU post-processing (preferred): a single WebGL2 draw does resize + horizontal
+        //    flip + mask, and the CPU only reads the result back. When the GPU is unusable
+        //    (no WebGL2 / driver) fall back to the CPU path. ──
         let depth, mask;
         const gpuRes = this._gpuResizeFlip(rawDepth, rawW, rawH, width, height);
         if (gpuRes) {
-            // GPU 输出缓冲被复用于后续帧, 而缓存(含 depth/mask)会被后续 navigate 复用,
-            // 必须拷贝独立副本, 否则下一帧刷新会覆盖缓存数据。拷贝与 scale 合并为一次遍历。
+            // The GPU output buffers are reused by later frames while the cache (including
+            // depth/mask) is reused by later navigate calls, so independent copies are
+            // mandatory -- otherwise the next refresh would overwrite the cached data. The
+            // copy is merged with the scale pass into a single traversal.
             depth = new Float32Array(gpuRes.depth);
             mask = new Uint8Array(gpuRes.mask);
         } else {
             depth = this._resizeBilinear(rawDepth, rawW, rawH, width, height);
             mask = this._resizeNearestUint8(rawMask, rawW, rawH, width, height);
-            // 方位角旋向 (说明):
-            // 早期版本这里做水平翻转, 因为当时 Cesium 渲染的 RGB ERP 是 MC 系
-            // (左半=右方向), 与 YOPO 锚点(NWU 左半=左方向)镜像。现 RGB 全景已在
-            // panorama-sensor 渲染时统一翻转为 YOPO 视角, DA360 输出的深度布局跟随
-            // 输入 RGB(逐像素对齐), 因此这里不再翻转 —— 深度列序天然与 YOPO 锚点
-            // alpha 递增同向。GPU 路径 shader 同样已去除翻转, 与此一致。
+            // Azimuth handedness (explanation):
+            // Early versions flipped horizontally here, because the Cesium-rendered RGB ERP
+            // was in the MC frame (left half = right direction), which is mirrored relative
+            // to the YOPO anchor (NWU, left half = left direction). The RGB panorama is now
+            // flipped uniformly into the YOPO view at render time in panorama-sensor, and the
+            // DA360 depth layout follows the input RGB (pixel-aligned), so there is no flip
+            // here any more -- the depth column order is naturally codirectional with the
+            // YOPO anchor's increasing alpha. The GPU path's shader likewise dropped the
+            // flip, staying consistent with this.
         }
 
         // Scale to metres. Invalid pixels (NaN/≤0) are kept as NaN — NOT clamped
@@ -798,7 +861,8 @@ export class YOPODepthFromPanorama {
         // distinguish "missing" from "far open space" (which used to be filled as
         // 20m → treated as flyable → crashes into missing/sky regions).
         // The validity mask (channel 1) is built separately and always sent.
-        // (flip 与 scale 合并为一趟遍历, 省去一次 73728 像素的单独遍历。)
+        // (flip and scale are merged into one traversal, saving a separate pass over 73728
+        // pixels.)
         for (let i = 0; i < depth.length; i++) {
             let d = depth[i] * scale;
             depth[i] = Number.isFinite(d) && d > 0 ? Math.min(d, maxDistance) : NaN;

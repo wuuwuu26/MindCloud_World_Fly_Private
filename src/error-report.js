@@ -21,8 +21,9 @@ export function reportUserError(context, error, options = {}) {
     banner.textContent = title;
     banner.style.display = 'block';
 
-    // autoHideMs: 顶部红条 N 毫秒后自动收起(高频瓦片/瞬时网络错误不再一直挂着挡画面),
-    // 仅收起 runtime-error-banner, 不会动 loading-overlay(那个由 init 流程自己管)。
+    // autoHideMs: auto-collapse the top red banner after N ms, so high-frequency tile /
+    // transient network errors no longer stay pinned over the view. Only the
+    // runtime-error-banner is affected; loading-overlay is owned by the init flow.
     if (Number.isFinite(options.autoHideMs) && options.autoHideMs > 0) {
         if (banner._autoHideTimer) clearTimeout(banner._autoHideTimer);
         banner._autoHideTimer = setTimeout(() => {

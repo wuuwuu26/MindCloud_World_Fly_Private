@@ -1,3 +1,9 @@
+<div align="center">
+
+**🌐 [English](README_EN.md) | [简体中文](README.md)**
+
+</div>
+
 # MindCloud World Fly with YOPO
 
 浏览器中的 Google Photorealistic 3D Tiles 穿越机驾驶器，集成 YOPO 端到端神经网络自主导航（3D 避障）。进入页面后选择城市、放置出生点，然后用键盘、手柄或 RC 遥控器飞行，或设置目标点让 YOPO 自主导航。右下角可显示机头 360 ERP 全景 RGB 和 DA360 深度。
@@ -39,7 +45,7 @@ docker logs -f mindcloud-yopo-api
 docker rm -fv google-tiles-flight mindcloud-da360-api mindcloud-yopo-api
 ```
 
-三个容器的名字由 [restart_all.sh](file:///workspace/restart_all.sh) 顶部的 `MAIN_NAME` / `DA360_NAME` / `YOPO_NAME` 定义（与各入口脚本的默认容器名一致）：
+三个容器的名字由 [restart_all.sh](restart_all.sh) 顶部的 `MAIN_NAME` / `DA360_NAME` / `YOPO_NAME` 定义（与各入口脚本的默认容器名一致）：
 
 | 容器名 | 用途 | 定义处 |
 |--------|------|--------|
@@ -372,7 +378,7 @@ YOPO 推理默认走 TensorRT（TRT）加速。将 `epoch50.pth` 固化为 fp16 
 
 ### 目标点选择与导航
 
-1. 飞行模式下，按 **`T`**（或点击右侧 YOPO 面板 **"选取目标点"**）开始设置目标。
+1. 飞行模式下，按 **`T`**（或点击右侧 YOPO 面板 **"Pick Target"**）开始设置目标。
 2. 目标初始位置为无人机当前位置，用**数字键盘**移动（方向以**无人机当前机头朝向**为前方）：
    - `Numpad 8 / 2`：沿机头方向前进 / 后退
    - `Numpad 4 / 6`：垂直机头方向左移 / 右移
@@ -389,7 +395,7 @@ YOPO 推理默认走 TensorRT（TRT）加速。将 `epoch50.pth` 固化为 fp16 
   足迹绕行），用于兜住深度重规划间隙内的突发近障。去往目标的水平通道畅通时该
   几何层自动归零、不干扰导航，详见「避障架构与调参」。
 - 到达目标 2m 内自动标记到达
-- 按 **`X`**（或点击 **"停止导航"**）结束导航
+- 按 **`X`**（或点击 **"Stop Nav"**）结束导航
 
 目标点标记在导航、到达后、停止后均保持可见，直到重新选取或取消目标，因此第二次导航时仍能看到目标位置。
 

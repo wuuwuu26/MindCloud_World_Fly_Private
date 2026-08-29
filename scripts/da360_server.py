@@ -44,8 +44,9 @@ DEFAULT_MODEL = Path(os.environ.get(
     DA360_ROOT / "checkpoints" / f"DA360_{DEFAULT_MODEL_NAME}.pth",
 ))
 PATCH_SIZE = 14
-# 默认全分辨率推理(不压缩)。推理尺寸=checkpoint(1036×518), 深度图再贴回上传尺寸,
-# 与 RGB 全景同分辨率。低端 GPU 可用 DA360_INPUT_SCALE 环境变/--input-scale 降到 0.65 档提速。
+# Full-resolution inference by default (no downscale). Inference size = checkpoint (1036x518),
+# depth map is then pasted back to the upload size and shares the RGB panorama resolution.
+# Low-end GPUs can use DA360_INPUT_SCALE env / --input-scale to drop to the 0.65 tier for speed.
 DEFAULT_INPUT_SCALE = 1.0
 
 
@@ -252,7 +253,7 @@ class DA360Runner:
         net_cls = getattr(networks, checkpoint["net"])
         self.net_cls = net_cls
         self.dinov2_encoder = checkpoint["dinov2_encoder"]
-        # 兼容权重: 与任意尺寸模型共享(卷积/位置编码与尺寸无关, 仅 patch grid 不同)。
+        # Weight compatibility: shared across any-size models (convs/positional encodings are size-agnostic, only the patch grid differs).
         self.checkpoint_state = checkpoint
         self.model_name = Path(model_path).stem
         self.use_amp = self.device.type == "cuda" and env_bool("DA360_AMP", True)
@@ -263,11 +264,11 @@ class DA360Runner:
         self.resample_name = "bicubic" if resample_name == "bicubic" else "bilinear"
         self.resample = Image.Resampling.BICUBIC if resample_name == "bicubic" else Image.Resampling.BILINEAR
         self.lock = threading.Lock()
-        # 按 (width, height) 缓存模型: 推理尺寸 = 上传图原始尺寸(对齐 PATCH_SIZE), 不缩放。
+        # Cache models by (width, height): inference size = upload image's native size (snapped to PATCH_SIZE), no scaling.
         self._models = {}
 
         if os.environ.get("DA360_NO_WARMUP") != "1":
-            # 暖机用 checkpoint 默认尺寸, 确保首个模型已构建。
+            # Warm-up uses the checkpoint default size so the first model gets built.
             warmup_w, warmup_h = resolve_input_size(
                 self.checkpoint_width,
                 self.checkpoint_height,
@@ -308,7 +309,7 @@ class DA360Runner:
 
     def infer(self, image):
         request_width, request_height = image.size
-        # 推理尺寸 = 上传图原始尺寸(对齐到 PATCH_SIZE 的倍数), 全程不缩放。
+        # Inference size = upload image's native size (snapped to a multiple of PATCH_SIZE), never scaled.
         width = max(PATCH_SIZE, round(request_width / PATCH_SIZE) * PATCH_SIZE)
         height = max(PATCH_SIZE, round(request_height / PATCH_SIZE) * PATCH_SIZE)
         model = self._get_model(width, height)
@@ -381,8 +382,9 @@ def create_app(runner):
             colored, depth_scale = depth_to_color(pred_depth)
             timings["color_ms"] = (time.time() - mark) * 1000.0
             mark = time.time()
-            # 模型按上传尺寸对齐到 PATCH_SIZE 倍数推理, pred_depth 可能与上传图相差几像素。
-            # 贴回原始上传尺寸, 保证与 RGB 全景同尺寸/同形状(这一步是无损裁剪/微缩放, 不做整体压缩)。
+            # The model infers at the upload size snapped to a PATCH_SIZE multiple, so pred_depth may
+            # differ from the upload by a few pixels. Paste back to the original upload size to keep the
+            # same dimensions/shape as the RGB panorama (lossless crop/slight resize, not full compression).
             if colored.shape[1] != request_width or colored.shape[0] != request_height:
                 colored = np.asarray(
                     Image.fromarray(colored).resize((request_width, request_height), Image.BILINEAR),

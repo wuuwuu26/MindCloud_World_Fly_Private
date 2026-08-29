@@ -7,7 +7,7 @@
  */
 
 const YOPO_DEFAULT_SERVER = 'http://localhost:5689';
-// YOPO 原版 ERP panorama resolution (192x384, 2 channels: depth + validity mask).
+// Upstream YOPO ERP panorama resolution (192x384, 2 channels: depth + validity mask).
 const YOPO_DEPTH_HEIGHT = 192;
 const YOPO_DEPTH_WIDTH = 384;
 
@@ -20,9 +20,11 @@ export class YOPONavigator {
         this.lastCmd = null;       // {position, velocity, acceleration, yaw, yaw_dot}
         this.inferenceCount = 0;
         this._lastRequestTime = 0;
-        // 重规划(运动指令更新)客户端节流。该值运行时会被 main.js 直接绑定为
-        // yopoDepthFromPanorama._minRefreshIntervalMs (深度刷新间隔), 从而保证"运动指令更新频率
-        // == 深度图像更新频率"。初始设为 5ms (~200Hz) 基准, 实际频率仍受 YOPO 推理/WS 往返下限约束。
+        // Client-side throttle for replanning (motion command updates). At runtime main.js
+        // binds this to yopoDepthFromPanorama._minRefreshIntervalMs (the depth refresh
+        // interval), keeping "motion command update rate == depth image update rate".
+        // 5 ms (~200 Hz) is only the baseline ceiling; the real rate is still bounded by
+        // YOPO inference and the WebSocket round trip.
         this._requestInterval = 5; // ms — must match depth refresh interval (see main.js binding)
 
         // ── WebSocket transport (efficient alternative to per-call HTTP) ──
@@ -131,19 +133,21 @@ export class YOPONavigator {
             position, velocity, orientation,
         };
         // Pack binary frame: [uint32 BE header_len][utf8 json][depth bytes][mask bytes]
-        // 服务端 _ws_handle_message 在 hdr.mask=true 时, 从 off+dsize 之后切出 H*W 字节的
-        // mono8 掩码作为第 2 输入通道, 与 YOPO_360 训练约定(通道0=深度, 通道1=有效性掩码)对齐。
-        // 这是关键修正: 之前 mask:false 导致 YOPO 收不到掩码, 无效/天空像素被当作"远处可飞",
-        // 模型会朝缺失区规划 → 撞墙。
+        // Server-side _ws_handle_message slices H*W mono8 mask bytes right after off+dsize
+        // when hdr.mask=true, feeding them as the 2nd input channel to match the YOPO_360
+        // training convention (channel 0 = depth, channel 1 = validity mask).
+        // Critical fix: the previous mask:false hid the mask from YOPO, so invalid/sky
+        // pixels looked like "far and flyable" and the network planned into them -> crashes.
         const enc = new TextEncoder();
         const hdrBytes = enc.encode(JSON.stringify(header));
         const hdrLen = new Uint8Array(4);
         new DataView(hdrLen.buffer).setUint32(0, hdrBytes.length, false);
-        // 发送 Float32Array 视图本身(而非底层 .buffer): 若 depthData 是某大缓冲区的
-        // view, .buffer 会把整块(可能数 MB)发出去, 而视图只取其 288KB 范围, 传输更小更快。
+        // Send the Float32Array view itself instead of its underlying .buffer: depthData may
+        // be a view into a much larger buffer, and .buffer would ship the whole (multi-MB)
+        // allocation while the view only covers its 288 KB range — smaller and faster.
         const depthBuf = depthData; // 384x192 Float32 = 288KB
         const parts = [hdrLen, hdrBytes, depthBuf];
-        if (hasMask) parts.push(maskData); // mono8 掩码字节, H*W = 73728
+        if (hasMask) parts.push(maskData); // mono8 mask bytes, H*W = 73728
         const blob = new Blob(parts);
         return this._wsSendBinary(header, blob);
     }

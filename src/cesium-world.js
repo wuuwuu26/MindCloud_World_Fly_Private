@@ -40,7 +40,7 @@ const DEFAULT_VIEW = {
 const CESIUM_DRONE_MODEL_URI = 'asset/models/CesiumDrone.glb';
 const HEIGHT_CACHE_TTL_MS = 140;
 const HEIGHT_CACHE_LIMIT = 256;
-const PICK_CACHE_TTL_MS = 150;   // pickLocalRay 方向分桶缓存有效期: 由原 400ms 缩短到 150ms, 建筑流式加载完成后更快重新探测到, 缩小穿模窗口
+const PICK_CACHE_TTL_MS = 150;   // Validity of pickLocalRay's direction-bucketed cache: shortened from 400 ms to 150 ms so that freshly streamed buildings are re-detected sooner, narrowing the clipping window
 const PANORAMA_FACE_DEFS = [
     { name: 'front', dir: { x: 0, y: 0, z: -1 }, up: { x: 0, y: 1, z: 0 } },
     { name: 'right', dir: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 } },
@@ -50,9 +50,11 @@ const PANORAMA_FACE_DEFS = [
     { name: 'down', dir: { x: 0, y: -1, z: 0 }, up: { x: 0, y: 0, z: -1 } },
 ];
 
-// 缓存 URLSearchParams 解析结果: pickLocalRay 缓存 miss 时每帧多次调用,
-// 每次 new URLSearchParams + 正则解析非常昂贵(实测显著拖低帧率)。首次调用解析一次,
-// 后续全部走缓存; 运行时改 URL 参数不生效(正常使用场景不会中途改)。
+// Cache the parsed URLSearchParams result: on a pickLocalRay cache miss it is called many
+// times per frame, and each new URLSearchParams + regex parse is very expensive (measured to
+// drag the frame rate down noticeably). It is parsed once on the first call and every later
+// call hits the cache; changing URL parameters at runtime has no effect (normal usage never
+// changes them mid-session).
 let _urlParamsCache = null;
 function urlParams() {
     if (!_urlParamsCache) _urlParamsCache = new URLSearchParams(window.location.search);
@@ -349,14 +351,18 @@ function getTransformBasisLocal(transform) {
     }
 
     const q = transform.orientation;
-    // 防御: 四元数含 NaN/零向量 → rotateVectorByQuat 产出 NaN, normalize3 对 NaN 长度
-    // 会返回 NaN(而非回退), 进而让 basis 含 NaN 触发 Cesium "position has a NaN component"。
-    // 这里显式回退到单位竖直姿态, 杜绝该路径产生 NaN。
-    // 关键修复: 额外拦截"模长≈0 的非单位四元数"(如数值漂移出的 1e-40 量级退化姿态),
-    // 否则 rotateVectorByQuat 输出近零向量 → normalize3 返回零向量轴 →
-    // Cesium.Quaternion.fromRotationMatrix 对退化矩阵产出 NaN 四元数 →
-    // camera.setView 触发 "position has a NaN component"。之前的所有分量有限性检查
-    // 都拦不住这种退化态, 这是报错反复出现的真正根因。
+    // Guard: a quaternion containing NaN / a zero vector makes rotateVectorByQuat produce
+    // NaN, normalize3 returns NaN for a NaN length (instead of falling back), and a basis
+    // containing NaN then triggers Cesium's "position has a NaN component".
+    // Here we explicitly fall back to the identity upright attitude to keep NaN off this
+    // path entirely.
+    // Key fix: also reject "non-unit quaternions with a norm of ~0" (degenerate attitudes
+    // such as 1e-40-magnitude numerical drift), otherwise rotateVectorByQuat outputs a
+    // near-zero vector -> normalize3 returns a zero-vector axis ->
+    // Cesium.Quaternion.fromRotationMatrix produces a NaN quaternion for the degenerate
+    // matrix -> camera.setView throws "position has a NaN component". All the previous
+    // per-component finiteness checks could not catch this degenerate state, and it was the
+    // real root cause behind the recurring error.
     const qLen = Math.hypot(q.x, q.y, q.z, q.w);
     if (!Number.isFinite(q.x) || !Number.isFinite(q.y) || !Number.isFinite(q.z) || !Number.isFinite(q.w) ||
         qLen < 1e-6 || !Number.isFinite(qLen) ||
@@ -401,9 +407,11 @@ function rotateXZ(v, radians) {
     };
 }
 
-// ---- NaN 防御: transform 含非有限 position/orientation/rotation 即视为非法, 调用方
-// 应跳过, 避免 Cesium 抛 "position has a NaN component" 致命崩溃(根因可能在物理环/避障,
-// 这里兜底保证渲染循环永不因单个坏帧中断, 下一帧状态复位后自动恢复)。
+// ---- NaN guard: a transform with non-finite position/orientation/rotation is invalid and
+// the caller should skip it, preventing Cesium's fatal "position has a NaN component"
+// exception (the root cause may live in the physics loop / avoidance; this backstop
+// guarantees the render loop never breaks on a single bad frame and recovers automatically
+// once the state resets on the next frame).
 function _tfFinite(t) {
     if (!t || !t.position ||
         !Number.isFinite(t.position.x) || !Number.isFinite(t.position.y) || !Number.isFinite(t.position.z) ||
@@ -414,8 +422,9 @@ function _tfFinite(t) {
         !Number.isFinite(t.rotation.x) || !Number.isFinite(t.rotation.y) || !Number.isFinite(t.rotation.z)) {
         return false;
     }
-    // 额外拦截退化四元数(模长≈0): 分量有限但姿态非法, 会让 Cesium 抛
-    // "position has a NaN component"。与 getTransformBasisLocal 的兜底一致。
+    // Additionally reject degenerate quaternions (norm ~0): the components are finite but
+    // the attitude is illegal, and Cesium throws "position has a NaN component". Consistent
+    // with the backstop in getTransformBasisLocal.
     const qLen = Math.hypot(t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w);
     return Number.isFinite(qLen) && qLen >= 1e-6;
 }
@@ -453,31 +462,36 @@ export class CesiumWorld {
             0.88
         );
         this.flightTileSSE = clampNumber(
-            // SSE 与帧率的平衡: 12 会让 8GB 显存被极精细瓦片打满(实测 7.6/8.2GB),
-            // 每帧渲染海量三角形 + 显存换出 -> 帧率个位数。回退到 20(仍比原始 24 精细)。
-            // 可 ?flightTileSse=12(最精细/最卡) 或 ?flightTileSse=24(最流畅) 调整。
+            // Balancing SSE against frame rate: 12 fills 8 GB of VRAM with extremely fine
+            // tiles (measured 7.6/8.2 GB), rendering a huge number of triangles per frame
+            // plus VRAM thrashing -> single-digit frame rate. Fall back to 20 (still finer
+            // than the original 24). Tunable with ?flightTileSse=12 (finest/slowest) or
+            // ?flightTileSse=24 (smoothest).
             urlNumber('flightTileSse', options.flightTileSSE ?? 20),
             8,
             64,
             24
         );
         this.placementTileSSE = clampNumber(
-            // 静态模式 12: 比原始 16 略精细, 负担可控。?placementTileSse=8 还原。
+            // Static mode 12: slightly finer than the original 16, with manageable cost.
+            // Restore with ?placementTileSse=8.
             urlNumber('placementTileSse', options.placementTileSSE ?? 12),
             8,
             64,
             16
         );
         this.tileCacheMb = Math.round(clampNumber(
-            // 缓存 2GB: 4096 在 8GB 显存下会让瓦片缓存占满显存(与地图/深度抢显存)。
+            // Cache 2 GB: 4096 would let the tile cache fill all VRAM on an 8 GB card
+            // (competing with the map / depth for memory).
             urlNumber('tileCacheMb', options.tileCacheMb ?? 2048),
             512,
             8192,
             2048
         ));
         this.panoramaTileSSE = clampNumber(
-            // 全景瓦片 24: 12 让全景采集也打满显存。24 平衡深度精度与显存(原 32)。
-            // 可 ?panoramaTileSse=12 提精度/更卡, ?panoramaTileSse=32 更快。
+            // Panorama tiles 24: 12 makes panorama capture fill VRAM too. 24 balances depth
+            // accuracy against memory (the original was 32). Use ?panoramaTileSse=12 for more
+            // accuracy / slower, ?panoramaTileSse=32 for faster.
             urlNumber('panoramaTileSse', options.panoramaTileSSE ?? 24),
             4,
             128,
@@ -507,7 +521,7 @@ export class CesiumWorld {
         this._tileLoadProcessing = null;
         this._lastPickWarning = 0;
         this._heightSampleCache = new Map();
-        this._pickRayCache = new Map();   // pickLocalRay 方向分桶缓存(键见 pickLocalRay)
+        this._pickRayCache = new Map();   // pickLocalRay direction-bucketed cache (keys described in pickLocalRay)
         this._flightPerformanceMode = false;
     }
 
@@ -643,8 +657,9 @@ export class CesiumWorld {
         const keyPrefix = String(label || 'Google 3D Tiles').toLowerCase().replace(/[^a-z0-9]+/g, '-');
         const onFailure = (error) => {
             const message = error && error.message ? error.message : String(error || 'unknown tile error');
-            // 顶部红条 5s 后自动收起 + 20s 去重, 把"经常报错一直挂着"变成"偶尔闪一下"；
-            // 进度文本(progressCb)只动 loading-overlay, 不影响此 banner。
+            // The top red bar auto-collapses after 5 s and de-duplicates for 20 s, turning
+            // "errors constantly pinned on screen" into "an occasional flash".
+            // The progress text (progressCb) only touches loading-overlay, not this banner.
             reportUserError(`${label} request failed`, error, {
                 key: `${keyPrefix}-failed-${message}`,
                 intervalMs: 20000,
@@ -714,8 +729,9 @@ export class CesiumWorld {
         setIfPresent('loadSiblings', false);
         setIfPresent('skipLevelOfDetail', true);
         setIfPresent('baseScreenSpaceError', flightMode ? 1536 : 1024);
-        // skip 参数回退(配合 SSE=20/12): 过紧的 skip 会让 LOD 频繁跳级, 增加瓦片请求与
-        // 渲染负担。原始 18/12 是参考项目验证过的平衡。
+        // Reverted skip parameters (paired with SSE=20/12): too tight a skip makes LOD jump
+        // levels frequently, adding tile requests and render load. The original 18/12 is the
+        // balance validated by the reference project.
         setIfPresent('skipScreenSpaceErrorFactor', flightMode ? 18 : 12);
         setIfPresent('skipLevels', flightMode ? 2 : 1);
         setIfPresent('immediatelyLoadDesiredLevelOfDetail', false);
@@ -776,26 +792,35 @@ export class CesiumWorld {
                 const queueKnown = pending !== null || processing !== null;
                 const queueIdle = !queueKnown ||
                     ((pending || 0) <= 0 && (processing || 0) <= 0);
-                // 判断就绪: 默认要求整个 tileset 的瓦片全部加载完(tilesLoaded===true)
-                // 且队列空闲 —— 但流式 3D Tiles 在移动/新区域时 LOD 持续更新,
-                // tilesLoaded 可能长时间 false → 全景采集"卡在 1/6"(首 face 永远等不齐)。
-                // lenient=true(全景 viewer 专用)时放宽为"队列空闲且加载流程已启动":
-                // 即观测到过 loadProgress(pending !== null) 且当前无待处理瓦片。
-                // 关键: 不能只看 queueIdle —— 冷启动时 _panoramaTileLoadState 的
-                // pending/processing 初始为 null, queueKnown=false 会误判"空闲", 导致
-                // updateFace 读回空白画面(RGB 加载不出来)。pending !== null 表示瓦片
-                // 加载已真正开始, 此时队列空闲才代表"当前视角可见瓦片已渲染", 缺失的
-                // 远处 LOD 由后续采集补上。兜底: 若 loadProgress 从未触发(pending 恒 null,
-                // 极端情况), 以 tilesLoaded===true 为准(全部瓦片就绪必然可读)。
+                // Readiness check: by default it requires every tile of the whole tileset to
+                // be loaded (tilesLoaded === true) and the queue to be idle -- but with
+                // streaming 3D Tiles, LOD keeps updating while moving / entering new areas,
+                // so tilesLoaded can stay false for a long time -> panorama capture gets
+                // "stuck at 1/6" (the first face never completes).
+                // With lenient=true (for the panorama viewer only) this is relaxed to "queue
+                // idle and the loading flow has started": i.e. loadProgress was observed
+                // (pending !== null) and there are no tiles waiting right now.
+                // Key point: queueIdle alone is not enough -- on a cold start
+                // _panoramaTileLoadState's pending/processing are null, so queueKnown=false
+                // would be misread as "idle" and updateFace would read back a blank frame
+                // (RGB never loads). pending !== null means tile loading has really started,
+                // and only then does an idle queue mean "the tiles visible from the current
+                // view are rendered"; the missing distant LOD is picked up by later captures.
+                // Backstop: if loadProgress never fires (pending always null, extreme case),
+                // fall back to tilesLoaded === true (if all tiles are ready they are readable).
                 const loaded = (lenient
                     ? (queueIdle && (pending !== null || targetTileset.tilesLoaded === true))
                     : (targetTileset.tilesLoaded === true && queueIdle));
 
-                // 仅在"未就绪且队列非空"阶段驱动渲染: 瓦片请求依赖渲染触发, 队列有
-                // 待处理任务时渲染一次推进加载; 队列已空(仅等 tilesLoaded 置位)或已
-                // 就绪后的确认阶段纯检测不渲染, 减少主线程无谓的全景 viewer 渲染开销。
-                // 注意: 队列空但未 loaded 时若不再渲染, 可能永远等不到 tilesLoaded;
-                // 因此每 tick 仍渲染一次, 但节流到 tickMs(≥20ms)而非每检测都渲染。
+                // Only drive rendering while "not ready and the queue is non-empty": tile
+                // requests are triggered by rendering, so render once while tasks are pending
+                // to advance loading; once the queue is empty (just waiting for tilesLoaded to
+                // be set) or in the confirmation phase after becoming ready, do pure checking
+                // without rendering, cutting pointless panorama-viewer render load on the main
+                // thread.
+                // Note: if we stopped rendering while the queue is empty but not loaded,
+                // tilesLoaded might never be reached; so we still render once per tick, but
+                // throttled to tickMs (>= 20 ms) instead of rendering on every check.
                 if (!loaded && renderViewer &&
                     (!renderViewer.isDestroyed || !renderViewer.isDestroyed()) &&
                     renderViewer.scene
@@ -811,7 +836,8 @@ export class CesiumWorld {
                     idleSince = null;
                 }
 
-                // 诊断: 每 2s 打印一次瓦片加载状态, 定位 RGB 出不来是"瓦片未就绪"还是别的
+                // Diagnostics: print the tile loading state every 2 s to tell whether missing
+                // RGB comes from "tiles not ready" or something else
                 if (now - started > 2000 && !this._tileDiagPrinted) {
                     this._tileDiagPrinted = true;
                     console.log(
@@ -823,8 +849,9 @@ export class CesiumWorld {
                 }
 
                 if (now - started >= timeoutMs) return finish(false);
-                // tick 间隔按 quietMs 自适应: 取 max(20, quietMs/3), quietMs=40 -> tick≈20ms;
-                // 默认 180 -> tick=60ms。平衡检测速度与主线程负载。
+                // The tick interval adapts to quietMs: max(20, quietMs/3), so quietMs=40 ->
+                // tick ~= 20 ms; the default 180 -> tick = 60 ms. Balances detection speed
+                // against main-thread load.
                 const tickMs = Math.max(20, Math.min(80, Math.round(quietMs / 3)));
                 window.setTimeout(tick, tickMs);
             };
@@ -1081,8 +1108,9 @@ export class CesiumWorld {
 
     localToCartesian(local) {
         const Cesium = this.Cesium;
-        // 防御: position 含 NaN 时直接返回原点 Cartesian, 避免 Cesium 抛
-        // "position has a NaN component"。上层调用方已尽量拦截, 这里兜底保证绝不崩。
+        // Guard: when position contains NaN, return the origin Cartesian directly so Cesium
+        // does not throw "position has a NaN component". Callers upstream already intercept
+        // as much as they can; this backstop guarantees it never crashes.
         if (!local || !Number.isFinite(local.x) || !Number.isFinite(local.y) || !Number.isFinite(local.z)) {
             return new Cesium.Cartesian3(0, 0, 0);
         }
@@ -1431,21 +1459,32 @@ export class CesiumWorld {
         const dir = normalize3(directionLocal);
         if (Math.hypot(dir.x, dir.y, dir.z) < 1e-6) return null;
 
-        // 方向分桶缓存: 同一束射线(来源量化到 ~0.5m + 方向量化到 ~5°)在 PICK_CACHE_TTL_MS
-        // 内直接命中缓存, 跳过 scene.pickFromRay 这条昂贵的 GPU 拾取。量化到 0.5m 是关键:
-        // 无人机以 5m/s 飞行时每帧仅移动 ~0.08m, 一次探测后约 6 帧内起点仍落在同一桶 → 缓存命中,
-        // 把每帧数十次 GPU 拾取砍掉大半。命中返回的是真实墙体绝对位置(仅"距离"可能陈旧≤0.5m),
-        // 对几何避障/硬碰撞兜底这类安全网足够安全; 主轨迹仍由 YOPO 决定。这是缓解导航帧率低的
-        // 关键手段(瓦片拾取抖动主因), 帧率恢复后第二个小地图 viewer 的渲染也会随之恢复。
-        // forceFresh=true 时(深度标定射线专用)跳过缓存: 每次返回当前真实距离,
-        // 不依赖任何量化桶/TTL。标定要的是"这张深度图对应时刻的真实米制距离",
-        // 距离随无人机移动每帧都在变, 缓存命中会返回陈旧值 → 标定误差。碰撞探测
-        // 等安全网仍走缓存(不传 forceFresh), 不牺牲帧率优化。
+        // Direction-bucketed cache: the same ray (origin quantised to ~0.5 m + direction
+        // quantised to ~5 deg) hits the cache directly within PICK_CACHE_TTL_MS and skips
+        // scene.pickFromRay, that expensive GPU pick. The 0.5 m quantisation is the key:
+        // flying at 5 m/s the drone moves only ~0.08 m per frame, so for about 6 frames after
+        // a probe the origin still lands in the same bucket -> cache hit, cutting most of the
+        // dozens of GPU picks per frame. A hit returns the real absolute wall position (only
+        // the "distance" may be stale by <= 0.5 m), which is safe enough for safety nets such
+        // as geometric avoidance / hard collision backstops; the main trajectory is still
+        // decided by YOPO. This is the key measure against the low navigation frame rate (the
+        // main cause of tile-pick jitter), and once the frame rate recovers the second
+        // minimap viewer's rendering recovers with it.
+        // forceFresh=true (reserved for depth calibration rays) skips the cache: every call
+        // returns the current true distance and does not rely on any quantisation bucket/TTL.
+        // Calibration needs "the true metric distance at the moment this depth map was
+        // captured", and that distance changes every frame as the drone moves, so a cache hit
+        // would return a stale value -> calibration error. Safety nets such as collision
+        // detection still use the cache (they do not pass forceFresh), keeping the frame-rate
+        // optimisation.
         const nowP = performance.now();
-        // 量化粒度 0.5m/36/4: 桶更粗 → 无人机移动/转向时更久落在同一桶, 缓存命中率更高,
-        // 实际触发的 GPU 拾取(scene.pickFromRay 每次都是一次 GPU 渲染+读回)更少,
-        // CPU 调度开销显著下降(这是 CPU 负载高的主因之一)。150ms TTL 保证流式加载后
-        // 仍会重新探测, 漏检窗口可接受。?pickQuant 参数可临时调 (0.25 更密/更慢, 0.75 更疏/更快)。
+        // Quantisation granularity 0.5 m / 36 / 4: coarser buckets -> the drone stays in the
+        // same bucket longer while moving/turning, so the cache hit rate is higher and fewer
+        // real GPU picks happen (every scene.pickFromRay is a GPU render plus read-back),
+        // significantly lowering CPU scheduling overhead (one of the main causes of high CPU
+        // load). The 150 ms TTL guarantees re-probing after tiles stream in, and the
+        // missed-detection window is acceptable. Tune temporarily with ?pickQuant (0.25 =
+        // denser/slower, 0.75 = sparser/faster).
         if (!forceFresh) {
             const quant = urlNumber('pickQuant', 0.5);
             const oKey = `${Math.round(originLocal.x / quant)}:${Math.round(originLocal.y / quant)}:${Math.round(originLocal.z / quant)}`;
@@ -1453,9 +1492,10 @@ export class CesiumWorld {
             const pKey = `${oKey}|${dKey}|${Math.round((maxDistance || 0) * 4)}`;
             const pCached = this._pickRayCache.get(pKey);
             if (pCached && nowP - pCached.time <= PICK_CACHE_TTL_MS) {
-                return pCached.hit;   // 命中: 直接返回缓存结果(含 null/未命中), 零 GPU 拾取
+                return pCached.hit;   // Hit: return the cached result directly (including null / miss), zero GPU picks
             }
-            // 记缓存键, 拾取成功后写入 (仅在缓存路径下写, forceFresh 不污染缓存)
+            // Remember the cache key and write it after a successful pick (only on the cache
+            // path; forceFresh never pollutes the cache)
             this._pickCacheKey = pKey;
         } else {
             this._pickCacheKey = null;
@@ -1815,18 +1855,21 @@ export class CesiumWorld {
         };
         const basis = this.getTransformBasisFixed(transform);
         const destination = this.localToCartesian(transform.position);
-        // ── 无 roll 基准（修顶部左右错位）────────────────────────────
-        // shader 采样 up/down face 时按"世界水平轴"对齐（faceUv 用固定
-        // (-1,0,0)/(0,0,1) 等世界常量，见 sampleYFace）。若渲染 up face 的相机
-        // 带横滚（roll），顶部画面会绕光轴旋转 → equirect 顶部左右错位；无人机
-        // 慢速转弯/侧飞时 roll 明显，快速直线 roll≈0 才不错位。侧面 face
-        // (front/right/back/left) 的 shader 采样同样用世界水平轴对齐，因此
-        // 修复必须作用于【全部 6 个 face】（否则 side 与 up 基准不一致，
-        // 接缝处错位更严重——上一版只改 up/down 正是如此）。
-        // 方案：保留 yaw+pitch（水平环/俯仰跟随机头），把 roll 归零 —— 构造
-        // 无 roll 基准：up' = 世界竖直在 ⊥forward 平面上的投影（即竖直方向
-        // 去掉 forward 分量），right' 由 cross(forward, up') 重算。这样顶部
-        // 始终世界水平，side 面水平环仍跟随机头朝向。
+        // ── Roll-free basis (fixes the left/right misalignment at the top) ──
+        // When the shader samples the up/down faces it aligns them to the "world horizontal
+        // axis" (faceUv uses fixed world constants such as (-1,0,0)/(0,0,1), see
+        // sampleYFace). If the camera rendering the up face carries roll, the top image
+        // rotates about the optical axis -> the equirect top is misaligned left/right; roll is
+        // noticeable during slow turns / sideways flight, and only fast straight flight
+        // (roll ~= 0) avoids it. The side faces (front/right/back/left) are sampled with the
+        // same world-horizontal-axis alignment, so the fix must apply to ALL 6 faces
+        // (otherwise the side and up bases disagree and the seams are misaligned even worse --
+        // exactly what happened in the previous version, which only changed up/down).
+        // Approach: keep yaw + pitch (the horizontal ring / pitch follow the nose) and zero the
+        // roll -- build a roll-free basis: up' = the projection of world vertical onto the
+        // plane perpendicular to forward (i.e. vertical with the forward component removed),
+        // right' is recomputed as cross(forward, up'). That keeps the top always world-level
+        // while the side faces' horizontal ring still follows the nose heading.
         let faceBasis = basis;
         {
             const fwd = basis.forward;
@@ -1841,7 +1884,8 @@ export class CesiumWorld {
             if (upLen > 1e-4) {
                 Cesium.Cartesian3.divideByScalar(upY, upLen, upY);
                 const rightY = Cesium.Cartesian3.cross(fwd, upY, new Cesium.Cartesian3());
-                // 符号对齐: 保证 roll=0(机头水平) 时与原始 right 同向
+                // Sign alignment: keep it codirectional with the original right when roll = 0
+                // (nose level)
                 if (Cesium.Cartesian3.dot(rightY, basis.right) < 0) {
                     Cesium.Cartesian3.negate(rightY, rightY);
                 }
@@ -1855,7 +1899,8 @@ export class CesiumWorld {
                     forward: fwd,
                 };
             }
-            // 机头近乎垂直朝上/朝下(极端俯仰): ⊥forward 竖直分量退化, 回退完整姿态
+            // Nose almost straight up/down (extreme pitch): the vertical component
+            // perpendicular to forward degenerates, fall back to the full attitude
         }
         const faceFovDeg = Math.max(90, Math.min(170, Number(options.faceFovDeg) || 130));
         const topPoleGuardDeg = Math.max(0, Math.min(45, Number(options.topPoleGuardDeg) || 0));
@@ -1897,7 +1942,7 @@ export class CesiumWorld {
                         this._panoramaTileset,
                         this._panoramaTileLoadState,
                         viewer,
-                        true  // lenient: 全景 viewer 放宽为"加载已启动且队列空闲即就绪"(tilesLoaded 常 false)
+                        true  // lenient: the panorama viewer relaxes this to "loading started and the queue is idle" (tilesLoaded is often false)
                     );
                     if (!tilesReady) {
                         return {
@@ -1907,7 +1952,8 @@ export class CesiumWorld {
                             loadingTiles: true,
                             faceIndex,
                             faces: PANORAMA_FACE_DEFS.length,
-                            // 供调用方按本次瓦片超时联动重试间隔(避免写死 900ms 卡住 fast 模式)
+                            // Lets the caller link the retry interval to this tile timeout
+                            // (avoiding a hard-coded 900 ms that would stall fast mode)
                             tileTimeoutMs,
                         };
                     }

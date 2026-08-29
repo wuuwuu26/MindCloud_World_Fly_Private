@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""端到端诊断: 真实 DA360 深度 -> YOPO, 验证是否朝目标(+x)飞行.
+"""End-to-end diagnosis: real DA360 depth -> YOPO, verify it flies toward the goal (+x).
 
-链路: 生成 ERP 全景图 -> DA360 /depth 得相对深度(.npy) -> resize 到 384x192
-       -> 估米(乘 scale) -> 注入 YOPO navigate + control -> 看轨迹方向.
+Pipeline: generate ERP panorama -> DA360 /depth yields relative depth (.npy) -> resize to 384x192
+       -> estimate meters (x scale) -> inject into YOPO navigate + control -> inspect trajectory direction.
 
-注意: 纯合成全景图经 DA360 得到的深度仍是模型推理的真实分布输出,
-      但 scale 是相对值, 需估米。本脚本重在验证"方向"是否朝目标。
+Note: a purely synthetic panorama fed through DA360 still yields the model's true inferred depth distribution,
+       but the scale is relative and must be converted to meters. This script focuses on verifying the
+       "direction" points toward the goal.
 """
 import argparse
 import base64
@@ -19,22 +20,22 @@ from PIL import Image
 
 
 def make_pano(tex_wall_front=True):
-    """生成 ERP 全景: 天空/地面 + 前方建筑, 有清晰左右不对称(左远右近)."""
+    """Generate an ERP panorama: sky/ground + a front building, with clear left/right asymmetry (left far, right near)."""
     W, H = 384, 192
     img = Image.new('RGB', (W, H))
     px = img.load()
     for y in range(H):
         for x in range(W):
             if y < H // 3:
-                c = (110, 150, 215)   # 天空
+                c = (110, 150, 215)   # sky
             elif y < H // 3 * 2:
-                c = (165, 140, 115)   # 中带
+                c = (165, 140, 115)   # mid band
             else:
-                c = (85, 70, 50)      # 地面
-            # 前方建筑(中心)
+                c = (85, 70, 50)      # ground
+            # Building ahead (center)
             if H // 3 < y < H // 3 * 2 and W // 2 - 40 < x < W // 2 + 40:
                 c = (60, 60, 90)
-            # 左侧(图像左半)加一堵近墙 -> 右侧空 -> 网络应朝右/前
+            # Add a near wall on the left half of the image -> right side empty -> network should go right/forward
             if H // 3 < y < H // 3 * 2 and x < 60:
                 c = (40, 45, 70)
             px[x, y] = c
@@ -43,8 +44,8 @@ def make_pano(tex_wall_front=True):
 
 def decode_npy_base64(b64, shape):
     raw = base64.b64decode(b64)
-    npy = raw[8:]  # 跳过 magic+version+header_len 前的 magic6+ver2, 简化(header_len在前)
-    # 正确解析 .npy header
+    npy = raw[8:]  # skip magic6+ver2 before magic+version+header_len, simplified (header_len first)
+    # Properly parse the .npy header
     import struct as st
     off = 6          # magic
     ver_major = raw[off]; ver_minor = raw[off + 1]; off += 2
@@ -68,10 +69,10 @@ def main():
     args = ap.parse_args()
 
     print("=" * 70)
-    print(" 端到端诊断: DA360 真实深度 -> YOPO 是否朝目标(+x)")
+    print(" End-to-end diagnosis: DA360 real depth -> does YOPO fly toward goal (+x)?")
     print("=" * 70)
 
-    # 1. DA360 出深度
+    # 1. DA360 produces depth
     img = make_pano()
     jpg = io.BytesIO(); img.save(jpg, 'JPEG', quality=80); jpg = jpg.getvalue()
     req = urllib.request.Request(args.da360 + "/depth", data=jpg,
@@ -80,25 +81,25 @@ def main():
         payload = json.loads(r.read().decode())
     shape = payload['raw_depth_shape']
     rel = decode_npy_base64(payload['raw_depth'], shape)
-    print(f" DA360 深度 {shape[0]}x{shape[1]} 推理 {payload['timings_ms']['infer_ms']:.0f}ms")
+    print(f" DA360 depth {shape[0]}x{shape[1]} inference {payload['timings_ms']['infer_ms']:.0f}ms")
 
-    # 2. resize 到 384x192 (PIL)
-    # DA360 depth: relative_to_nearest, min≈1.0。用 Image resize (needle 用 numpy, host无)
+    # 2. Resize to 384x192 (PIL)
+    # DA360 depth: relative_to_nearest, min~1.0. Use Image resize (needle uses numpy, not available on host)
     from PIL import Image as I
-    # 深度转 PIL 图像(相对值, 0..), 用相对值缩放到 0..255 便于 resize, 再还原
+    # Convert depth to a PIL image (relative values, 0..), scale to 0..255 for resize, then restore
     minv = min(rel); maxv = max(rel); span = max(maxv - minv, 1e-6)
     g = [[int((rel[r * shape[1] + c] - minv) / span * 255) for c in range(shape[1])] for r in range(shape[0])]
     dmg = I.frombytes('L', (shape[1], shape[0]), bytes(v for row in g for v in row))
     dmg_r = dmg.resize((384, 192), I.BILINEAR)
     dvals = [dmg_r.getpixel((x, y)) for y in range(192) for x in range(384)]
-    # 还原为相对深度
+    # Restore to relative depth
     def unmap(v): return minv + (v / 255.0) * span
     depth_m = [unmap(v) for v in dvals]
-    # 估米: relative_to_nearest 即最近处=1.0, 其他按比例。假设最近≈1m, 线性映射 scale
-    scale = 8.0  # 估算: 相对值 8.0 ~ 8m
+    # Estimate meters: relative_to_nearest means nearest=1.0, others scaled proportionally. Assume nearest~1m, linear map via scale
+    scale = 8.0  # Estimate: relative value 8.0 maps to roughly 8 m
     depth_met = [min(d * scale, 20.0) for d in depth_m]
-    # 地面(下半)相对近 -> 确保地面在合理范围
-    # 3. flip (与前端一致: ERP 列翻转)
+    # Ground (lower half) is relatively near -> keep ground within a reasonable range
+    # 3. flip (consistent with frontend: ERP column flip)
     depth_flip = []
     for r in range(192):
         row = depth_met[r * 384:(r + 1) * 384]
@@ -141,8 +142,8 @@ def main():
     print(f" navigate_yaw={nav.get('yaw',0):.3f}")
     if pts:
         e = pts[-1]
-        print(f" control末点(MC系 x东y上z北)=({e.get('x',0):.2f},{e.get('y',0):.2f},{e.get('z',0):.2f})")
-        print(f" 朝目标(x增大)判断: {'是,朝x前进' if e.get('x',0) > 0.3 else '否,未朝x前进'}")
+        print(f" control end point (MC frame x=east,y=up,z=north)=({e.get('x',0):.2f},{e.get('y',0):.2f},{e.get('z',0):.2f})")
+        print(f" toward-goal (x increasing) check: {'yes, moving +x' if e.get('x',0) > 0.3 else 'no, not moving +x'}")
     print("=" * 70)
     return 0
 

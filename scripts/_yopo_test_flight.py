@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-_yopo_test_flight.py — 无头实测 YOPO 自主导航端到端链路.
-打开飞行页面 (:8080) -> startTilesMode 进入飞行 -> /yopo/set_goal 设目标
--> 激活 drone.yopo_nav -> 监控无人机位置/推理计数/是否到达 -> 截图.
-验证 YOPO_26 是否被真实调用并产生有效轨迹.
+_yopo_test_flight.py — headless end-to-end test of the YOPO autonomous navigation chain.
+Open the flight page (:8080) -> startTilesMode to enter flight -> /yopo/set_goal to set
+the goal -> activate drone.yopo_nav -> monitor drone position / inference count /
+arrival -> screenshot.
+Verifies that YOPO_26 is really invoked and produces a valid trajectory.
 """
 import json
 import time
@@ -12,7 +13,7 @@ from playwright.sync_api import sync_playwright
 
 APP = "http://localhost:8080"
 YOPO = "http://localhost:5689"
-GOAL = {"x": 12.0, "y": 0.0, "z": 3.0}   # ENU 目标 (m), 距原点 12m 东、3m 高
+GOAL = {"x": 12.0, "y": 0.0, "z": 3.0}   # ENU goal (m): 12 m east of the origin, 3 m high
 
 LAUNCH = [
     "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
@@ -45,7 +46,7 @@ def main():
 
         p.goto(APP, wait_until="domcontentloaded", timeout=60000)
 
-        # 1) 等 startTilesMode 函数就绪
+        # 1) Wait until startTilesMode is available
         for _ in range(30):
             try:
                 if p.evaluate("() => typeof window.startTilesMode") == "function":
@@ -54,10 +55,10 @@ def main():
                 pass
             time.sleep(1)
 
-        # 2) 进入 tiles 飞行
+        # 2) Enter tiles flight
         p.evaluate("() => window.startTilesMode && window.startTilesMode()")
 
-        # 3) 等 world / drone / yopoDepthFromPanorama 就绪
+        # 3) Wait until world / drone / yopoDepthFromPanorama are ready
         s = {}
         for _ in range(180):
             try:
@@ -74,13 +75,15 @@ def main():
                           "fm: window.drone.flightMode})")
         print("init drone:", init)
 
-        # 4) 服务端设目标 (前端 navigate 不传 goal, 依赖服务端 set_goal)
+        # 4) Set the goal server-side (the frontend navigate call sends no goal
+        #    and relies on the server-side set_goal)
         print("set_goal resp:", set_goal(GOAL))
         time.sleep(1)
 
-        # 5) 走正式 UI 流程激活导航: 设目标 + 同步下拉框 + 点击开始按钮。
-        #    不能只手动设 flightMode, 否则每帧 drone.readSettings() 会用
-        #    下拉框(flight-mode-select)的值覆盖掉 yopo_nav, 导致导航循环退出。
+        # 5) Activate navigation through the real UI flow: set the goal, sync the
+        #    dropdown and click the start button. Setting flightMode by hand is not
+        #    enough — drone.readSettings() overwrites yopo_nav with the value of the
+        #    flight-mode-select dropdown every frame, which would exit the nav loop.
         p.evaluate("""(g) => {
             window.drone.yopoNavTarget = g;
             var ms = document.getElementById('flight-mode-select');
@@ -93,7 +96,7 @@ def main():
 
         p.screenshot(path="/tmp/yopo_test_start.png")
 
-        # 6) 监控 ~80s
+        # 6) Monitor for ~80 s
         traj = []
         for i in range(40):
             time.sleep(2)
@@ -126,7 +129,7 @@ def main():
         print("inference happened:", any(t[1]["ic"] > 0 for t in traj))
         print("max inference count:", max((t[1]["ic"] for t in traj), default=0))
         print("arrived:", any(t[1]["arr"] for t in traj))
-        # 位移
+        # Displacement
         if traj:
             f = traj[0][1]
             l = traj[-1][1]

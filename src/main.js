@@ -60,7 +60,7 @@ let yopoTargetSelectMode = false;
 let yopoTargetMarker = null;
 let yopoNavInProgress = false;
 let yopoControlInProgress = false;
-let yopoControlTimer = null;  // 独立 50Hz 控制定时器(见 yopoControlTick)
+let yopoControlTimer = null;  // Independent 50 Hz control timer (see yopoControlTick)
 let panoramaWarmupPromise = null;
 let thirdPersonPointer = {
     active: false,
@@ -639,8 +639,9 @@ function moveSpawn(dt) {
     const speed = (fast ? 25 : 6) * dt;
     const heading = world.viewer.camera.heading || 0;
     const fwd = { x: Math.sin(heading), z: Math.cos(heading) };
-    // 右手系: right = cross(fwd, up) = (-cos h, 0, sin h)
-    // 原代码 right=(cos h, 0, -sin h)=cross(up,fwd)=left → D键左移, A键右移(反了)
+    // Right-handed: right = cross(fwd, up) = (-cos h, 0, sin h)
+    // The original code used right=(cos h, 0, -sin h) = cross(up, fwd) = left, which made D
+    // move left and A move right (reversed)
     const right = { x: -Math.cos(heading), z: Math.sin(heading) };
 
     if (placementKeysDown.has('KeyW')) {
@@ -675,35 +676,42 @@ function getCameraHFov(now = performance.now()) {
 }
 
 // ---------------------------------------------------------------------------
-// YOPO 小地图 (真正的 3D Cesium viewer, 完整镜像 placement mode 主 world) —— 原本在
-// 用户未提交的 main.js 里(initYOPOMinimapViewer), 被一次误回退覆盖后按主 world 配置重建。
-// 关键: 小地图 viewer 通过 window.world 访问主世界实例(window.world.token /
-// window.world.assetId / window.world.localToCartesian)。之前黑屏的真正根因是
-// window.world 未被赋值(主 world 用 let 局部变量没有挂到 window)导致 init 第一行就
-// return、viewer 从未创建; 现 main.js 已暴露 window.world = world, 此处可正常初始化。
-// 必须镜像主 world 的 globe:false + requestRenderMode:false(连续渲染), 否则 3D Tiles
-// 流式加载不逐帧绘制 → 恒黑。
+// YOPO minimap (a real 3D Cesium viewer, a full mirror of the placement-mode main world) --
+// it originally lived in the user's uncommitted main.js (initYOPOMinimapViewer) and was
+// overwritten by an accidental revert, so it was rebuilt here from the main world config.
+// Key point: the minimap viewer reaches the main world instance through window.world
+// (window.world.token / window.world.assetId / window.world.localToCartesian). The real root
+// cause of the previous black screen was that window.world was never assigned (the main world
+// was a local `let`, never attached to window), so init returned on its very first line and
+// the viewer was never created; main.js now exposes window.world = world, so this initialises
+// normally.
+// It must mirror the main world's globe:false + requestRenderMode:false (continuous
+// rendering), otherwise streaming 3D Tiles are not drawn frame by frame and it stays black.
 // ---------------------------------------------------------------------------
 let yopoMinimapViewer = null;
-let yopoMinimapWorld = null; // 小地图对应的 CesiumWorld 实例(与主 world 同类, 保证渲染一致)
+let yopoMinimapWorld = null; // The CesiumWorld instance behind the minimap (same class as the main world, so rendering matches)
 let yopoMinimapDroneEntity = null;
 let yopoMinimapTargetEntity = null;
 let _yopoMiniInitPromise = null;
-let _yopoMiniRange = null; // 平滑后的 lookAt 距离(缩放)
-let _yopoMiniHeading = null; // 平滑后的小地图朝向(rad): heading-up 地图, 使无人机前方始终朝上
-let _yopoMiniStop = false; // 小地图更新出错后停用, 避免每帧抛错拖垮主循环
+let _yopoMiniRange = null; // Smoothed lookAt distance (zoom)
+let _yopoMiniHeading = null; // Smoothed minimap orientation (rad): heading-up map, the drone's forward direction always points up
+let _yopoMiniStop = false; // Disabled after a minimap update error, so it does not throw every frame and drag down the main loop
 
 async function initYOPOMinimapViewer() {
-    // window.world 未就绪/已创建则跳过 (根因: 之前 !window.world 恒为真 → 永远 return)
+    // Skip while window.world is not ready / already created (root cause: !window.world used to
+    // be always true -> it always returned)
     if (yopoMinimapViewer || !window.world || !window.world.ready) return;
     const Cesium = window.world.Cesium;
     const host = document.getElementById('yopo-minimap');
     if (!host) return;
-    // HUD 尚未显示时容器尺寸为 0, 延迟到可见后再创建 viewer (每帧重试)
+    // While the HUD is hidden the container has zero size; wait until it is visible before
+    // creating the viewer (retried every frame)
     if (host.clientWidth < 2 || host.clientHeight < 2) return;
 
-    // 沿用主 world 同款 CesiumWorld 类来创建小地图: 与主图(placement mode)渲染完全一致,
-    // globe 隐藏 / Google 3D Tiles 加载 / setOrigin / 相机等内部已正确处理, 不会出现默认地球。
+    // Build the minimap with the same CesiumWorld class as the main world: rendering is
+    // identical to the main view (placement mode), with the globe hidden, Google 3D Tiles
+    // loaded, setOrigin / camera etc. handled correctly internally, so the default globe never
+    // shows up.
     const mini = new CesiumWorld('yopo-minimap', {
         token: window.world.token,
         assetId: window.world.assetId,
@@ -712,15 +720,16 @@ async function initYOPOMinimapViewer() {
     yopoMinimapWorld = mini;
     yopoMinimapViewer = mini.viewer;
     const scene = yopoMinimapViewer.scene;
-    scene.screenSpaceCameraController.enableInputs = false; // 小地图只读, 禁止用户交互
-    // 隐藏主图控件(小地图不需要): 搜索框/主页按钮/帮助等
+    scene.screenSpaceCameraController.enableInputs = false; // Minimap is read-only, no user interaction
+    // Hide the main-view widgets (the minimap does not need them): geocoder / home button /
+    // help etc.
     ['geocoder', 'homeButton', 'navigationHelpButton', 'baseLayerPicker',
      'fullscreenButton', 'timeline', 'animation', 'selectionIndicator', 'infoBox'].forEach((n) => {
         const w = yopoMinimapViewer[n];
         if (w && w.container && w.container.style) w.container.style.display = 'none';
     });
 
-    // 无人机(蓝)/目标(黄) 点, 始终绘制在最前
+    // Drone (blue) / target (yellow) points, always drawn in front of everything
     const alwaysFront = Number.POSITIVE_INFINITY;
     yopoMinimapDroneEntity = yopoMinimapViewer.entities.add({
         point: { pixelSize: 14, color: Cesium.Color.fromCssColorString('#39a0ff'),
@@ -749,10 +758,12 @@ async function initYOPOMinimapViewer() {
         },
     });
 
-    // 初始相机就位: 用主世界 W.localToCartesian 统一坐标框架(小地图帧未随放置模式重设原点, 会错位), 俯视(-89.9°)。
+    // Put the initial camera in place: use the main world's W.localToCartesian to unify the
+    // coordinate frame (the minimap frame's origin is not reset with placement mode, which
+    // would offset it), looking straight down (-89.9 deg).
     const initialLocal = { x: 0, y: 0, z: 0 };
     const initialRange = 500;
-    const initPitch = Cesium.Math.toRadians(-89.9); // 近垂直俯视
+    const initPitch = Cesium.Math.toRadians(-89.9); // Nearly straight-down view
     const initEyeLocal = {
         x: initialLocal.x,
         y: initialLocal.y + initialRange * Math.sin(-initPitch),
@@ -785,8 +796,9 @@ function _getYOPOMinimapTarget() {
 
 function updateYOPOMinimap() {
     if (!window.world || !window.world.ready) return;
-    if (_yopoMiniStop) return; // 之前出错已停用, 不再每帧抛错
-    // 懒初始化: 首次窗口就绪时创建小地图 viewer (异步, 不阻塞主循环)
+    if (_yopoMiniStop) return; // Disabled after an earlier error, do not throw every frame
+    // Lazy init: create the minimap viewer once the window is ready (async, does not block the
+    // main loop)
     if (!yopoMinimapViewer) {
         if (!_yopoMiniInitPromise) {
             _yopoMiniInitPromise = initYOPOMinimapViewer()
@@ -799,7 +811,7 @@ function updateYOPOMinimap() {
     const W = window.world;
     const target = _getYOPOMinimapTarget();
 
-    // Δ 文本
+    // Delta text
     const hText = document.getElementById('yopo-target-height-text');
     const dText = document.getElementById('yopo-target-delta-text');
     if (hText) hText.textContent = target ? `Target altitude y: ${target.y.toFixed(2)}` : 'Target altitude y: --';
@@ -810,7 +822,7 @@ function updateYOPOMinimap() {
         } else dText.textContent = 'Δx/Δy/Δz to target: --';
     }
 
-    // 实体位置 (localToCartesian 把 ENU 本地坐标转成世界 Cartesian3)
+    // Entity positions (localToCartesian converts ENU local coordinates into world Cartesian3)
     try {
         if (drone) {
             yopoMinimapDroneEntity.position = W.localToCartesian({ x: drone.x, y: drone.y, z: drone.z });
@@ -821,27 +833,35 @@ function updateYOPOMinimap() {
             yopoMinimapTargetEntity.show = true;
         } else yopoMinimapTargetEntity.show = false;
 
-        // 相机跟随: 俯视(-89.9°)把无人机钉在画面正中心。统一使用主世界 W.localToCartesian 坐标框架,
-        // 避免小地图 CesiumWorld 实例的原点未随放置模式重设而错位导致无人机跑出画面。
-        // 缩放(range)按 无人机↔目标 距离自适应, 保证目标点始终在视野内。
+        // Camera follow: looking down (-89.9 deg) pins the drone to the centre of the view.
+        // Always use the main world's W.localToCartesian coordinate frame, so the drone does not
+        // drift off screen because the minimap CesiumWorld instance's origin was not reset with
+        // placement mode.
+        // The zoom (range) adapts to the drone <-> target distance so the target point always
+        // stays in view.
         const centerLocal = drone ? { x: drone.x, y: drone.y, z: drone.z } : (target || { x: 0, y: 0, z: 0 });
         const dist = (drone && target) ? Math.hypot(drone.x - target.x, drone.z - target.z) : 0;
-        // range = 相机俯视高度; 基础视野放大(默认 150m 级), 且随 无人机→目标 距离
-        // 自适应: 系数 2.4 + 100m 余量, 保证设置/导航中目标点始终不超出视野。
+        // range = top-down camera height; the base field of view is widened (~150 m by default)
+        // and adapts to the drone -> target distance: a factor of 2.4 plus a 100 m margin, so the
+        // target point never leaves the view while setting it up / navigating.
         const wantRange = Math.max(150, 2.4 * dist + 100);
         if (_yopoMiniRange === null) _yopoMiniRange = wantRange;
-        else _yopoMiniRange += (wantRange - _yopoMiniRange) * 0.2; // 轻度平滑, 缩放及时不突跳
+        else _yopoMiniRange += (wantRange - _yopoMiniRange) * 0.2; // Mild smoothing: zoom reacts in time without jumping
 
         const R = _yopoMiniRange;
-        const pitchRad = Cesium.Math.toRadians(-89.9); // 近垂直俯视
+        const pitchRad = Cesium.Math.toRadians(-89.9); // Nearly straight-down view
 
-        // heading-up 小地图: 无人机"水平面上的机头方向"始终为小地图上方。
-        // 必须用机头方向(而非速度方向): 无人机后退/侧飞时速度方向会与机头相反,
-        // 若用速度方向小地图会反转 180°(后退即翻面)。机头方向取 yopoBodyMoveAxes().fwd
-        // —— 即 local -Z 投影到水平面(ENU), 与数字键 8/2/4/6 移动目标点的 forward 完全一致,
-        // 选点/飞行/前进/后退 方向都一致, 永不反转。
-        // Cesium 俯视 heading=0 时屏幕上方=北(ENU +z), 故 heading = atan2(fwdEast, fwdNorth)。
-        let fwdHx = 0, fwdHz = -1; // 默认朝南(-Z), 与 identity 机头方向一致
+        // Heading-up minimap: the drone's "nose direction projected onto the horizontal plane"
+        // is always the top of the minimap.
+        // It must be the nose direction (not the velocity direction): when the drone moves
+        // backwards / sideways the velocity direction opposes the nose, so using it would flip
+        // the minimap by 180 deg (moving backwards would turn the map over). The nose direction
+        // comes from yopoBodyMoveAxes().fwd -- local -Z projected onto the horizontal plane (ENU),
+        // exactly the same forward used by numpad 8/2/4/6 when moving the target point, so
+        // selection / flight / forward / backward all agree and never flip.
+        // In Cesium's top-down view, heading=0 means screen up = north (ENU +z), hence
+        // heading = atan2(fwdEast, fwdNorth).
+        let fwdHx = 0, fwdHz = -1; // Default faces south (-Z), matching the identity nose direction
         if (drone) {
             const axes = yopoBodyMoveAxes();
             fwdHx = axes.fwd.x;
@@ -851,7 +871,8 @@ function updateYOPOMinimap() {
         if (_yopoMiniHeading === null) {
             _yopoMiniHeading = targetHeading;
         } else {
-            // 角度插值, 处理 ±π 环绕, 平滑跟随转向(不致猛甩)
+            // Angle interpolation with +/-PI wrap handling, smoothly following turns (no
+            // violent swings)
             let d = targetHeading - _yopoMiniHeading;
             while (d > Math.PI) d -= 2 * Math.PI;
             while (d < -Math.PI) d += 2 * Math.PI;
@@ -859,7 +880,8 @@ function updateYOPOMinimap() {
         }
         const headingRad = _yopoMiniHeading;
 
-        // 相机放在无人机正上方(R 高度), 朝正下方俯视 (pitch=-89.9), 等价 lookAt(center, HPR(heading,-89.9,R))
+        // Put the camera straight above the drone (height R) looking straight down
+        // (pitch = -89.9), equivalent to lookAt(center, HPR(heading, -89.9, R))
         const eyeLocal = {
             x: centerLocal.x,
             y: centerLocal.y + R * Math.sin(-pitchRad),
@@ -875,8 +897,9 @@ function updateYOPOMinimap() {
             },
         });
     } catch (e) {
-        // 小地图任一步(Cesium 调用)出错都不应拖垮主循环/飞行; 停掉小地图并把真实错误打到 console
-        console.error('[YOPO minimap] update failed, 已停用小地图以免每帧抛错:', e);
+        // An error in any minimap step (a Cesium call) must not drag down the main loop /
+        // flight; disable the minimap and log the real error to the console
+        console.error('[YOPO minimap] update failed, minimap disabled to avoid throwing every frame:', e);
         _yopoMiniStop = true;
     }
 }
@@ -895,14 +918,16 @@ function gameLoop(now) {
             updateFlight(frameDt);
         }
     } catch (e) {
-        // 飞行/物理更新出错: 与"小地图"分开报告, 便于定位
+        // Errors in the flight/physics update are reported separately from the "minimap" ones,
+        // which makes them easier to locate
         reportUserError('Flight update failed', e, {
             key: 'flight-loop',
             intervalMs: 3000,
         });
     }
     try {
-        // 每帧刷新左下角 YOPO 俯视小地图 (目标点 + 无人机当前位置 + Δ 文本)
+        // Refresh the bottom-left YOPO top-down minimap every frame (target point + drone
+        // position + delta text)
         updateYOPOMinimap();
     } catch (e) {
         reportUserError('Minimap update failed', e, {
@@ -949,14 +974,19 @@ function updateFlight(dt) {
         substeps++;
     }
 
-    // ---- YOPO 导航更新 (深度/控制分离) ----
-    // 模仿 YOPO 原始架构: control_pub(50Hz) + callback_depth(30Hz重规划)
-    //   - 控制环 (~60Hz, 每渲染帧): /yopo/control 推进 ctrl_time, 评估多项式
-    //   - 深度环 (~0.4Hz, 深度到达时): /yopo/navigate 重新推理, 重建多项式
-    // 两者独立, 互不阻塞。控制命令始终新鲜, 无人机不盲飞。
+    // ---- YOPO navigation update (depth / control separation) ----
+    // Mirrors YOPO's original architecture: control_pub (50 Hz) + callback_depth (replan at
+    // 30 Hz)
+    //   - control loop (~60 Hz, every rendered frame): /yopo/control advances ctrl_time and
+    //     evaluates the polynomial
+    //   - depth loop (~0.4 Hz, when depth arrives): /yopo/navigate re-runs inference and
+    //     rebuilds the polynomial
+    // The two are independent and never block each other. Commands always stay fresh and the
+    // drone never flies blind.
     if (drone.flightMode === 'yopo_nav' && drone.yopoNavActive && yopoNavigator && !drone.yopoArrived) {
-        // 运动指令(重规划)的更新频率与深度图像更新频率保持一致: 把 navigate 客户端节流
-        // 直接绑定到深度刷新间隔, 确保两者"符合频率", 且随 _minRefreshIntervalMs 一并提高。
+        // The motion command (replan) update rate matches the depth image update rate: the
+        // navigate client-side throttle is bound straight to the depth refresh interval, so the
+        // two "agree on frequency" and rise together with _minRefreshIntervalMs.
         if (yopoDepthFromPanorama) {
             yopoNavigator._requestInterval = yopoDepthFromPanorama._minRefreshIntervalMs;
         }
@@ -969,14 +999,19 @@ function updateFlight(dt) {
             w: drone.orientation.w,
         };
 
-        // ── 控制环已剥离为独立 50Hz 定时器 yopoControlTick ──
-        // (不再依赖渲染帧率: 主线程被 Cesium 渲染/DA360 上传拖慢时, 每帧调用
-        //  会让 ctrl_time 每帧只推进 20ms 且被 navigate 高频重置, 多项式永远停在
-        //  起点 → 指令速度≈0 → 无人机突然变慢。见 yopoControlTick 注释。)
+        // ── The control loop has been split out into the independent 50 Hz yopoControlTick
+        // timer ──
+        // (It no longer depends on the render frame rate: when the main thread is slowed by
+        //  Cesium rendering / DA360 uploads, calling it every frame would advance ctrl_time by
+        //  only 20 ms per frame and it would be reset constantly by the high-rate navigate
+        //  calls, leaving the polynomial stuck at its start -> commanded speed ~= 0 -> the drone
+        //  suddenly slows down. See the yopoControlTick comment.)
 
-        // ── 深度环 (低频, 深度到达时) ──
-        // 带深度+odom, 运行 YOPO 推理, 重建多项式, 重置 ctrl_time=0。
-        // 一次只允许一个 navigate 请求在途, 与控制环并行不阻塞。
+        // ── Depth loop (low rate, when depth arrives) ──
+        // Sends depth + odom, runs YOPO inference, rebuilds the polynomial and resets
+        // ctrl_time = 0.
+        // Only one navigate request may be in flight at a time; it runs in parallel with the
+        // control loop without blocking it.
         if (!yopoNavInProgress) {
             yopoNavInProgress = true;
             if (drone.yopoInferenceCount === 0) {
@@ -988,7 +1023,8 @@ function updateFlight(dt) {
                     const cameraTransform = drone.getCameraTransform();
                     let depthResult = null;
 
-                    // DA360 估计深度(经稀疏 Cesium 射线标定尺度)喂给 YOPO。
+                    // Feed the DA360 estimated depth (metric scale calibrated by sparse Cesium
+                    // rays) into YOPO.
                     if (yopoDepthFromPanorama) {
                         depthResult = await yopoDepthFromPanorama.captureYOPODepthERP(cameraTransform, {
                             width: 384,   // YOPO_360 ERP image_width  (columns)
@@ -999,8 +1035,10 @@ function updateFlight(dt) {
                     }
                     const t1 = performance.now();
                     if (!depthResult) {
-                        // 深度不可用(DA360 失败/超时): 不回退 Cesium 射线检测。
-                        // 原地悬停等待深度图恢复, 深度环持续低频重试, 直到拿到有效深度。
+                        // Depth unavailable (DA360 failure/timeout): do NOT fall back to Cesium
+                        // raycasting.
+                        // Hover in place and wait for the depth map to come back; the depth loop
+                        // keeps retrying at a low rate until valid depth arrives.
                         if (drone.yopoInferenceCount < 3 || drone.yopoInferenceCount % 30 === 0) {
                             console.warn('YOPO: DA360 depth unavailable, hovering to retry (no Cesium fallback)');
                         }
@@ -1008,7 +1046,7 @@ function updateFlight(dt) {
                         drone.yopoCmdPos = { x: drone.x, y: drone.y, z: drone.z };
                         drone.yopoCmdVel = { x: 0, y: 0, z: 0 };
                         drone.yopoCmdAcc = { x: 0, y: 0, z: 0 };
-                        drone.yopoCmdYaw = drone.yaw * (Math.PI / 180);   // 冻结偏航: 保持当前机头朝向(deg→rad)
+                        drone.yopoCmdYaw = drone.yaw * (Math.PI / 180);   // Freeze yaw: hold the current nose heading (deg -> rad)
                         drone.yopoCmdYawDot = 0;
                         drone.yopoCmdTime = performance.now();
                         yopoNavInProgress = false;
@@ -1016,7 +1054,8 @@ function updateFlight(dt) {
                     }
                     drone.yopoDepthUnavailable = false;
 
-                    // 记录当前深度源(真值射线 / DA360 估计), 由 updateYOPOStatusUI 渲染
+                    // Record the current depth source (ground-truth rays / DA360 estimate);
+                    // rendered by updateYOPOStatusUI
                     drone.yopoDepthSource = depthResult.source;
 
                     if (!depthResult || !depthResult.depth) {
@@ -1034,13 +1073,14 @@ function updateFlight(dt) {
                     const t2 = performance.now();
                     if (drone.yopoInferenceCount < 5 || drone.yopoInferenceCount % 20 === 0) {
                         const navMs = t2 - t1;
-                        const navCached = navMs < 30;   // <30ms 即客户端 33ms 节流命中, 返回缓存命令而非真打服务器
+                        const navCached = navMs < 30;   // < 30 ms means the client-side 33 ms throttle hit and returned a cached command instead of really calling the server
                         console.log(`YOPO timing: depth=${(t1-t0).toFixed(0)}ms navigate=${navMs.toFixed(0)}ms total=${(t2-t0).toFixed(0)}ms${navCached ? ' [nav-cache]' : ''} src=${depthResult.source}`);
                     }
 
                     if (cmd && !cmd.error) {
-                        // navigate 返回 ctrl_time=0 处的命令; 控制环下一帧会推进
-                        // ctrl_time 并覆盖。首次推理后立即更新避免悬停等待。
+                        // navigate returns the command at ctrl_time = 0; the control loop
+                        // advances ctrl_time and overwrites it on the next tick. Updating right
+                        // after the first inference avoids hovering while waiting.
                         drone.yopoCmdPos = cmd.position;
                         drone.yopoCmdVel = cmd.velocity;
                         drone.yopoCmdAcc = cmd.acceleration;
@@ -1159,7 +1199,7 @@ function setupYOPOUI() {
 
     yopoNavigator._uiBound = true;
 
-    // 选取目标点 button: enter keyboard-driven target selection mode.
+    // "Select goal" button: enter keyboard-driven goal selection mode.
     // Target starts at the drone's current position; user moves it with
     // arrow keys and presses Enter to confirm (which also auto-starts nav).
     selectTargetBtn.addEventListener('click', enterYOPOTargetSelectMode);
@@ -1167,48 +1207,53 @@ function setupYOPOUI() {
     // Start Navigation button (manual fallback — normally Enter in select mode)
     startNavBtn.addEventListener('click', async () => {
         if (!drone.yopoNavTarget) {
-            document.getElementById('yopo-status-text').textContent = '状态: 请先设置目标点';
+            document.getElementById('yopo-status-text').textContent = 'Status: set a goal first';
             return;
         }
-        // 确保目标点标记可见: 第一次导航到达/停止后标记可能已被移除,
-        // 直接"开始导航"(第二次导航)时重建标记, 让目标点始终可见。
+        // Keep the goal marker visible: it may have been removed after the first navigation
+        // arrived / stopped, so recreate it when "Start Navigation" is clicked directly (a
+        // second navigation) to keep the goal point always visible.
         createYOPOTargetMarker(
             drone.yopoNavTarget.x, drone.yopoNavTarget.y, drone.yopoNavTarget.z
         );
         // Check YOPO server connectivity
         const status = await yopoNavigator.getStatus();
         if (!status) {
-            document.getElementById('yopo-status-text').textContent = '状态: YOPO服务器未响应 (端口5689)';
+            document.getElementById('yopo-status-text').textContent = 'Status: YOPO server unreachable (port 5689)';
             console.warn('YOPO server not reachable at', yopoNavigator.serverUrl);
             return;
         }
-        // 预热深度缓存: 激活导航前先建立首帧深度, 首个 navigate 立即有深度可用
+        // Prewarm the depth cache: build the first depth frame before activating navigation so
+        // the first navigate has depth available immediately
         prewarmYOPODepth();
         drone.flightMode = 'yopo_nav';
         drone.yopoNavActive = true;
         if (panoramaSensor) {
-            // 导航时不再抑制 UI 深度请求, 这样 da360 depth 窗口会随导航环
-            // 持续刷新(之前 depthSuppress=true 会让窗口冻结在最后一张图)。
+            // While navigating, UI depth requests are no longer suppressed, so the DA360 depth
+            // window keeps refreshing with the nav loop (previously depthSuppress=true froze the
+            // window on the last image).
             panoramaSensor.depthSuppress = false;
-            panoramaSensor.captureIntervalOverride = 50;  // 20Hz 全景请求: capturing 期间 update 会自动跳过, 故请求频率提高
-            // 只会让采集完成(6 face 约 300-600ms)后更快启动下一次; 不额外占主线程。
+            panoramaSensor.captureIntervalOverride = 50;  // 20 Hz panorama requests: update() skips automatically while capturing, so raising the request rate
+            // only starts the next capture sooner after one completes (6 faces take ~300-600 ms); it does not take extra main-thread time.
         }
         drone.yopoArrived = false;
         drone.yopoInferenceCount = 0;
         drone.yopoCmdPos = null;
         drone.yopoCmdVel = null;
         drone.yopoCmdTime = 0;
-        // 启动独立 50Hz 控制定时器: 保证轨迹持续推进(不受渲染帧率拖累)。
-        // 控制环与深度环并行: 深度环重建多项式时会重置 ctrl_time, 但控制环
-        // 每 20ms 推进一次, 即便重规划 3-5Hz, 每次 200-300ms 窗口内也能推进
-        // 轨迹 0.2-0.3s, 指令速度可爬升到巡航水平(实测 ~5-9 m/s)。
+        // Start the independent 50 Hz control timer: it guarantees the trajectory keeps
+        // advancing (independent of the render frame rate).
+        // Control loop and depth loop run in parallel: rebuilding the polynomial in the depth
+        // loop resets ctrl_time, but the control loop advances it every 20 ms, so even with
+        // replanning at 3-5 Hz it still advances 0.2-0.3 s of trajectory within each 200-300 ms
+        // window, letting the commanded speed climb to cruise level (measured ~5-9 m/s).
         if (yopoControlTimer) clearInterval(yopoControlTimer);
         yopoControlTimer = setInterval(yopoControlTick, 20);
         // Sync the flight mode dropdown
         const modeSelect = document.getElementById('flight-mode-select');
         if (modeSelect) modeSelect.value = 'yopo_nav';
-        document.getElementById('yopo-status-text').textContent = '状态: 导航中...';
-        document.getElementById('yopo-start-nav-btn').textContent = '导航中...';
+        document.getElementById('yopo-status-text').textContent = 'Status: navigating...';
+        document.getElementById('yopo-start-nav-btn').textContent = 'Navigating...';
         console.log('YOPO navigation started, goal:', drone.yopoNavTarget);
     });
 
@@ -1220,11 +1265,12 @@ function setupYOPOUI() {
 
 const YOPO_TARGET_STEP = 0.5; // metres per key press
 
-/** 进入目标选择模式 (按钮与 T 快捷键共用)。若正在导航, 先停止导航。 */
+/** Enter target selection mode (shared by the button and the T shortcut). If navigation is
+ * running, stop it first. */
 function enterYOPOTargetSelectMode() {
     if (mode !== 'flight' || !drone) return;
     if (yopoTargetSelectMode) return; // already selecting
-    // 正在导航时先停止, 再进入目标选择
+    // Stop navigating first, then enter target selection
     if (drone.flightMode === 'yopo_nav' && drone.yopoNavActive) {
         stopYOPONavigation();
     }
@@ -1238,14 +1284,15 @@ function enterYOPOTargetSelectMode() {
     document.getElementById('yopo-target-z').value = z.toFixed(1);
     createYOPOTargetMarker(x, y, z);
     document.getElementById('yopo-status-text').textContent =
-        '状态: 目标选择模式 (小键盘8/2/4/6/9/3移动, 5确认, 0取消)';
+        'Status: goal select mode (numpad 8/2/4/6/9/3 move, 5 confirm, 0 cancel)';
     console.log('YOPO target select mode: starting at drone pos', { x, y, z });
 }
 
-/** 停止导航 (按钮与 X 快捷键共用)。停止后保留目标点标记, 便于再次导航对照。 */
+/** Stop navigation (shared by the button and the X shortcut). The goal marker is kept so it
+ * can be compared against on the next navigation. */
 function stopYOPONavigation() {
     if (!drone) return;
-    // 未在导航时: 若有目标选择模式, 直接取消选择
+    // Not navigating: if target selection mode is active, just cancel the selection
     if (drone.flightMode !== 'yopo_nav' || !drone.yopoNavActive) {
         if (yopoTargetSelectMode) cancelYOPOTarget();
         return;
@@ -1257,8 +1304,8 @@ function stopYOPONavigation() {
         yopoControlTimer = null;
     }
     if (panoramaSensor) {
-        panoramaSensor.depthSuppress = false;  // 恢复 UI 深度显示
-        panoramaSensor.captureIntervalOverride = 0;  // 恢复 60Hz 全景
+        panoramaSensor.depthSuppress = false;  // Restore the UI depth display
+        panoramaSensor.captureIntervalOverride = 0;  // Restore the 60 Hz panorama
     }
     drone.yopoCmdPos = null;
     drone.yopoCmdVel = null;
@@ -1267,26 +1314,35 @@ function stopYOPONavigation() {
     drone.flightMode = 'simpleflight';
     const modeSelect = document.getElementById('flight-mode-select');
     if (modeSelect) modeSelect.value = 'simpleflight';
-    document.getElementById('yopo-status-text').textContent = '状态: 已停止';
-    document.getElementById('yopo-start-nav-btn').textContent = '开始导航';
-    // 保留目标点标记: 让"设置的目标点"在停止后依然可见, 再次导航时对照
+    document.getElementById('yopo-status-text').textContent = 'Status: stopped';
+    document.getElementById('yopo-start-nav-btn').textContent = 'Start Navigation';
+    // Keep the goal marker: the "selected goal" stays visible after stopping, so it can be
+    // compared against when navigating again
 }
 
-// ── YOPO 控制环 (独立 50Hz 定时器) ───────────────────────────────
-// 控制环从渲染帧循环中剥离的原因:
-//   浏览器主线程被 Cesium 3D Tiles 渲染 / 全景捕获 / DA360 上传拖累时, 帧率可能
-//   低至 3-10fps。若控制环依赖"每渲染帧", 则:
-//     - 控制环频率 = 帧率 (3-10Hz), ctrl_time 每帧只推进 20ms(服务端 cap)
-//     - 深度环 navigate() 每次重建多项式都会重置 ctrl_time=0 (~3Hz)
-//     → ctrl_time 永远停在轨迹起点附近, 多项式速度≈起点速度(循环依赖真实速度)
-//     → 指令速度趋近 0, 无人机"突然变得很慢, 连 1m/s 都不到"。
-// 独立 20ms 定时器保证控制环 50Hz 稳定推进 ctrl_time: 即便 navigate 每 200-300ms
-// 重置一次, 窗口内也能推进 0.2-0.3s 轨迹, 指令速度爬升到巡航水平(实测 5-9 m/s)。
-// 与深度环并行(互不阻塞), 控制命令始终新鲜, 无人机不盲飞。
+// ── YOPO control loop (independent 50 Hz timer) ─────────────────
+// Why the control loop was split out of the render frame loop:
+//   When the browser main thread is dragged down by Cesium 3D Tiles rendering / panorama
+//   capture / DA360 uploads, the frame rate can drop to 3-10 fps. If the control loop depended
+//   on "every rendered frame", then:
+//     - control loop frequency = frame rate (3-10 Hz), ctrl_time advances only 20 ms per frame
+//       (server-side cap)
+//     - the depth loop's navigate() resets ctrl_time = 0 every time it rebuilds the polynomial
+//       (~3 Hz)
+//     -> ctrl_time stays forever near the trajectory start, and the polynomial speed ~= the
+//        start speed (the loop depends on the true speed)
+//     -> the commanded speed approaches 0 and the drone "suddenly becomes very slow, not even
+//        1 m/s".
+// An independent 20 ms timer guarantees the control loop advances ctrl_time steadily at 50 Hz:
+// even if navigate resets it every 200-300 ms, it still advances 0.2-0.3 s of trajectory within
+// that window, and the commanded speed climbs to cruise level (measured 5-9 m/s).
+// It runs in parallel with the depth loop (neither blocks the other), commands always stay
+// fresh, and the drone never flies blind.
 function yopoControlTick() {
     if (!drone || !yopoNavigator) return;
     if (drone.flightMode !== 'yopo_nav' || !drone.yopoNavActive || drone.yopoArrived) return;
-    // 深度不可用(悬停等待)期间跳过, 保留悬停指令, 防止旧多项式覆盖。
+    // Skip while depth is unavailable (hovering and waiting) to keep the hover command and stop
+    // an old polynomial from overwriting it.
     if (drone.yopoDepthUnavailable || yopoControlInProgress) return;
     const pos = { x: drone.x, y: drone.y, z: drone.z };
     const vel = { x: drone.vx, y: drone.vy, z: drone.vz };
@@ -1311,21 +1367,22 @@ function yopoControlTick() {
                 drone.yopoDistToGoal = cmd.dist_to_goal || 0;
             }
         } catch (e) {
-            // 高频调用, 静默处理瞬态错误
+            // Called at a high rate, swallow transient errors silently
         }
         yopoControlInProgress = false;
     })();
 }
 
 /**
- * 以无人机当前朝向计算机头方向(fwd)与其右侧(right)在水平面的单位向量,
- * 供目标点移动使用: 8/2 沿机头前后, 4/6 沿机头左右(以当前朝向为前方)。
- * 机头方向取 local -Z(world.getForwardLocal)投影到水平面; 右侧向量
- * right = forward × up = (-fwd.z, 0, fwd.x), 与 cesium-world 中
- * getTransformBasisLocal 的 local +X 约定一致。
+ * Compute, from the drone's current heading, the unit vectors of its nose direction (fwd) and
+ * its right side (right) on the horizontal plane, used to move the goal point: 8/2 move along
+ * the nose, 4/6 move left/right relative to it (the current heading is "forward").
+ * The nose direction is local -Z (world.getForwardLocal) projected onto the horizontal plane;
+ * the right vector is right = forward x up = (-fwd.z, 0, fwd.x), consistent with the local +X
+ * convention of getTransformBasisLocal in cesium-world.
  */
 function yopoBodyMoveAxes() {
-    let fwd = { x: 0, z: -1 }; // 默认朝南(-Z), 与 identity 机头方向一致
+    let fwd = { x: 0, z: -1 }; // Default faces south (-Z), matching the identity nose direction
     if (world && drone && typeof world.getForwardLocal === 'function') {
         const f = world.getForwardLocal(drone.getBodyTransform());
         const fl = Math.hypot(f.x, f.z);
@@ -1389,14 +1446,15 @@ function removeYOPOTargetMarker() {
  * keydown listener (capture phase) when yopoTargetSelectMode is active.
  * Uses the numeric keypad (e.code so NumLock state does not matter).
  *
- *   Numpad 8/2 = forward/back (沿当前无人机机头方向)
- *   Numpad 4/6 = left/right   (垂直机头方向左/右)
+ *   Numpad 8/2 = forward/back (along the drone's current nose direction)
+ *   Numpad 4/6 = left/right   (perpendicular to the nose)
  *   Numpad 9/3 = up/down      (+y/-y)
  *   Numpad 5   = confirm (start navigation)
  *   Numpad 0   = cancel
  *
- * 8/2、4/6 每次按键都以无人机当前朝向为基准(而非世界固定方向),
- * 这样即使无人机转了向, 小键盘移动目标的方向始终与机头一致。
+ * Every 8/2 and 4/6 press is relative to the drone's current heading (not to a fixed world
+ * direction), so even after the drone turns, the numpad always moves the goal consistently with
+ * the nose direction.
  *
  * Returns true if the event was consumed.
  */
@@ -1415,18 +1473,18 @@ function handleYOPOKeyDown(e) {
     if (!Number.isFinite(y)) y = 2;
     if (!Number.isFinite(z)) z = 0;
 
-    // 以无人机当前朝向计算前向/右向(水平面单位向量)
+    // Compute forward / right (horizontal-plane unit vectors) from the drone's current heading
     const { fwd, right } = yopoBodyMoveAxes();
 
     let consumed = true;
     switch (e.code) {
-        case 'Numpad8': case 'NumpadArrowUp': // 机头方向前进
+        case 'Numpad8': case 'NumpadArrowUp': // Forward along the nose
             x += fwd.x * YOPO_TARGET_STEP; z += fwd.z * YOPO_TARGET_STEP; break;
-        case 'Numpad2': case 'NumpadArrowDown': // 机头反方向后退
+        case 'Numpad2': case 'NumpadArrowDown': // Backward along the nose
             x -= fwd.x * YOPO_TARGET_STEP; z -= fwd.z * YOPO_TARGET_STEP; break;
-        case 'Numpad4': case 'NumpadArrowLeft': // 机头方向右侧 (与原始 4=左 交换)
+        case 'Numpad4': case 'NumpadArrowLeft': // Right of the nose (swapped with the original 4 = left)
             x += right.x * YOPO_TARGET_STEP; z += right.z * YOPO_TARGET_STEP; break;
-        case 'Numpad6': case 'NumpadArrowRight': // 机头方向左侧 (与原始 6=右 交换)
+        case 'Numpad6': case 'NumpadArrowRight': // Left of the nose (swapped with the original 6 = right)
             x -= right.x * YOPO_TARGET_STEP; z -= right.z * YOPO_TARGET_STEP; break;
         case 'Numpad9':                          y += YOPO_TARGET_STEP; break; // up    (+y)
         case 'Numpad3':                          y -= YOPO_TARGET_STEP; break; // down  (-y)
@@ -1454,9 +1512,10 @@ function handleYOPOKeyDown(e) {
     return consumed;
 }
 
-/** 预热 YOPO 深度缓存: 导航激活前后台触发一次 DA360 深度捕获, 让首个 navigate
- * 立即可用缓存深度, 消除"导航开始后无人机原地悬停数秒"的等待。
- * 返回 true 表示已触发预热; false 表示条件不满足(未触发)。 */
+/** Prewarm the YOPO depth cache: trigger one DA360 depth capture in the background before
+ * navigation activates, so the first navigate can use cached depth immediately and the
+ * "drone hovers in place for several seconds after navigation starts" wait disappears.
+ * Returns true if the prewarm was triggered, false if the preconditions were not met. */
 function prewarmYOPODepth() {
     if (!drone || !yopoDepthFromPanorama || typeof drone.getCameraTransform !== 'function') return false;
     try {
@@ -1467,7 +1526,8 @@ function prewarmYOPODepth() {
         }).then(() => {
             console.log('[prewarm] YOPO depth cache warmed');
         }).catch((e) => {
-            // 预热失败不阻塞导航: 深度环首帧仍会正常重试
+            // A prewarm failure must not block navigation: the depth loop's first frame still
+            // retries normally
             console.warn('[prewarm] YOPO depth prewarm failed:', e);
         });
         return true;
@@ -1480,58 +1540,64 @@ function prewarmYOPODepth() {
 async function confirmYOPOTarget(x, y, z) {
     yopoTargetSelectMode = false;
     document.getElementById('yopo-status-text').textContent =
-        `状态: 设置目标 (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})...`;
+        `Status: setting goal (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})...`;
 
-    // 并行预热深度缓存: DA360 推理慢(~1.6s), 若等导航激活后才取首帧深度, 无人机
-    // 会在原地悬停数秒("徘徊很久才行动")。提前在 setGoal/getStatus 期间后台触发
-    // 一次深度捕获, 首个 navigate 即可复用缓存立即出指令。
+    // Prewarm the depth cache in parallel: DA360 inference is slow (~1.6 s), so if we waited
+    // for navigation to be active before fetching the first depth frame, the drone would hover
+    // in place for several seconds ("wandering for a long time before acting"). Triggering one
+    // capture in the background during setGoal/getStatus lets the first navigate reuse the cache
+    // and emit a command immediately.
     const prewarm = prewarmYOPODepth();
 
     const ok = await yopoNavigator.setGoal(x, y, z);
     if (!ok) {
-        document.getElementById('yopo-status-text').textContent = '状态: 设置目标失败';
+        document.getElementById('yopo-status-text').textContent = 'Status: failed to set goal';
         removeYOPOTargetMarker();
         return;
     }
     drone.yopoNavTarget = { x, y, z };
-    // 确保目标点标记存在(覆盖"标记曾被移除"的情况, 第二次导航时仍可见)
+    // Make sure the goal marker exists (covers the case where it was removed earlier, so it is
+    // still visible on the second navigation)
     createYOPOTargetMarker(x, y, z);
 
     // Check YOPO server connectivity before starting
     const status = await yopoNavigator.getStatus();
     if (!status) {
         document.getElementById('yopo-status-text').textContent =
-            '状态: YOPO服务器未响应 (端口5689)';
+            'Status: YOPO server unreachable (port 5689)';
         console.warn('YOPO server not reachable at', yopoNavigator.serverUrl);
         removeYOPOTargetMarker();
         return;
     }
 
-    // 导航即将激活, 确保预热已触发(上面若因条件不满足未触发, 这里补一次)
+    // Navigation is about to activate; make sure the prewarm was triggered (retry here if the
+    // preconditions were not met above)
     if (prewarm !== true) prewarmYOPODepth();
 
     // Auto-start navigation
     drone.flightMode = 'yopo_nav';
     drone.yopoNavActive = true;
                 if (panoramaSensor) {
-                    // 不要把 depthSuppress 设回 true: 否则 UI 的 da360 深度窗口会
-                    // 在设目标点起开始导航后冻结(见 setGoal 路径同理)。保持 false
-                    // 让窗口随导航环的 RGB 刷新持续请求深度图。
+                    // Do NOT set depthSuppress back to true: that would freeze the UI DA360
+                    // depth window once navigation starts from goal selection (same reason as in
+                    // the setGoal path). Keep it false so the window keeps requesting depth maps
+                    // as the nav loop refreshes RGB.
                     panoramaSensor.depthSuppress = false;
-                    panoramaSensor.captureIntervalOverride = 50;  // 20Hz 全景请求(理由同上)
+                    panoramaSensor.captureIntervalOverride = 50;  // 20 Hz panorama requests (same reason as above)
                 }
     drone.yopoArrived = false;
     drone.yopoInferenceCount = 0;
     drone.yopoCmdPos = null;
     drone.yopoCmdVel = null;
     drone.yopoCmdTime = 0;
-    // 启动独立 50Hz 控制定时器(与手动"开始导航"按钮路径一致)
+    // Start the independent 50 Hz control timer (same path as the manual "Start Navigation"
+    // button)
     if (yopoControlTimer) clearInterval(yopoControlTimer);
     yopoControlTimer = setInterval(yopoControlTick, 20);
     const modeSelect = document.getElementById('flight-mode-select');
     if (modeSelect) modeSelect.value = 'yopo_nav';
-    document.getElementById('yopo-status-text').textContent = '状态: 导航中...';
-    document.getElementById('yopo-start-nav-btn').textContent = '导航中...';
+    document.getElementById('yopo-status-text').textContent = 'Status: navigating...';
+    document.getElementById('yopo-start-nav-btn').textContent = 'Navigating...';
     console.log('YOPO navigation started, goal:', drone.yopoNavTarget);
 }
 
@@ -1543,7 +1609,7 @@ function cancelYOPOTarget() {
     drone.yopoNavTarget = null;
     drone.yopoDistToGoal = 0;
     removeYOPOTargetMarker();
-    document.getElementById('yopo-status-text').textContent = '状态: 已取消目标选择';
+    document.getElementById('yopo-status-text').textContent = 'Status: goal selection cancelled';
 }
 
 function updateYOPOStatusUI() {
@@ -1554,16 +1620,17 @@ function updateYOPOStatusUI() {
     const avoidEl = document.getElementById('yopo-avoid-text');
     if (!statusEl || !distEl || !countEl) return;
 
-    // 深度源状态: 显示当前用的是真值射线还是 DA360 估计深度(便于 A/B 对照)
+    // Depth source status: shows whether ground-truth rays or DA360 estimated depth is in use
+    // (handy for A/B comparison)
     if (avoidEl) {
         const src = drone.yopoDepthSource;
         let srcHtml;
         if (src === 'true') {
-            srcHtml = '深度: <span style="color:#9fb5ff">真值(射线)</span>';
+            srcHtml = 'Depth: <span style="color:#9fb5ff">ground truth (rays)</span>';
         } else if (src === 'da360') {
-            srcHtml = '深度: <span style="color:#cfe">DA360</span>';
+            srcHtml = 'Depth: <span style="color:#cfe">DA360</span>';
         } else {
-            srcHtml = '深度: --';
+            srcHtml = 'Depth: --';
         }
         avoidEl.innerHTML = srcHtml;
     }
@@ -1576,22 +1643,22 @@ function updateYOPOStatusUI() {
         const tz = parseFloat(document.getElementById('yopo-target-z')?.value);
         if (Number.isFinite(tx) && Number.isFinite(ty) && Number.isFinite(tz)) {
             const dx = tx - drone.x, dy = ty - drone.y, dz = tz - drone.z;
-            distEl.textContent = `到目标距离: ${Math.sqrt(dx*dx+dy*dy+dz*dz).toFixed(2)} m`;
+            distEl.textContent = `Distance to goal: ${Math.sqrt(dx*dx+dy*dy+dz*dz).toFixed(2)} m`;
         }
         return;
     }
 
     if (drone.flightMode === 'yopo_nav' && drone.yopoNavActive) {
         if (drone.yopoArrived) {
-            statusEl.textContent = '状态: 已到达目标 ✓';
-            // 到达后保留目标点标记: 让"设置的目标点"始终可见,
-            // 第二次导航时也能看到目标位置。标记仅在重新选取/
-            // 取消选择时移除。
+            statusEl.textContent = 'Status: goal reached ✓';
+            // Keep the goal marker after arrival: the "selected goal" always stays visible, so
+            // the goal position is visible on the second navigation too. The marker is only
+            // removed when reselecting / cancelling the goal.
         } else {
-            statusEl.textContent = '状态: 导航中...';
+            statusEl.textContent = 'Status: navigating...';
         }
-        distEl.textContent = `到目标距离: ${drone.yopoDistToGoal.toFixed(2)} m`;
-        countEl.textContent = `推理计数: ${drone.yopoInferenceCount}`;
+        distEl.textContent = `Distance to goal: ${drone.yopoDistToGoal.toFixed(2)} m`;
+        countEl.textContent = `Inference count: ${drone.yopoInferenceCount}`;
     }
 }
 
@@ -1795,13 +1862,13 @@ function setupKeyboard() {
             }
         } else if (mode === 'flight') {
             if (e.code === 'KeyT') {
-                // T: 开始设置导航目标点 (进入目标选择模式)
+                // T: start setting the navigation goal (enter goal selection mode)
                 e.preventDefault();
                 enterYOPOTargetSelectMode();
                 return;
             }
             if (e.code === 'KeyX') {
-                // X: 停止导航
+                // X: stop navigation
                 e.preventDefault();
                 stopYOPONavigation();
                 return;

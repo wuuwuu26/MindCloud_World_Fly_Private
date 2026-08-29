@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""诊断: 注入"真实风格"ERP 深度到运行中的 YOPO server, 观察是否朝目标飞行.
+"""Diagnosis: inject "realistic-style" ERP depth into a running YOPO server and observe whether it flies toward the goal.
 
-YOPO 网络对"全 20m 平坦 / 单墙带"这类分布外极简输入会退化选悬停原语。
-本脚本构造更接近 DA360 真实输出的 ERP 深度分布:
-  - 图像下半 (地面) 深度由近到远渐变 (0.5~8m)
-  - 图像上半 (天空) 远 (20m)
-  - 目标正前方 (列中心) 可选一面近墙 (测避障)
-验证 server 在此类输入下是否输出"朝目标(+x)"的轨迹, 以及 yaw 是否收敛。
+The YOPO network degrades to a hover primitive on out-of-distribution trivial inputs like
+"all-flat-20m / single wall strip". This script builds an ERP depth distribution closer to
+DA360's real output:
+  - lower half of image (ground): depth ramps near->far (0.5~8m)
+  - upper half of image (sky): far (20m)
+  - an optional near wall straight ahead (column center) to test avoidance
+It verifies the server outputs a "toward-goal (+x)" trajectory under such input, and whether yaw converges.
 
-用法: python3 scripts/diag_nav.py [--url http://127.0.0.1:5689]
+Usage: python3 scripts/diag_nav.py [--url http://127.0.0.1:5689]
 """
 import argparse
 import base64
@@ -22,19 +23,19 @@ MAX_D = 20.0
 
 
 def build_erp(wall_front=False, wall_left=False):
-    """构造接近真实 ERP 的深度 (米):
-      深度值 d = 3.0 + 0.08*(row - H/2) ... 简化: 地面(下半)近, 天空(上半)远.
-      再叠加前方/左侧近墙.
+    """Build a depth (meters) close to a real ERP:
+      depth d = 3.0 + 0.08*(row - H/2) ... simplified: ground (lower half) near, sky (upper half) far.
+      Then overlay a near wall in front / on the left.
     """
     depth = [[0.0] * W for _ in range(H)]
     for r in range(H):
-        # 上半(天空): 远 20m; 下半(地面): 越靠下越近 (越接近下方地面)
-        v = r / (H - 1)            # 0=顶 1=底
+        # Upper half (sky): far 20m; lower half (ground): nearer toward the bottom (closer to the ground below)
+        v = r / (H - 1)            # 0=top 1=bottom
         if v < 0.5:
-            # 天空: 距离远
+            # sky: far distance
             d = 20.0
         else:
-            # 地面: 从水平线(0.5)近距 1m 到正下方渐近 0.3m
+            # ground: from ~1m near the horizon (0.5) down to ~0.3m directly below
             d = 1.2 - 0.7 * (v - 0.5) * 2.0
             d = max(0.3, d)
         for c in range(W):
@@ -44,7 +45,7 @@ def build_erp(wall_front=False, wall_left=False):
         col = int(round(W / 2 + alpha_deg * W / (2 * math.pi)))
         col = max(0, min(W - 1, col))
         hc = int(round(half * W / (2 * math.pi)))
-        # 覆盖中段俯仰 (-30°~+10°) 区域
+        # Cover the mid pitch (-30°~+10°) region
         r0, r1 = int(H * 0.35), int(H * 0.65)
         for dr in range(r0, r1):
             for dc in range(-hc, hc + 1):
@@ -79,12 +80,12 @@ def main():
     args = ap.parse_args()
     url = args.url
     print("=" * 66)
-    print(" 诊断: 真实风格 ERP 深度 -> YOPO 是否朝目标(+x)飞行")
+    print(" Diagnosis: realistic-style ERP depth -> does YOPO fly toward goal (+x)?")
     print("=" * 66)
     cases = [
-        ('open(空旷)',      build_erp()),
-        ('wall_front(前墙)', build_erp(wall_front=True)),
-        ('wall_left(左墙)',  build_erp(wall_left=True)),
+        ('open(flat)',      build_erp()),
+        ('wall_front(front wall)', build_erp(wall_front=True)),
+        ('wall_left(left wall)',  build_erp(wall_left=True)),
     ]
     for label, depth in cases:
         call(url, '/yopo/set_goal', {'x': 10, 'y': 0, 'z': 0})
@@ -99,7 +100,7 @@ def main():
         if 'error' in nav:
             print(f"[{label}] ERROR: {nav['error']}")
             continue
-        # control 推进 traj_time
+        # advance control for traj_time
         pts = []
         for _ in range(110):
             c = call(url, '/yopo/control', {
@@ -111,11 +112,11 @@ def main():
                 pts.append(c.get('position', {}))
         if pts:
             end = pts[-1]
-            # ROS 系: x=前, y=左 (host 直接输出就是 MC 系? server 返回 MC 系)
+            # ROS frame: x=forward, y=left (host output is already MC frame? server returns MC frame)
             print(f"[{label}] navigate_yaw={nav.get('yaw',0):.3f}  "
-                  f"control末点=({end.get('x',0):.2f},{end.get('y',0):.2f},{end.get('z',0):.2f})")
+                  f"control_end=({end.get('x',0):.2f},{end.get('y',0):.2f},{end.get('z',0):.2f})")
         else:
-            print(f"[{label}] 无 control 输出")
+            print(f"[{label}] no control output")
     print("=" * 66)
 
 
