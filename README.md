@@ -125,51 +125,23 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 
 构建上下文排除了 `.git`、`node_modules`、`__pycache__`、`*.pyc`、`scene/*`、`asset/gate-paths/*.tmp`、`third_party/DA360`，避免把无关/大文件打进镜像。
 
-## 启动主进程
-默认
-```bash
-./launch.sh
-```
+## DA360 深度估计
 
-打开：
-
-```text
-http://127.0.0.1:8080
-```
-
-可选常用方式：
-
-```bash
-# 端口被占用时
-PORT=18081 ./launch.sh
-
-# Docker 后台运行
-./launch.sh --detach
-
-# 停止后台容器
-docker rm -f google-tiles-flight
-
-# 本地开发模式
-./launch.sh --local
-```
-
-## 启动副进程（DA360 深度估计）
-
-首次使用前下载模型并启动推理服务：
+DA360 深度服务由 `restart_all.sh` 一键拉起（默认使用 `large` 模型）。但因 DA360 源码与权重未纳入仓库（`.gitignore` / `.dockerignore`），**首次运行前需先下载模型与源码**，否则 `restart_all.sh` 的 DA360 构建会失败：
 
 ```bash
 python3 -m pip install --user gdown
 ./scripts/download_da360_model.sh
-./scripts/start_da360_api.sh
-
-# 心跳包自检：curl http://127.0.0.1:5688/health
+# 脚本会将权重放到 third_party/DA360/checkpoints/DA360_large.pth
 ```
 
-停止感知的推理服务，只保留主进程飞飞机的功能的话就关掉这个docker就行了：
+启动后心跳自检：
 
-```bash
-docker rm -f mindcloud-da360-api
+```text
+curl http://127.0.0.1:5688/health
 ```
+
+停止或重启 DA360 直接重跑 `restart_all.sh`（或 `docker rm -f mindcloud-da360-api`）。
 
 注意，默认使用 `DA360_large`，DA360 服务端以实时优先的 `DA360_INPUT_SCALE=0.65` 推理，模型输入约为 `672x336`；在 RTX 4070 Ti SUPER 上真实 HTTP 端到端约 70 ms。右下角 RGB 全景仍保持原始显示尺寸；只有发送给 DA360 的深度请求会单独缩小，前端默认按 `da360UploadScale=0.2` 上传约 `134x67` 的 JPEG，再由服务端 resize 到模型输入尺寸。前端默认 `depthMs=100`，推理未完成时不会堆积请求。
 
@@ -322,6 +294,8 @@ http://127.0.0.1:8080/?da360UploadWidth=672
 > **调参建议**：绕行不够果断请调大 `yopoAvoidTanGain`（力度）；**不要**调 `yopoAvoidRepRange`——它同时是 `goalClear` 的畅通判定阈值，调大会让"路径其实畅通"时误判被挡。改前端参数后需浏览器 **Ctrl+F5 强刷**生效。
 
 ### 启动 YOPO 后端
+
+> YOPO 避障后端由 `restart_all.sh` 一键拉起（默认启用 TensorRT + `YOPO_VELOCITY=15`）；以下命令仅在需要手动单独构建/启动时使用。
 
 ```bash
 # 首次需要构建 Docker 镜像
