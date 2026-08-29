@@ -172,8 +172,9 @@ YOPO_SPEED_CAP = float(_env_scap) if _env_scap else 15.0
 # 轨迹末端延伸(秒): 修"提速→减速→再加速"锯齿的关键。
 # 网络轨迹时长远短于深度环重规划间隔 —— 实测 traj_time ≈ 0.67s
 #   (radio_range=5 → sgm_time=2*5/6=1.667s; YOPO_VELOCITY=15 → ratio=2.5 →
-#    segment_time=1.667/2.5=0.667s), 叠加 CTRL_TIME_SCALE=2 后仅 0.33s 真实时间
-#   就把整条轨迹走完。此后 ctrl_time 被 poly_duration 封顶 → 指令冻结在轨迹末端。
+#    segment_time=1.667/2.5=0.667s), 而 CTRL_TIME_SCALE=1 时也就 0.67s 真实时间
+#   把整条轨迹走完(早先 SCALE=2 时更短, 仅 0.33s)。此后 ctrl_time 被 poly_duration
+#   封顶 → 指令冻结在轨迹末端。
 # 客户端控制器为 velTarget = clamp(1.0*posErr, ±15) + ffVel (drone.js),
 #   冻结后 cmdPos 停止前进、cmdVel 仍是末端速度 → 无人机冲过冻结点 → posErr 转负
 #   → 被位置环拉回减速 → 下次重规划再加速 = 锯齿的真因。
@@ -186,10 +187,11 @@ _env_extend = os.environ.get("YOPO_TRAJ_EXTEND_S")
 TRAJ_EXTEND_S = float(_env_extend) if _env_extend else 2.0
 
 # 反应预算限速器已移除: 不再按重规划间隔动态限速。无人机按网络规划速度飞行,
-# ctrl_time 推进倍率直接取 CTRL_TIME_SCALE(默认 1.0, 可用 YOPO_CTRL_TIME_SCALE 快进,
-# 见 restart_all.sh 当前设为 2 → 实际会飞 2x 网络速度)。避障改由 ① 网络 argmin(score)
-# 选出的轨迹 ② 客户端几何反应式势场 ③ DA360 深度安全壳 三层共同保证; 指令 PVA
-# 仍按同一 rate 缩放以保持自洽(见 _compute_command)。
+# ctrl_time 推进倍率直接取 CTRL_TIME_SCALE(默认 1.0; restart_all.sh 当前设为 1,
+# 即完全跟随网络规划速度 vel_max≈15 → 巡航 ≤15 m/s。设 >1 可"快进"飞出 vel_max×SCALE,
+# 但会被 YOPO_SPEED_CAP=15 硬钳回, 且规划位置超前、无人机持续追迹滞后, 故保持 1)。
+# 避障改由 ① 网络 argmin(score) 选出的轨迹 ② 客户端几何反应式势场 两层共同保证;
+# 指令 PVA 仍按同一 rate 缩放以保持自洽(见 _compute_command)。
 def _env_float(name, default):
     """读取环境变量浮点值; 空串/非法值回退 default (避免 float("") 崩溃)。"""
     raw = os.environ.get(name)
@@ -202,7 +204,7 @@ def _env_float(name, default):
 
 
 # (反应预算限速器常量 REACT_*/GOVERNOR_MIN_V/ALLOW_TIMESCALE_BOOST 已移除:
-#  无人机直接按 CTRL_TIME_SCALE 飞行, 避障交由网络 + 客户端几何/DA360 安全壳。)
+#  无人机直接按 CTRL_TIME_SCALE 飞行, 避障交由网络 + 客户端几何反应式势场。)
 
 ARRIVE_THRESHOLD = 2.0  # metres (matches test_yopo_ros.py L132: norm(pos-goal)<2.0)
 # 终点接管距离: 网络在 goal_length (2*radio_range=10m) 内目标观测被按 goal_length
@@ -298,8 +300,8 @@ class YOPOServer:
         # (终点接管必须停在目标点, 外推会冲过目标)。
         self.poly_extend = False
         # ctrl_time 的有效推进倍率(纯时间重参数化的 rate): 反应预算限速器已移除,
-        # 直接取 CTRL_TIME_SCALE(默认 1.0, 可用 YOPO_CTRL_TIME_SCALE 开启"快进";
-        # restart_all.sh 当前设为 2 → 飞 2x 网络速度)。
+        # 直接取 CTRL_TIME_SCALE(默认 1.0; restart_all.sh 当前设为 1 → 完全跟随网络
+        # 规划速度。设 >1 会被 YOPO_SPEED_CAP=15 钳回且规划超前, 故保持 1)。
         self._time_rate = CTRL_TIME_SCALE
         self.last_control_time = None
         self.last_fwd_obstacle_dist = None
