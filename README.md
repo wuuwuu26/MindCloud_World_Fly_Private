@@ -26,7 +26,7 @@ cd MindCloud_World_Fly_Private
 ```bash
 # 常用方式
 ./restart_all.sh --detach          # Docker 后台运行
-docker rm -f google-tiles-flight mindcloud-da360-api mindcloud-yopo-api   # 停止全部后台容器
+docker rm -fv google-tiles-flight mindcloud-da360-api mindcloud-yopo-api   # 停止全部后台容器（与 restart_all.sh 一致，带 -v 清理匿名卷）
 ```
 
 三个容器的名字由 [restart_all.sh](file:///workspace/restart_all.sh) 顶部的 `MAIN_NAME` / `DA360_NAME` / `YOPO_NAME` 定义（与各入口脚本的默认容器名一致）：
@@ -141,7 +141,7 @@ python3 -m pip install --user gdown
 curl http://127.0.0.1:5688/health
 ```
 
-停止或重启 DA360 直接重跑 `restart_all.sh`（或 `docker rm -f mindcloud-da360-api`）。
+停止或重启 DA360 直接重跑 `restart_all.sh`（或 `docker rm -fv mindcloud-da360-api`）。
 
 注意，默认使用 `DA360_large`，DA360 服务端以 `DA360_INPUT_SCALE=0.65` 推理，模型输入约为 `672x336`（checkpoint 基准 1036×518 × 0.65，按 patch=14 取整）。全景 RGB 默认 `768x384` ERP，右下角显示即此原始尺寸；只有发送给 DA360 的深度请求会单独缩小，前端默认按 `da360UploadScale=0.5` 上传 `384x192` 的 JPEG，再由服务端 resize 到 `672x336` 模型输入、推理后将深度贴回 `384x192`（恰好等于 YOPO 消费的 384×192 ERP 深度）。前端默认 `depthMs=33`（深度请求最小间隔 ≈30Hz），推理未完成时不会堆积请求；单帧 HTTP 端到端约 70 ms 量级（依 GPU 不同而变化）。
 
