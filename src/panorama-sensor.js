@@ -67,15 +67,15 @@ const PANORAMA_FRAME_DELAY_MS = urlNumber('panoFrameDelayMs', 8, 0, 1000);
 // up by the next capture, which greatly improves the RGB refresh rate.
 // If LOD inconsistency ghosts appear (blurry distant detail), restore with
 // ?panoFaceTileTimeoutMs=600/900.
-const PANORAMA_FACE_TILE_TIMEOUT_MS = urlNumber('panoFaceTileTimeoutMs', 200, 0, 10000);
+const PANORAMA_FACE_TILE_TIMEOUT_MS = urlNumber('panoFaceTileTimeoutMs', 140, 0, 10000);
 // Tile timeout while navigating (fast): 150 ms -- loading the first face's tiles (cold
 // start / moving into a new area) usually takes 200-500 ms, so 60 ms almost always timed
 // out -> it triggered the fast loadingTiles failure plus a deferred retry, which actually
 // got it "stuck at 1/6". 150 ms is the balance: enough time for the main tiles to arrive
 // (avoiding the 1/6 stall) without waiting for the full LOD and slowing capturing down.
 // Tunable via ?panoFaceTileTimeoutMsFast=60/300.
-const PANORAMA_FACE_TILE_TIMEOUT_MS_FAST = urlNumber('panoFaceTileTimeoutMsFast', 150, 0, 10000);
-const PANORAMA_FACE_TILE_QUIET_MS = urlNumber('panoFaceTileQuietMs', 40, 0, 5000);
+const PANORAMA_FACE_TILE_TIMEOUT_MS_FAST = urlNumber('panoFaceTileTimeoutMsFast', 110, 0, 10000);
+const PANORAMA_FACE_TILE_QUIET_MS = urlNumber('panoFaceTileQuietMs', 20, 0, 5000);
 // Incremental reuse parameters: when the camera moves < 2.5 m, the orientation cosine is
 // > 0.995 (~5.7 deg) and less than 800 ms passed since the last successful capture, reuse
 // the previous panorama frame directly (without re-rendering 6 faces) so capturing does not
