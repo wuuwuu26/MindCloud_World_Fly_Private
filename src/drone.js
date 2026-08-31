@@ -442,12 +442,37 @@ export class Drone {
                                           // the drone more willing to judge the upper layer flyable,
                                           // increasing clearing willingness (0.32 -> 0.38; vUpDist
                                           // still prevents ceiling hits)
-        this.yopoAvoidStop = 4.0;     // Safety clearance (m): the distance the drone keeps off obstacles.
-                                      // RAISED 2.5 -> 4.0: holds further off walls / buildings per request.
+        this.yopoAvoidStop = 6.0;     // Safety clearance (m): the distance the drone keeps off obstacles.
+                                      // RAISED 2.5 -> 4.0 -> 6.0: holds further off walls / buildings per
+                                      // request (still clipping obstacles with too little margin).
                                       // Drives the forward brake standoff (2888), the down/up clearance
                                       // (2844/2862), the vGo underfoot trigger (3224) and the vertical-
                                       // clearing block distance (3137) -- all scale with it, so the whole
                                       // avoidance envelope widens consistently rather than in one spot.
+                                      // Trade-off: a larger standoff shrinks dGate (= dAhead - standoff -
+                                      // reactionDist), so vCloseMax drops and the drone is vetted to a
+                                      // lower speed near obstacles. That is the intended direction here
+                                      // (safety over cruise speed). Do NOT widen yopoAvoidRepRange to
+                                      // compensate: it doubles as goalClear's clearThresh, so raising it
+                                      // makes "corridor is clear" too strict and detours on open paths.
+        this.yopoAvoidVGoThresh = 7.0; // Underfoot / overhead blocking threshold for the horizontal vGo
+                                      // detour (m). Deliberately DECOUPLED from yopoAvoidStop (it used to
+                                      // be yopoAvoidStop + 3.0, i.e. 7.0 at stop = 4.0) and pinned to that
+                                      // value while standoff grows: when flying over a rooftop the
+                                      // "straight below" ray necessarily hits the building, so a threshold
+                                      // that rises with the standoff triggers pointless lateral detours
+                                      // even though the path overhead is perfectly clear.
+        // Corridor guard (m): goalClear can be released via the "commanded heading" corridor (dCmd)
+        // even when the "bearing to the goal" corridor (dPath) contains an obstacle. That escape hatch
+        // is needed (it stops a detour from self-locking), but it must never release when the goal
+        // corridor is blocked CLOSE IN -- with brake = 1 and rep = 0 the drone then charges straight
+        // into an obstacle only a couple of metres away on its own goal bearing. Inside this distance
+        // the dCmd escape hatch is refused and goalClear stays false, so the ray brake / repulsion stay
+        // armed. Sized so the drone can always stop: at the 12 m/s cruise floor with
+        // yopoAvoidBrakeDecel 7.5 the stopping distance is v^2/(2a) ~= 9.6 m, so 12 m leaves margin.
+        // Obstacles beyond the goal are excluded upstream (dd < reach <= distGoalH), so a goal sitting
+        // against a wall still releases normally and the drone can still arrive.
+        this.yopoCorridorGuardDist = 12.0;
         // Range (m) and floor of the "progressive soft brake": the soft brake only provides the
         // comfortable "slower as you get closer" deceleration; the physical stop is handled by the
         // kinematic brake (v_safe = sqrt(2ad)). Previously the soft brake reused repRange (20 m)
@@ -1713,6 +1738,20 @@ export class Drone {
             // reported at the goal. Letting the PD settle avoids the discontinuity entirely.
             const vh = Math.sqrt(velTargetX*velTargetX + velTargetZ*velTargetZ);
             if (vh > holdMaxV) { const s = holdMaxV / vh; velTargetX *= s; velTargetZ *= s; }
+            // Arrival deadband: once latched AND the horizontal error is inside the deadband, stop
+            // correcting X/Z so the PD is not forever chasing a sub-decimetre residual (the "small
+            // jitter / sway at the goal" symptom), and the drone actually halts instead of an
+            // endless exponential creep. A gentle altitude trim still creeps it onto the goal height.
+            // Gated on the stable yopoArrived latch and on HORIZONTAL distance only (not 3D), so a
+            // small vertical residual cannot chatter the band in/out (that chatter was the X-axis
+            // jitter previously seen at the goal). Inside the deadband velTarget=0 makes the velocity
+            // loop actively brake, i.e. the drone stops promptly rather than drifting.
+            if (this.yopoArrived && gErrH < this.yopoArriveDeadbandM) {
+                velTargetX = 0;
+                velTargetZ = 0;
+                velTargetY = clamp(this.yopoArriveAltKp * gErrY,
+                                   -this.yopoArriveAltVMax, this.yopoArriveAltVMax);
+            }
             // Slew-rate limit (see yopoTakeoverSlew): cap how fast the velocity target may CHANGE.
             // The steady approach speed is a slow ramp that never reaches this cap, while a
             // frame-to-frame step does -- and a step in the velocity target is a step in the
@@ -2081,7 +2120,26 @@ export class Drone {
         // target exists, top up the projection of velTarget onto the goal bearing so the drone keeps
         // at least yopoCruiseMinSpd of forward progress. Avoidance keeps priority: any time
         // braking/gated is true this is skipped, so obstacles still stop the drone.
-        if (!braking && !gated && this.yopoNavTarget && !this.yopoArrived) {
+        //
+        // IMPORTANT: `braking` reads the ASYMMETRIC-FILTERED brake, which RATCHETS -- a tightening
+        // brake is applied instantly while a release only ramps back with tau = 0.30 s. So on a
+        // goalClear verdict that flips Y/N, the filtered brake can sit far below 0.95 for seconds
+        // (`braking` stays true) even while the corridor is genuinely open. Measured: goalClear=Y,
+        // brake=0.26, |vel| falling 2.0 -> 1.5 with the goal 58 m away -- this floor was disabled
+        // the whole time and the drone crawled.
+        // So the floor ALSO trusts `goalClear`, the RAW verdict computed before that filter: it is
+        // exactly the authority the avoidance layer itself uses (on goalClear it already zeroes
+        // rep/tan and releases the closing-speed gate to vCloseMax = Infinity). Obstacles still win
+        // because a blocked corridor makes goalClear false and the floor stands down.
+        const goalOpen = !!(avoid && avoid.goalClear);
+        // Only ever active on the CRUISE branch (following the network trajectory). It must stay out
+        // of: (a) stick override -- it would shove 12 m/s toward the goal while the pilot is flying;
+        // (b) the final-approach hold -- that PD is deliberately decelerating onto the goal, and
+        // forcing a 12 m/s floor would overshoot straight past it (exactly the arrival sway that was
+        // just fixed with the deadband).
+        const inCruise = !stickActive && !yopoNearGoalHold;
+        if (inCruise && (goalOpen || (!braking && !gated)) &&
+            this.yopoNavTarget && !this.yopoArrived) {
             const ngx = this.yopoNavTarget.x - this.x;
             const ngz = this.yopoNavTarget.z - this.z;
             const ngd = Math.hypot(ngx, ngz);
@@ -3127,7 +3185,17 @@ export class Drone {
             // Honouring either corridor keeps the useful half of the original rule: when the goal
             // line itself is blocked, the commanded corridor still has to be open before
             // avoidance stands down, so a genuine detour is not weakened.
-            if (dPath > reach || dCmd > reach) goalClear = true;
+            // EXCEPT close in: the dCmd escape hatch must not release when the bearing-to-goal
+            // corridor (dPath) holds an obstacle within yopoCorridorGuardDist. Releasing there sets
+            // brake = 1 and zeroes rep/tan, and since the drone is in fact driven ALONG the goal
+            // bearing (the network, and the cruise floor below), it charges straight into an obstacle
+            // that is only a few metres away -- the "an obstacle is right there but it still flies
+            // into it" symptom. Refusing the escape hatch keeps the ray brake and the repulsion armed
+            // so the drone slows and goes around instead.
+            // Obstacles beyond the goal were already excluded (dd < reach <= distGoalH), so this only
+            // ever bites on something genuinely between the drone and the goal.
+            const pathBlockedClose = dPath < this.yopoCorridorGuardDist;
+            if (dPath > reach || (dCmd > reach && !pathBlockedClose)) goalClear = true;
         }
 
         // ---- Vertical obstacle clearing (A) ----
@@ -3232,11 +3300,12 @@ export class Drone {
         // a gap above/below"; this targets "blocked straight below / above" -- the only safe path
         // is a horizontal detour. Not enabled inside nearGoal (handed to the PD convergence).
         let vGoX = 0, vGoZ = 0;
-        const vGoThresh = this.yopoAvoidStop + 3.0;   // ~4.1 m: a near obstacle underfoot / overhead counts as blocking
-                                                      // Do not raise it: when flying over a rooftop at altitude the
-                                                      // "straight below" ray necessarily hits the building, so a
-                                                      // larger threshold causes pointless lateral detours while "the
-                                                      // way to the goal is clear".
+        const vGoThresh = this.yopoAvoidVGoThresh;    // A near obstacle underfoot / overhead counts as blocking.
+                                                      // PINNED, no longer yopoAvoidStop + 3.0: when flying over a
+                                                      // rooftop at altitude the "straight below" ray necessarily hits
+                                                      // the building, so a threshold that grows with the standoff
+                                                      // causes pointless lateral detours while "the way to the goal
+                                                      // is clear".
                                                       // vGo is now gated by goalClear (see the condition below): no
                                                       // lateral push while the corridor is clear.
         const gg = Number.isFinite(p.groundGap) ? p.groundGap : R;
