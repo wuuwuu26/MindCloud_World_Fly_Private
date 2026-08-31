@@ -182,6 +182,19 @@ export class Drone {
         // ceiling beyond ~12.5 m, so the cruise still reaches the boundary at full speed and the
         // ramp only bites inside the last ~12 m.
         this.yopoFinalApproachDist = 12.0;
+        // Minimum cruise-speed floor toward the goal (m/s): the YOPO network frequently parks its
+        // local waypoint (cmdPos ~= drone, cmdVel ~= 0) even when the global goal is tens of metres
+        // away, which collapses velTarget to a crawl (~1-2 m/s) and the drone barely progresses.
+        // When the ray-avoidance layer is NOT actively braking/gating (i.e. the path is clear) and a
+        // live, distant nav target exists, this guarantees at least yopoCruiseMinSpd of forward
+        // progress along the goal bearing, so the drone keeps cruising instead of crawling. Avoidance
+        // always wins: if braking/gated is true this floor is skipped entirely, so an obstacle still
+        // stops the drone. Only the projection of velTarget onto the goal direction is topped up, so a
+        // healthy network command (already fast) is never throttled down to this value.
+        this.yopoCruiseMinSpd = 12.0;
+        // Below this distance to the nav target the cruise floor is disabled, so the final-approach
+        // PD convergence and the network's own slow-down near the goal are respected.
+        this.yopoCruiseMinDist = 5.0;
         // Distance within which the potential field drops its normal-direction REPULSION (m).
         // Kept EQUAL to yopoFinalApproachDist (12 m): the two zones stay merged, so there is no
         // intermediate band -- inside the takeover zone the PD drives straight at the goal and
@@ -2060,6 +2073,31 @@ export class Drone {
         }
         velTargetY = clamp(velTargetY, -this.droneMaxVSpeed, this.droneMaxVSpeed);
         this.targetGroundSpeed = Math.sqrt(velTargetX * velTargetX + velTargetZ * velTargetZ);
+
+        // ── Minimum cruise-speed floor toward the goal (network under-drive guard) ──
+        // The YOPO network often parks its local waypoint (cmdPos ~= drone, cmdVel ~= 0) while the
+        // global goal is still far away, collapsing velTarget to a crawl (~1-2 m/s). When the
+        // ray-avoidance layer is NOT actively braking/gating (path is clear) and a live, distant nav
+        // target exists, top up the projection of velTarget onto the goal bearing so the drone keeps
+        // at least yopoCruiseMinSpd of forward progress. Avoidance keeps priority: any time
+        // braking/gated is true this is skipped, so obstacles still stop the drone.
+        if (!braking && !gated && this.yopoNavTarget && !this.yopoArrived) {
+            const ngx = this.yopoNavTarget.x - this.x;
+            const ngz = this.yopoNavTarget.z - this.z;
+            const ngd = Math.hypot(ngx, ngz);
+            if (ngd > this.yopoCruiseMinDist) {
+                const vNowH = Math.hypot(velTargetX, velTargetZ);
+                if (vNowH < this.yopoCruiseMinSpd) {
+                    const gdx = ngx / ngd, gdz = ngz / ngd;
+                    const proj = velTargetX * gdx + velTargetZ * gdz;
+                    const need = this.yopoCruiseMinSpd - proj;
+                    if (need > 0) {
+                        velTargetX += need * gdx;
+                        velTargetZ += need * gdz;
+                    }
+                }
+            }
+        }
 
         // Diagnostics: record the velocity target, broken down so the speed limit can be located.
         //   cmdVel = horizontal speed the YOPO network itself commanded (is the limit upstream?)
