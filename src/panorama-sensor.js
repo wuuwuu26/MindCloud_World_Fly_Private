@@ -32,7 +32,11 @@ const DA360_TIMEOUT_MS = urlNumber('da360TimeoutMs', 12000, 1000, 60000);
 // before). For more accuracy use ?da360UploadScale=0.667 (512x256, ~14 Hz); lower it
 // further for more real-time behaviour; on OOM _requestDepth automatically halves the
 // current size and retries once.
-const DA360_UPLOAD_SCALE = urlNumber('da360UploadScale', 0.5, 0.05, 1);
+// 0.5 -> 1.0. With the panorama now captured at 384x192 (panoWidth above), scaling the upload
+// down any further would ship 192x96 -- far below the 384x192 the DA360 depth model and the
+// YOPO network consume. The client would only upscale it straight back, gaining nothing while
+// losing real detail. The upload is now 1:1 with the consumption size.
+const DA360_UPLOAD_SCALE = urlNumber('da360UploadScale', 1.0, 0.05, 1);
 const DA360_UPLOAD_WIDTH = Math.round(urlNumber('da360UploadWidth', 0, 0, 5760));
 const DA360_UPLOAD_HEIGHT = Math.round(urlNumber('da360UploadHeight', 0, 0, 2880));
 // Panorama resolution: 672x336 -> 768x384, face 192 -> 224. That is 14% above the
@@ -40,14 +44,29 @@ const DA360_UPLOAD_HEIGHT = Math.round(urlNumber('da360UploadHeight', 0, 0, 2880
 // upload scaling (default 0.75x -> 576x288), significantly lowering OOM probability on an
 // 8 GB GPU. With spare VRAM use ?panoWidth=896/1024 plus ?da360UploadScale=1.0 for more
 // accuracy; if the frame rate is tight use ?panoWidth=672.
-const PANORAMA_WIDTH = evenNumber(urlNumber('panoWidth', 768, 280, 5760));
+// 640 -> 384: capture at EXACTLY the resolution DA360 emits and YOPO consumes (384x192).
+// The panorama used to be captured larger (768, then 640) and then downscaled on upload, so
+// every frame paid GPU time, compositing, JPEG encoding and bandwidth for pixels that were
+// thrown away before the depth model ever saw them. Capturing at the consumed size removes
+// that whole wasted stage -- and because da360UploadScale is now 1.0 there is no resampling
+// loss either.
+const PANORAMA_WIDTH = evenNumber(urlNumber('panoWidth', 384, 280, 5760));
 const PANORAMA_HEIGHT = evenNumber(urlNumber('panoHeight', Math.round(PANORAMA_WIDTH / 2), 140, 2880));
-const PANORAMA_FACE_SIZE = Math.round(urlNumber('panoFace', 224, 128, 2048));
-// Face render resolution while navigating (fast): 160 px halves the GPU pixel count
-// (224^2 -> 160^2), so the synchronous viewer.render per face is faster -> capturing is
-// faster and the depth refresh feels more responsive. The depth model input is 384x192,
-// so 160 px is enough. Restore with ?panoFaceFast=224.
-const PANORAMA_FACE_SIZE_FAST = Math.round(urlNumber('panoFaceFast', 160, 128, 2048));
+// 224 -> 128: every face is one synchronous viewer.render, so the GPU cost scales with the
+// pixel count (224^2 -> 128^2 is roughly a third) -- the single biggest lever on capture
+// speed. Deliberately kept EQUAL to PANORAMA_FACE_SIZE_FAST below: _ensurePanoramaCaptureViewer()
+// rebuilds the whole viewer (and with it a fresh tileset that has to re-download its tiles)
+// whenever the face size changes, so using a different value for the idle state would pay that
+// rebuild cost on every switch into / out of navigation.
+const PANORAMA_FACE_SIZE = Math.round(urlNumber('panoFace', 128, 128, 2048));
+// Face render resolution while navigating (fast). 160 -> 128: another ~36% off the per-face
+// GPU pixel count, which is where the capture time actually goes -- each face is a synchronous
+// viewer.render competing with the ray-avoidance probes for the same GPU.
+// The DA360 depth model input is 384x192, so 128 px faces still feed it adequately; the trade
+// -off is slightly softer detail in the depth map.
+// Kept equal to panoFace (see above) so the viewer/tileset is not rebuilt on mode switches.
+// Restore with ?panoFaceFast=160/224 -- and set ?panoFace to the same value.
+const PANORAMA_FACE_SIZE_FAST = Math.round(urlNumber('panoFaceFast', 128, 128, 2048));
 const PANORAMA_VERTICAL_FOV = urlNumber('panoVfov', 180, 30, 180);
 const PANORAMA_JPEG_QUALITY = urlNumber('panoJpeg', 0.74, 0.35, 0.95);
 const PANORAMA_FACE_FOV = urlNumber('panoFaceFov', 130, 90, 170);

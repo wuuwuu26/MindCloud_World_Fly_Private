@@ -85,6 +85,27 @@ const FLIGHT_PRELOAD_VIEW_TIMEOUT_MS = Math.round(urlNumber('flightPreloadViewTi
 const FLIGHT_PRELOAD_VIEW_ATTEMPTS = Math.round(urlNumber('flightPreloadViewAttempts', 2, 1, 5));
 const FLIGHT_PRELOAD_STRICT = urlNumber('flightPreloadStrict', 0, 0, 1) >= 0.5;
 const PANORAMA_PRELOAD_REQUIRED = urlNumber('panoPreloadRequired', 0, 0, 1) >= 0.5;
+// Arrival latch release distance (m). The server's arrival verdict (2 m) is written into
+// drone.yopoArrived directly; around that boundary it flips frame to frame, and yopoArrived gates
+// BOTH navigate() replanning and the ray-avoidance layer. Once latched, the drone must leave the
+// goal by this much before it un-latches, so it stops restarting inference and re-planning.
+const YOPO_ARRIVE_RELEASE_M = urlNumber('yopoArriveReleaseM', 6, 2, 30);
+// Minimum interval between two YOPO replans (ms). Deliberately NOT "as fast as possible":
+// every navigate() rebuilds the polynomial and resets the server's ctrl_time to 0, while the
+// network trajectory lasts only ~0.67 s (radio_range 5 -> sgm_time 1.667 s; YOPO_VELOCITY 15 ->
+// ratio 2.5 -> segment_time 0.667 s). Replanning at the raw inference turnaround (~170 ms)
+// restarts the trajectory after only ~26%, so ctrl_time never leaves the launch section and the
+// commanded speed stays pinned to the trajectory START speed -- which is the drone's CURRENT
+// speed. Anything that slows the drone down then becomes permanent, because every later plan
+// starts from that low speed and it can never accelerate back to cruise: the measured "sometimes
+// only 2 m/s" low-speed trap.
+// Throttling the replan to roughly the trajectory length lets ctrl_time run into the cruise
+// section where the commanded speed rises to vel_max. Real-time obstacle reaction is NOT lost --
+// that is the client-side ray layer's job (it runs every frame); the network trajectory only
+// supplies the global path.
+// Raise it toward 600 if the drone still cannot reach cruise; lower it only if the global path
+// feels stale (it does NOT improve responsiveness to obstacles).
+const YOPO_REPLAN_INTERVAL_MS = urlNumber('yopoReplanMs', 250, 60, 2000);
 const VIEW_CHOICE_HINT_HTML = '1 / O: First Person &nbsp;|&nbsp; 2: Third Person<br>Easy speed: ↑/↓ forward/back, Shift boost, Tab &gt; Easy Max Speed';
 const MAX_PHYSICS_FRAME_DT = 0.25;
 const PHYSICS_SUBSTEP_DT = 0.05;
@@ -1032,11 +1053,15 @@ function updateFlight(dt) {
     // The two are independent and never block each other. Commands always stay fresh and the
     // drone never flies blind.
     if (drone.flightMode === 'yopo_nav' && drone.yopoNavActive && yopoNavigator && !drone.yopoArrived) {
-        // The motion command (replan) update rate matches the depth image update rate: the
-        // navigate client-side throttle is bound straight to the depth refresh interval, so the
-        // two "agree on frequency" and rise together with _minRefreshIntervalMs.
+        // The replan rate is throttled to YOPO_REPLAN_INTERVAL_MS so it matches the length of the
+        // network trajectory rather than the inference turnaround -- see that constant for why
+        // replanning as fast as possible is counter-productive here.
+        // Deliberately NOT bound to the depth refresh interval any more: the depth pipeline keeps
+        // its own background cache (see captureYOPODepthERP), so a fresh depth map is available
+        // immediately whenever we do replan. Binding to _minRefreshIntervalMs (3 ms) only made
+        // the replan fire as fast as inference returns.
         if (yopoDepthFromPanorama) {
-            yopoNavigator._requestInterval = yopoDepthFromPanorama._minRefreshIntervalMs;
+            yopoNavigator._requestInterval = YOPO_REPLAN_INTERVAL_MS;
         }
         const pos = { x: drone.x, y: drone.y, z: drone.z };
         const vel = { x: drone.vx, y: drone.vy, z: drone.vz };
@@ -1110,6 +1135,27 @@ function updateFlight(dt) {
                         throw new Error('depth capture failed');
                     }
 
+                    // Re-sample the odometry right before sending.
+                    // The depth capture above BLOCKS for ~1.8 s (measured: depth=1846 ms inside a
+                    // 2019 ms cycle) and the drone covers several metres during it. Sending the
+                    // pre-capture pos/vel makes the server build the new trajectory from a stale
+                    // start point -- measured: it planned from the take-off point (0,20,0) while
+                    // the drone was already 8.25 m away at (6.2,20,-5.5). The new trajectory's end
+                    // then lies BEHIND the drone, so posErr flips negative and the position loop
+                    // drags it back (velTarget swinging between +9 and -6 m/s) -- that is the
+                    // sawtooth, the inaccurate navigation and the low average speed.
+                    // The server's _current_state extrapolates by at most max_dt = 1.0 s, which
+                    // cannot cover a 1.8 s stall, so the fresh sample has to be taken here.
+                    // The depth map is still the frame captured ~1.8 s ago, but its 20 m field of
+                    // view keeps the obstacles ahead in view, so pairing it with the CURRENT pose
+                    // is far better than planning from a pose that is 8 m behind the drone.
+                    pos.x = drone.x; pos.y = drone.y; pos.z = drone.z;
+                    vel.x = drone.vx; vel.y = drone.vy; vel.z = drone.vz;
+                    orient.x = drone.orientation.x;
+                    orient.y = drone.orientation.y;
+                    orient.z = drone.orientation.z;
+                    orient.w = drone.orientation.w;
+
                     const cmd = await yopoNavigator.navigate(
                         depthResult.depth,
                         depthResult.encoding,
@@ -1139,8 +1185,20 @@ function updateFlight(dt) {
                         drone.yopoCmdYaw = cmd.yaw;
                         drone.yopoCmdYawDot = cmd.yaw_dot || 0;
                         drone.yopoCmdTime = performance.now();
-                        drone.yopoArrived = cmd.arrived || false;
                         drone.yopoDistToGoal = cmd.dist_to_goal || 0;
+                        // Arrival latch with hysteresis.
+                        // Previously the server's verdict was written straight into
+                        // drone.yopoArrived. Because the client latches at 3.5 m (yopoArriveHoldM)
+                        // but the server only reports arrival inside 2 m, the flag flipped back and
+                        // forth while the drone sat in that band -- restarting navigate()
+                        // replanning and the ray layer every other frame, each replan producing a
+                        // fresh dash at the goal that overshot. That is the "wobbles for a long
+                        // time after arriving" symptom. Latch on arrival, release only on leaving.
+                        if (cmd.arrived) {
+                            drone.yopoArrived = true;
+                        } else if (drone.yopoArrived && drone.yopoDistToGoal > YOPO_ARRIVE_RELEASE_M) {
+                            drone.yopoArrived = false;
+                        }
                         if (drone.yopoInferenceCount < 5 || drone.yopoInferenceCount % 30 === 0) {
                             const dx = cmd.position.x - drone.x;
                             const dy = cmd.position.y - drone.y;
@@ -1418,8 +1476,16 @@ function yopoControlTick() {
                 drone.yopoCmdYaw = cmd.yaw;
                 drone.yopoCmdYawDot = cmd.yaw_dot || 0;
                 drone.yopoCmdTime = performance.now();
-                drone.yopoArrived = cmd.arrived || false;
                 drone.yopoDistToGoal = cmd.dist_to_goal || 0;
+                // Same arrival latch as the navigate() path. This runs at 50 Hz, so an unlatched
+                // flag here is worse: every time the server's 2 m verdict flips, the control loop
+                // re-enables itself and the ray layer re-arms, re-commanding a drone that has
+                // already arrived -> it keeps getting nudged instead of settling.
+                if (cmd.arrived) {
+                    drone.yopoArrived = true;
+                } else if (drone.yopoArrived && drone.yopoDistToGoal > YOPO_ARRIVE_RELEASE_M) {
+                    drone.yopoArrived = false;
+                }
             }
         } catch (e) {
             // Called at a high rate, swallow transient errors silently
