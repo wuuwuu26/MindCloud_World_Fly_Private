@@ -466,14 +466,15 @@ export class Drone {
         // distance, so dAhead ~= distGoalH and a strict `dAhead > distGoalH` test misses it:
         // brakeClear then falls to ~distGoalH, which is inside standoff(7.5) + reactionDist ->
         // brake = 0 AND the closing-speed gate clips the goalward component to 0 -> the drone is
-        // pinned metres short of the goal and takes forever to arrive ("接管时比较久才能停下").
+        // pinned metres short of the goal and takes forever to arrive ("takes ages to stop after takeover").
         // A threat within this margin of the goal is treated as beyond-goal: the brake keeps its
         // floor (never 0) and the gate stands down, leaving the stop to the final-approach PD,
         // whose holdMaxV = sqrt(2*a*d) already guarantees a physically stoppable run-in.
         this.yopoAvoidGoalGateMargin = 1.0;
         // Distance threshold (m) under which the takeover-zone ray-avoidance STEERING is switched
         // off. The front part of the takeover (large distGoal) still keeps the ray layer in priority
-        // (user request: "接管时也要有射线避障且优先"); but over the last few metres the drone is
+        // (user request: "ray avoidance must stay active and take
+        // priority during takeover too"); but over the last few metres the drone is
         // essentially on the goal, and any tangential detour just shoves it off the goal point ->
         // sway at the arrival. The final-approach PD's holdMaxV = sqrt(2*a*d) already guarantees a
         // stoppable run-in, so the ray steering stands down here to kill the back-and-forth.
@@ -1820,7 +1821,7 @@ export class Drone {
             // terminal steady-state coefficient v = Kp*dist/(1+Kd) from 2.0x to 1.32x the
             // remaining distance and stretched the settling time constant tau = (1+Kd)/Kp from
             // 0.30 s to 0.76 s -- the drone approached fine but then took ages to actually come
-            // to a stop ("接管时比较久才能停下来"). Scheduling Kp up to 8.0 restores the
+            // to a stop ("takes ages to come to a stop after takeover"). Scheduling Kp up to 8.0 restores the
             // terminal coefficient to ~2.1x while KEEPING the high damping (no sway), and the
             // settling tau drops to 0.48 s.
             const holdKp = 5.0 + 3.0 * clamp(1 - distGoal / 3.0, 0, 1);
@@ -1926,21 +1927,27 @@ export class Drone {
                 velTargetY = clamp(this.yopoArriveAltKp * gErrY,
                                    -this.yopoArriveAltVMax, this.yopoArriveAltVMax);
             }
-            // ── 到达后锁定目标点（"接管后锁定目标点运动不就好了"）──
-            // arrived 之后控制仍走这条接管 PD 分支（yopoNearGoalHold 含 arrived）。此时若继续跑
-            // holdKp*gErr - holdKd*v，其中的速度反馈项 -holdKd*v(系数 2.8) 会把速度测量噪声成倍
-            // 放大进 velTarget，内环 D 项再二次微分放大 —— 表现为"到达目标点后持续晃动"，
-            // 与障碍物无关，是纯运动环的噪声/增益问题。所以到达后改为两级锁定：
-            //   1）已在死区内（水平 < yopoArriveDeadbandM 且垂直 < 0.3 m）：velTarget 直接归零，
-            //      完全停住 —— 这就是"锁定目标点"，不再有任何修正量去制造抖动。
-            //   2）仍在死区外（arrived 时可能还差几米）：只用 P 项低增益缓慢拉回，且刻意不含
-            //      -Kd*v 速度反馈（它放大噪声），速度限幅 2 m/s；走进死区后自动进入 1）锁死。
-            // 安全底线不受影响：垂直净空(vSafeDown/vSafeUp)、crashFloor、碰撞处理仍然生效。
+            // ── Lock onto the goal once arrived ("just lock the goal after takeover") ──
+            // After arrival the controller still runs this takeover PD branch (yopoNearGoalHold
+            // includes arrived). If it keeps running holdKp*gErr - holdKd*v there, the velocity
+            // feedback term -holdKd*v (gain 2.8) multiplies the velocity-measurement noise into
+            // velTarget, and the inner-loop D term amplifies it a second time by differentiation --
+            // that is the "still swaying after reaching the goal" symptom. It has nothing to do with
+            // obstacles; it is a pure motion-loop noise/gain problem. So arrival switches to a
+            // two-level lock:
+            //   1. Already inside the deadband (horizontal < yopoArriveDeadbandM and vertical < 0.3 m):
+            //      velTarget is forced to zero -- parked. That is the "lock onto the goal": nothing is
+            //      left to correct, so nothing can generate jitter.
+            //   2. Still outside the deadband (arrival may still be a few metres out): pull back with a
+            //      low-gain P term only, deliberately WITHOUT the -Kd*v velocity feedback (it amplifies
+            //      noise), speed capped at 2 m/s; once inside the deadband it falls into 1. and locks.
+            // Safety nets are unaffected: vertical clearance (vSafeDown/vSafeUp), crashFloor and
+            // collision handling stay active.
             if (this.yopoArrived) {
                 if (gErrH < this.yopoArriveDeadbandM && Math.abs(gErrY) < 0.3) {
                     velTargetX = 0; velTargetZ = 0; velTargetY = 0;
                 } else {
-                    const lockKp = 2.0;      // 低增益：到达后的拉回只需缓慢收敛，不需要高带宽
+                    const lockKp = 2.0;      // low gain: the post-arrival pull-in only needs slow convergence, no high bandwidth
                     const lockVmax = 2.0;
                     velTargetX = clamp(lockKp * gErrX, -lockVmax, lockVmax);
                     velTargetZ = clamp(lockKp * gErrZ, -lockVmax, lockVmax);
@@ -2122,20 +2129,27 @@ export class Drone {
             this._updateAvoidProbe();
             avoid = this._avoidanceVelocity(velTargetX, velTargetZ);
             if (avoid) {
-                // ── 结构性修复"接管后晃很久"：接管区解耦方向性避障，到达后才做侧/后方保护 ──
-                // 根因：yopoArrived 一旦 lock 就保持，判定要求 distGoal<holdM 且 spdNow<holdV。
-                // 接管区(nearGoalNoRep 且 !arrived)若保留 rep / tan 的横向力，速度始终 > holdV，
-                // arrived 永远判不出 -> 无人机一直卡在接管 PD 里与避障拉扯 = 持续振荡（"晃很久"）。
-                // 故接管区(未到达)彻底关闭方向性扰动：repScale 保持 0、steerFade 保持 0（见下），
-                // 只留 brake(速度大小缩放) + closing-speed gate(抑制朝障碍的速度分量)。PD 干净收敛、
-                // 速度单调降到 < holdV，才能 lock arrived 切入纯 hover（无 swing）。
-                // 到达(arrived)之后：配合上面的"锁定目标点"，不再叠加任何方向性避障推力
-                // （repScale 保持 0、tan 保持 0）。到达后若还用 rep 去推侧/后方，rep 的推力会与
-                // "锁在目标点" 相互拉扯 -> 又变成晃动；这与障碍物无关，稳定停住优先。
-                // 安全底线仍保留：brake 的速度缩放、closing-speed gate、垂直净空与碰撞处理照常。
+                // ── Structural fix for "sways for ages after takeover": the takeover zone is decoupled
+                // from directional avoidance ──
+                // Root cause: once yopoArrived latches it stays latched, and latching requires
+                // distGoal < holdM and spdNow < holdV. If the takeover zone (nearGoalNoRep and
+                // !arrived) keeps any rep / tan lateral force, the speed stays above holdV, so
+                // arrival is never latched and the drone is stuck oscillating inside the takeover PD
+                // fighting the avoidance layer ("sways for ages").
+                // So the takeover zone (not yet arrived) has directional disturbances switched off
+                // entirely: repScale stays 0 and steerFade stays 0 (see below), leaving only brake
+                // (speed-magnitude scaling) + the closing-speed gate (clips the component closing on
+                // an obstacle). The PD then converges cleanly and the speed drops monotonically below
+                // holdV, so it can latch arrival and settle without swing.
+                // After arrival: matching the "lock onto the goal" above, no directional avoidance
+                // thrust is added (repScale stays 0, tan stays 0). Pushing side/rear obstacles with
+                // rep would fight "parked on the goal" and turn into sway again; unrelated to
+                // obstacles, a stable park wins.
+                // Safety nets still run: brake scaling, the closing-speed gate, vertical clearance
+                // and collision handling.
                 if (this.yopoArrived) {
                     this._takeoverSteerOn = false;
-                    this._takeoverSteerRamp = 0;  // 已到达：锁定目标点，不推、不绕
+                    this._takeoverSteerRamp = 0;  // arrived: lock onto the goal, no pushing, no detour
                 }
                 // Smooth the ray brake: asymmetric low-pass, TIGHTEN AT ONCE / RELEASE SLOWLY.
                 // The probe is noisy near a goal that sits against a building -- measured: brake
@@ -2175,7 +2189,8 @@ export class Drone {
                 braking = avoid.brake < 0.95;
                 avoidBrake = avoid.brake;
                 // Inside the takeover zone the ray layer must still take PRIORITY over the PD when a
-                // real threat shows up (user request: "接管时也要有射线避障且优先"). Gated by a
+                // real threat shows up (user request: "ray avoidance must stay active and take
+                // priority during takeover too"). Gated by a
                 // HYSTERESIS on the (already low-pass filtered) brake so it cannot chatter:
                 //   arm  when brake < 0.97  (any measurable slowdown -> a threat is real)
                 //   keep until brake > 0.995 (fully clear again)
@@ -2208,9 +2223,11 @@ export class Drone {
                     // safety is unchanged.
                     velTargetX = velTargetX * avoid.brake;
                     velTargetZ = velTargetZ * avoid.brake;
-                    // 接管区内 repScale 恒为 0（nearGoalNoRep），所以这里刻意不再叠加任何 rep：
-                    // 接管末段与到达后都只做速度大小的刹车，不施加方向性推力，避免与
-                    // "锁定目标点" 拉扯产生晃动。避障的绕行/排斥职责全部留在巡航段。
+                    // repScale is always 0 inside the takeover zone (nearGoalNoRep), so no rep is
+                    // added here on purpose: both the takeover end-game and the arrived state only
+                    // scale the speed magnitude, with no directional thrust, to avoid fighting the
+                    // "lock onto the goal" and producing sway. Detouring / repelling stays a
+                    // cruise-phase responsibility.
                 } else {
                     // Core of horizontal obstacle avoidance: budget "forward progress" and
                     // "lateral detour (rep+tan)" separately.
@@ -2231,7 +2248,7 @@ export class Drone {
                     // simply dropped there so it cannot shove the drone off a goal against a wall.
                     // steerFade is 1 in cruise and follows the takeover ramp inside the zone, so
                     // the tangential detour fades in/out smoothly there (see the ramp above).
-                    const steerFade = nearGoalNoRep ? 0.0 : 1.0;   // 接管区彻底关 tan：只 brake+closing gate，PD 干净收敛才能 lock arrived（否则横向力让速度降不到阈值 -> 持续振荡）
+                    const steerFade = nearGoalNoRep ? 0.0 : 1.0;   // tan fully off inside the takeover zone: brake + closing-speed gate only, so the PD converges cleanly and can latch arrival (otherwise the lateral force keeps the speed above the threshold -> sustained oscillation)
                     let steerX = avoid.repX * repScale + avoid.tanX * steerFade;
                     let steerZ = avoid.repZ * repScale + avoid.tanZ * steerFade;
                     // Cap the detour vector ITSELF. Previously lateralBudget only shrank fwdAllow
@@ -2581,18 +2598,26 @@ export class Drone {
         // actively moving the sticks (a stick step would differentiate into a tilt spike). On the
         // released hand-over ramp the velocity target is a smooth linear function, so D only adds
         // useful damping and kills the residual sway after the stop.
-        // 接管区必须保留速度环 D 项（阻尼）——这是"到目标点接管范围抖动"的运动环根因：
-        // 接管区沿用 cruise 的 useAccFeedforward = true，原判定把 velKd 置 0，速度环退化为纯 P；
-        // 与内环(姿态)滞后、射线探测延迟(60-150 ms)串成的相位滞后使闭环欠阻尼 —— 数值仿真
-        // (d=12 m、v=10 m/s 进入、velKp=4.0)：tau=0.20 s 纯 P 过冲 1.21 m、尾部速度 1.16 m/s、
-        // 速度反向 4 次；tau=0.30 s 过冲 2.32 m、尾部 3.88 m/s、根本停不到目标点。
-        // 恢复 velKd = 1.0 后同样条件过冲降到 0.14 m、尾部 0.05 m/s、反向 0 次，并在 tau=0.08~0.40
-        // 全区间保持稳健(过冲 <= 0.89 m、尾部 <= 0.21 m/s、精确停在目标点)，收敛时间不变
-        // (1.60 s -> 1.53 s)。接管区的速度目标由本地 PD + slew 限幅生成，网络前馈在区内已停止且
-        // 陈旧(无 ffVel 跳变)，故 D 项不会放大噪声 —— 与 cruise 区(有前馈跳变，仍关 D)不同。
-        // 到达后同样关闭速度环 D 项：此时误差已接近零，D 项只会微分放大速度测量噪声，形成
-        // "停在目标点上持续细抖"（原设计 arrived 后关 D 就是这个原因）。到达后的阻尼改由
-        // 外环的锁定逻辑(velTarget 归零 + 内环 P 跟踪 0 提供速度负反馈)保证。
+        // The takeover zone must keep the velocity-loop D term (damping) -- this is the motion-loop
+        // root cause of "jitter inside the takeover range":
+        // the takeover zone inherits useAccFeedforward = true from cruise and the old test zeroed
+        // velKd along with it, degrading the velocity loop to pure P; combined with the inner-loop
+        // (attitude) lag and the 60-150 ms ray-probe latency, the phase lag makes the closed loop
+        // under-damped. Numerical simulation (entering at d=12 m, v=10 m/s, velKp=4.0): at tau=0.20 s
+        // pure P overshoots 1.21 m, tail speed 1.16 m/s, 4 speed reversals; at tau=0.30 s it
+        // overshoots 2.32 m with a 3.88 m/s tail and never settles on the goal.
+        // Restoring velKd = 1.0 under the same conditions drops the overshoot to 0.14 m, the tail to
+        // 0.05 m/s and the reversals to 0, and stays robust over the whole tau = 0.08~0.40 range
+        // (overshoot <= 0.89 m, tail <= 0.21 m/s, parks exactly on the goal) with the settle time
+        // unchanged (1.60 s -> 1.53 s). Inside the takeover zone the velocity target comes from the
+        // local PD + slew limit and the network feed-forward is stopped and stale there (no ffVel
+        // jumps), so the D term does not amplify noise -- unlike cruise (which has feed-forward jumps
+        // and still keeps D off).
+        // After arrival the D term is switched off as well: with the error near zero it only
+        // differentiates and amplifies the velocity-measurement noise into a permanent fine jitter
+        // while parked on the goal (which is why arrival switched D off in the first place). Damping
+        // after arrival comes from the lock logic (velTarget forced to zero plus the inner P loop's
+        // velocity feedback toward zero).
         const velKd = ((useAccFeedforward && !yopoNearGoalHold) || this.yopoArrived ||
                        (stickActive && horizActive)) ? 0.0 : this.sfVelKd;
         const velErrClamp = aMaxHoriz / Math.max(0.01, velKp);
