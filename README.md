@@ -21,7 +21,130 @@ cd MindCloud_World_Fly_Private
 
 > 注意：DA360 的**源码**已随仓库纳入版本管理（对 DA360 而言 `.gitignore` 只忽略权重目录 `third_party/DA360/checkpoints/`，完整忽略清单见仓库根目录 `.gitignore`），克隆后即可获得源码；但**权重**（`DA360_large.pth`，约 1.3GB，超 GitHub 100MB 限制）未入库，运行深度服务前需先下载权重。
 
+> **新机器请看下一节「从零开始（首次部署）」**：它包含 Docker / NVIDIA Container Toolkit 安装、权重下载、Cesium Ion token 配置和首次镜像构建的完整步骤。已经部署过的机器直接跳到「快速开始（一键启动全部服务）」。
+
+## 从零开始（首次部署）
+
+下面按「一台全新机器 → 能手动飞 + 能 YOPO 自主导航」的顺序走一遍。**首次部署完成后，日常只需 `./restart_all.sh`**（见下一节）。
+
+### 第 0 步：安装前置软件
+
+```bash
+# 1) Docker Engine（其它系统见 https://docs.docker.com/engine/install/）
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker "$USER"    # 注销并重新登录后生效
+newgrp docker                      # 或只在当前 shell 临时生效
+
+# 2) NVIDIA 驱动（能跑 nvidia-smi 即可）
+nvidia-smi
+
+# 3) NVIDIA Container Toolkit（让容器能用 GPU）
+sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+
+# 4) 验证容器里能看到 GPU
+docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi
+```
+
+其它必要条件：
+
+| 项目 | 要求 |
+|------|------|
+| 磁盘 | 三个镜像实测共约 **64 GB**（YOPO ≈35 GB、DA360 ≈28 GB、主飞行 ≈1 GB），再加 1.3 GB 的 DA360 权重，**建议预留 ≥80 GB** |
+| 网络 | 首次需从 Docker Hub 拉基础镜像、从 Google Drive 拉权重；浏览器需能访问 Cesium Ion / Google 3D Tiles 与 `cdn.jsdelivr.net`（PlayCanvas） |
+| `curl` | `restart_all.sh` 用它等待服务就绪（一般系统自带） |
+| `python3` + `gdown` | 仅下载 DA360 权重时需要 |
+
+> 只想先用键盘飞（不跑 DA360 / YOPO）的话，可以跳过 GPU 与权重相关步骤，直接 `./launch.sh`，只构建约 1 GB 的主飞行镜像。
+
+### 第 1 步：拉取代码
+
+若还没克隆，先执行上面「克隆仓库」的两行命令并进入仓库目录：
+
+```bash
+cd MindCloud_World_Fly_Private
+```
+
+### 第 2 步：下载 DA360 深度权重
+
+YOPO 权重与 TRT 引擎已随仓库提供，**只有 DA360 权重**（约 1.3 GB）需要单独下载：
+
+```bash
+python3 -m pip install --user gdown
+./scripts/download_da360_model.sh
+# 写入 third_party/DA360/checkpoints/DA360_large.pth
+```
+
+DA360 源码已随仓库提供，脚本检测到源码存在时只下载权重。
+
+### 第 3 步：配置 Cesium Ion token（推荐）
+
+主视图与全景相机都通过 Cesium Ion 拉取 Google Photorealistic 3D Tiles。仓库内置的默认 token（`src/cesium-world.js` 里的 `DEFAULT_ION_TOKEN`）仅供体验，随时可能失效或撞配额，**建议换成自己的**：
+
+1. 在 <https://ion.cesium.com/tokens> 新建 token；
+2. 为它开通 Google Photorealistic 3D Tiles / `assets:read` 权限；
+3. 用 URL 参数传入：
+
+```text
+http://127.0.0.1:8080/?ionToken=你的token
+```
+
+也可以直接改 `src/cesium-world.js` 的 `DEFAULT_ION_TOKEN` 常量把它固化下来（`src/` 是只读挂载进容器的，改完浏览器 Ctrl+F5 强刷即可，**不用重建镜像**）。若 token 没有 Google 3D Tiles 权限，页面会自动回退到内置 ion 资产 `2275207`（`DEFAULT_ASSET_ID`），也可用 `?assetId=` 覆盖。
+
+### 第 4 步：一键启动（首次会自动构建三个镜像）
+
+```bash
+./restart_all.sh
+```
+
+脚本依次拉起：DA360 深度服务 → YOPO 导航服务 → 主飞行进程。各入口脚本**只在镜像不存在时才构建**，所以首次会比较慢（主要是拉取 CUDA 基础镜像 + 装 pip 依赖，通常需要几十分钟），之后都是秒级重启。
+
+构建/启动日志分别落在：
+
+```bash
+tail -f /tmp/restart_da360.log
+tail -f /tmp/restart_yopo.log
+tail -f /tmp/restart_main.log
+```
+
+也可以提前或单独构建某一个镜像：
+
+```bash
+./launch.sh                                      # 主飞行镜像（缺镜像才构建；加 --rebuild 强制）
+YOPO_FORCE_BUILD=1 ./scripts/start_yopo_api.sh   # YOPO 镜像
+DA360_FORCE_BUILD=1 ./scripts/start_da360_api.sh # DA360 镜像
+```
+
+### 第 5 步：确认三个服务都活着
+
+```bash
+docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'  # 应看到下面 3 个容器
+curl http://127.0.0.1:8080/              # 主飞行：返回页面 HTML
+curl http://127.0.0.1:5688/health        # DA360：健康自检
+curl http://127.0.0.1:5689/yopo/status   # YOPO：服务状态
+```
+
+### 第 6 步：打开浏览器起飞
+
+访问 `http://127.0.0.1:8080` → 点 **Start Google 3D Tiles Flight** → 搜索框选城市 → 按住 `I` 点地面设出生点 → 按 `O` 起飞，详见「使用流程说明」。
+
+### 首次部署常见问题
+
+| 现象 | 原因 / 处理 |
+|------|-------------|
+| `docker: permission denied ...` | 当前用户不在 `docker` 组：`sudo usermod -aG docker $USER` 后重新登录 |
+| `could not select device driver "" with capabilities: [[gpu]]` | 未安装/未配置 NVIDIA Container Toolkit：`sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker` |
+| 构建卡在拉 `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime` | 基础镜像很大，网络差时易超时；脚本内置 3 次重试，网络恢复后重跑；或把 `YOPO_BASE_IMAGE` / `DA360_BASE_IMAGE` 指向镜像源/本地镜像 |
+| 构建时装 pip 依赖失败 | 构建走 `--network=host`：YOPO 侧默认使用宿主 `127.0.0.1:7890` 代理，DA360 侧转发宿主 `HTTP(S)_PROXY` 并从 `git config` 探测代理 |
+| `Port 8080 is already in use` | 换端口：`PORT=18081 ./launch.sh` 或 `./launch.sh --port 18081` |
+| DA360 长时间不 ready | 看 `/tmp/restart_da360.log`；权重缺失时脚本会自动调用 `download_da360_model.sh`，慢通常是 Google Drive 下载慢 |
+| YOPO 首次启动较慢 | 启用 TensorRT 但 `asset/yopo-trt/yopo_trt.pth` 不存在时，会在容器内用 GPU 现场固化引擎并写回该目录，之后直接加载 |
+| 页面空白 / 3D Tiles 加载不出来 | 多半是 token 失效或无 Google 3D Tiles 权限，按第 3 步换自己的 token；同时确认浏览器能访问 Ion 与 `cdn.jsdelivr.net` |
+
 ## 快速开始（一键启动全部服务）
+
+> 已完成上面「从零开始（首次部署）」后，日常启动/重启只需这一节的内容，镜像不会重建。
 
 推荐使用 `restart_all.sh` 一次性拉起主进程、DA360 与 YOPO 三个服务：
 
@@ -89,11 +212,21 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 
 ## 环境要求
 
-- Docker Engine
+必需：
+
+- Docker Engine（建议 24+），且当前用户有权限执行 `docker`（加入 `docker` 组）
+- NVIDIA GPU + 驱动（DA360 / YOPO 需要）+ NVIDIA Container Toolkit（容器用 GPU）
+- 磁盘 ≥80 GB：三个镜像实测共约 64 GB（YOPO ≈35 GB、DA360 ≈28 GB、主飞行 ≈1 GB），另加 1.3 GB DA360 权重
 - 一个支持 WebGL 的现代浏览器（用于打开 `http://127.0.0.1:8080` 使用模拟器）
-- 浏览器可以访问 Cesium Ion 和 Google 3D Tiles
-- 本地开发模式需要 Python 3
-- DA360 深度推理需要 NVIDIA GPU、NVIDIA Container Toolkit、Python 3 + pip，以及可访问模型下载地址的网络
+- 浏览器可访问 Cesium Ion、Google 3D Tiles 与 `cdn.jsdelivr.net`（PlayCanvas 前端库）
+
+可选 / 特定场景：
+
+- `curl`：`restart_all.sh` 用它等待服务就绪（一般系统自带）
+- 本地开发模式（`./launch.sh --local`）需要 Python 3
+- 下载 DA360 权重需要 Python 3 + pip（`gdown`）以及可访问 Google Drive 的网络
+
+> 首次部署的完整安装命令见「从零开始（首次部署）→ 第 0 步：安装前置软件」。
 
 ### 已验证运行环境
 
@@ -112,11 +245,13 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 
 本项目共三套独立构建的容器，各自的镜像名、基础镜像与重建触发方式都不同：
 
-| 容器 | 镜像 | 基础镜像 | Dockerfile | 入口脚本 |
-|------|------|----------|------------|----------|
-| 主飞行进程 | `google-tiles-flight` | `tumgis/3dcitydb-web-map:alpine-v2.0.0`（自带 Node + Cesium） | `Dockerfile.cesium` | `launch.sh` |
-| YOPO 避障后端 | `mindcloud-yopo` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime`（CUDA） | `Dockerfile.yopo` | `scripts/start_yopo_api.sh` |
-| DA360 深度服务 | `mindcloud-da360` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime`（CUDA） | `Dockerfile.da360` | `scripts/start_da360_api.sh` |
+| 容器 | 镜像 | 基础镜像 | 实测体积 | Dockerfile | 入口脚本 |
+|------|------|----------|----------|------------|----------|
+| 主飞行进程 | `google-tiles-flight` | `tumgis/3dcitydb-web-map:alpine-v2.0.0`（自带 Node + Cesium） | ≈1 GB | `Dockerfile.cesium` | `launch.sh` |
+| YOPO 避障后端 | `mindcloud-yopo` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime`（CUDA） | ≈35 GB | `Dockerfile.yopo` | `scripts/start_yopo_api.sh` |
+| DA360 深度服务 | `mindcloud-da360` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime`（CUDA） | ≈28 GB | `Dockerfile.da360` | `scripts/start_da360_api.sh` |
+
+> 体积为 RTX 4070 Laptop / Ubuntu 24.04 上的实测值，仅供评估磁盘用。日常 `./restart_all.sh` **不会**重建镜像（只有镜像缺失或显式 `*_FORCE_BUILD=1` 才构建）。需要单独构建或强制重建时见「从零开始（首次部署）→ 第 4 步」。
 
 ### 主飞行进程（`Dockerfile.cesium`）
 
