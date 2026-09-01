@@ -207,6 +207,8 @@ export class Drone {
         // Trade-off: without rep there is no head-on push-away. If the run-in starts grazing
         // obstacles, split the zones (set this to e.g. 8 and leave the takeover at 12) so the
         // 8-12 m band keeps the repulsion.
+        // Both zones are measured in HORIZONTAL distance (see _controlYOPO): a goal high above
+        // the drone must still get the direct PD climb, not network circling.
         this.yopoGoalRepSuppressDist = 12.0;
         // Hard speed ceiling inside the final-approach zone (m/s). The former hard cap of 4 m/s
         // throttled the entire last 12 m; the per-distance sqrt(2*a*d) ramp in _controlYOPO is
@@ -233,7 +235,11 @@ export class Drone {
         // altitude instead of freezing ~17 cm below it. Deliberately small and speed-capped:
         // running the full holdAltKp PD inside the deadband makes it bob up and down once arrived.
         this.yopoArriveAltKp = 2.0;     // P gain on the residual altitude error
-        this.yopoArriveAltVMax = 0.25;  // m/s hard cap on that trim speed
+        // Raised 0.25 -> 2.0 m/s: the old cap made the post-arrival altitude trim crawl
+        // (closing a 3 m residual took 12 s+), which read as "the drone barely climbs at the
+        // goal". This trim is a P-only first-order term (v = kp*err, capped) that converges
+        // monotonically to zero error, so the larger cap does not reintroduce arrived bobbing.
+        this.yopoArriveAltVMax = 2.0;   // m/s hard cap on that trim speed
         this.yopoCmdPos = null;           // {x, y, z} current commanded position
         this.yopoCmdVel = null;           // {x, y, z} current commanded velocity
         this.yopoCmdAcc = null;           // {x, y, z} current commanded acceleration
@@ -1554,11 +1560,13 @@ export class Drone {
         // a PD convergence straight onto the goal point, guaranteeing entry into the arrival
         // circle.
         let distGoal = Number.POSITIVE_INFINITY;
+        let distGoalH = Number.POSITIVE_INFINITY;
         if (this.yopoNavTarget) {
             const gdx = this.yopoNavTarget.x - this.x;
             const gdy = this.yopoNavTarget.y - this.y;
             const gdz = this.yopoNavTarget.z - this.z;
             distGoal = Math.sqrt(gdx * gdx + gdy * gdy + gdz * gdz);
+            distGoalH = Math.hypot(gdx, gdz);
         }
         this.yopoDistToGoal = distGoal;
 
@@ -1572,16 +1580,22 @@ export class Drone {
             if (spdNow < this.yopoArriveHoldV) this.yopoArrived = true;
         }
 
+        // Takeover is keyed on the HORIZONTAL distance to the goal (matching nearGoal inside
+        // _avoidanceVelocity). The old 3D-distance check left a blind band: a goal that is
+        // horizontally close but vertically far (e.g. 10 m out / 25 m up on a rooftop) stayed on
+        // the cruise branch, where the network's lattice only holds cruise-type arcs -- so the
+        // drone could only gain/lose altitude by flying large circles, slowly, near obstacles.
+        // On horizontal distance the PD takes over and climbs/dives STRAIGHT onto the goal.
         const yopoNearGoalHold =
             this.yopoNavTarget && !stickActive &&
-            (this.yopoArrived || distGoal < this.yopoFinalApproachDist);
+            (this.yopoArrived || distGoalH < this.yopoFinalApproachDist);
         // Repulsion-suppression zone, INDEPENDENT of the deceleration zone above. With
         // yopoFinalApproachDist = 0 the approach stays on the cruise branch and no longer
         // switches to the hold PD, but the repulsion must still be dropped near the goal --
         // otherwise a goal sitting against a building gets repelled forever and yopoArrived
         // never latches.
         const nearGoalNoRep = this.yopoNavTarget &&
-            (this.yopoArrived || distGoal < this.yopoGoalRepSuppressDist);
+            (this.yopoArrived || distGoalH < this.yopoGoalRepSuppressDist);
         // Repulsion is either fully ON (outside the takeover zone) or fully OFF (inside it) --
         // there is no fade band any more. A graded fade used to soften the step at the boundary,
         // but it also left the repulsion only partially effective across that whole stretch,
@@ -1711,7 +1725,7 @@ export class Drone {
             // target over the first few metres inside the zone instead of switching hard.
             const blendBand = 4.0;   // scaled with the 12 m takeover zone (was 6.0 at 20 m) so the
                                      // blend does not eat half the zone
-            const insideZone = this.yopoFinalApproachDist - distGoal;   // 0 right at the boundary
+            const insideZone = this.yopoFinalApproachDist - distGoalH;   // 0 right at the boundary
             // Blend only inside the band right after the boundary (insideZone >= 0): the takeover
             // only ever starts at the zone edge, so the blend has to fade from cruise to PD over
             // the first few metres inside it.
@@ -2020,14 +2034,30 @@ export class Drone {
                     velTargetX += avoid.vGoX;
                     velTargetZ += avoid.vGoZ;
                 }
-                // Vertical: the ray brake always applies. The vertical CLEARING terms
-                // (vRep = climb over an obstacle, upPush = ground clearance push-up) are OFF
-                // inside the takeover zone for the same reason as tan/vGo: they override the PD
-                // instead of merely limiting its speed.
-                velTargetY = velTargetY * avoid.brake;
+                // Vertical: DIRECTION-AWARE instead of the old blanket `velTargetY *= brake`.
+                // The old line throttled the climb by the HORIZONTAL obstacle brake, so near a
+                // goal against a building (brake ~0.3) even the PD's straight climb crawled --
+                // the drone could only gain/lose altitude with slow network circles and grazed
+                // obstacles while doing it. Now:
+                //   - CLIMB is NOT scaled by the horizontal brake (climbing away from a
+                //     horizontal obstacle is the correct escape) and is capped only by the
+                //     measured overhead clearance vSafeUp -- fast, yet unable to punch into a
+                //     ceiling / overhang;
+                //   - DESCENT keeps the horizontal brake scaling (an obstacle ahead at this
+                //     altitude IS a threat while descending into it) plus the vSafeDown clamp
+                //     below for the clearance under the drone.
+                // The vertical CLEARING terms (vRep = climb over / dive under, upPush = ground
+                // clearance push-up) stay OFF inside the takeover zone for the same reason as
+                // tan/vGo: they would override the PD instead of merely limiting its speed.
                 if (!nearGoalNoRep) {
                     if (avoid.vRep) velTargetY = velTargetY * 0.3 + avoid.vRep;
                     velTargetY += avoid.upPush;
+                }
+                if (velTargetY < 0) {
+                    velTargetY = velTargetY * avoid.brake;
+                } else if (avoid.vSafeUp !== null && Number.isFinite(avoid.vSafeUp) &&
+                           velTargetY > avoid.vSafeUp) {
+                    velTargetY = avoid.vSafeUp;
                 }
                 // Vertical descent kinematic brake: the maximum allowed descent speed is
                 // vSafeDown (>= 0).
@@ -2929,6 +2959,17 @@ export class Drone {
             }
         }
 
+        // Standalone climb speed cap (symmetric to vSafeDown): returned so _controlYOPO can cap
+        // ANY upward velocity target (the final-approach PD climb, vRep fly-over, upPush) by the
+        // measured overhead clearance. This is what lets the climb ignore the HORIZONTAL brake
+        // (climbing away from a wall is the correct escape) while staying physically unable to
+        // hit a ceiling / overhang straight above.
+        let vSafeUp = null;
+        if (Number.isFinite(p.vUpDist)) {
+            const su = this.yopoAvoidStop;
+            vSafeUp = p.vUpDist <= su ? 0 : Math.sqrt(2 * aDecel * (p.vUpDist - su));
+        }
+
 
 
         // Near-obstacle braking: two-layer progressive deceleration for both sensitivity and a
@@ -3391,7 +3432,7 @@ export class Drone {
         const vCloseMax = (!dAheadHasDir || gateBeyondGoal) ? Infinity
             : (dGate > 0 ? Math.sqrt(2 * this.yopoAvoidBrakeDecel * dGate) : 0);
 
-        return { repX, repZ, tanX, tanZ, brake, upPush, vRep, vSafeDown, vGoX, vGoZ,
+        return { repX, repZ, tanX, tanZ, brake, upPush, vRep, vSafeDown, vSafeUp, vGoX, vGoZ,
                  threatDirX: dAheadDirX, threatDirZ: dAheadDirZ,
                  threatHasDir: dAheadHasDir, vCloseMax,
                  // Diagnostic: true when the way to the goal was judged open and the avoidance
