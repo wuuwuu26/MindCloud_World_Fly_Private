@@ -311,35 +311,6 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 
 构建上下文排除了 `.git`、`node_modules`、`__pycache__`、`*.pyc`、`scene/*`、`asset/gate-paths/*.tmp`、`third_party/DA360/checkpoints`（DA360 权重），避免把无关/大文件打进镜像；DA360 源码仍随镜像提供。
 
-## DA360 深度估计
-
-注意，默认使用 `DA360_large`，`scripts/start_da360_api.sh` 以 `DA360_INPUT_SCALE=0.65` 启动其容器，模型输入约为 `672x336`（checkpoint 基准 1036×518 × 0.65；已在本机 RTX 4070 Laptop GPU 8GB 上验证可稳定运行；`da360_server.py` 自身的默认值是 `1.0`，即按 checkpoint 原分辨率推理）。
-
-全景 RGB 默认就采集 `384x192` ERP，右下角显示即此原始尺寸；这个尺寸与 DA360 输出、YOPO 消费的尺寸完全一致，因此 `da360UploadScale` 默认为 `1.0`——原样上传、不再缩放，服务端 resize 到 `672x336` 模型输入，推理后把深度贴回 `384x192`。在本机 RTX 4070 Laptop GPU（8GB）上，单次 DA360 深度推理约 **50ms（≈20Hz）**；前端默认 `depthMs=33`（深度请求最小间隔 ≈30Hz，略高于推理耗时）以保证推理不会堆积请求。
-
-默认不建议换模型；实验中 `DA360_large` 的 fast 档比 `DA360_small` 保留了更好的深度排序和边缘一致性。只有显存、功耗或部署体积受限时，再自行覆盖模型名：
-
-```bash
-DA360_MODEL=<large|base|small> ./scripts/download_da360_model.sh
-DA360_MODEL=<large|base|small> ./scripts/start_da360_api.sh
-```
-
-如需主动调整 DA360 服务端模型输入尺寸，可设置推理 scale 或指定模型输入宽高；过低的 `DA360_INPUT_SCALE` 可能让 large 模型输出条带化深度，不建议低于 `0.46`。resize 采样方式在两处默认值不同：`da360_server.py` 自身默认 `bilinear`，而 `scripts/start_da360_api.sh` 默认用 `bicubic` 覆盖它并传入容器（即走一键启动时实际生效的是 `bicubic`）：
-
-```bash
-DA360_INPUT_SCALE=1.0 ./scripts/start_da360_api.sh
-DA360_INPUT_SCALE=0.46 ./scripts/start_da360_api.sh
-DA360_INPUT_WIDTH=476 ./scripts/start_da360_api.sh
-DA360_INPUT_WIDTH=672 DA360_INPUT_HEIGHT=336 ./scripts/start_da360_api.sh
-DA360_RESAMPLE=bilinear ./scripts/start_da360_api.sh
-```
-
-推理服务不在本机时：
-
-```text
-http://127.0.0.1:8080/?da360Url=http://<host>:5688/depth
-```
-
 ## 全景相机实现原理
 
 全景 RGB 默认从机头 360 相机位置采集，输出 `384x192` ERP 图。实现方式是对 Cesium/Google Tiles 渲染结果进行 6 个方向采样，然后在 GPU 中按 ERP 射线模型重投影：
@@ -379,6 +350,35 @@ http://127.0.0.1:8080/?panoTopPoleGuard=0&panoBottomPoleGuard=0
 # 想减带宽 / 提实时性可下调（变为 192×96）；要更高精度应放大 panoWidth 而非上传缩放
 http://127.0.0.1:8080/?da360UploadScale=0.5
 http://127.0.0.1:8080/?da360UploadWidth=512
+```
+
+## DA360 深度估计
+
+注意，默认使用 `DA360_large`，`scripts/start_da360_api.sh` 以 `DA360_INPUT_SCALE=0.65` 启动其容器，模型输入约为 `672x336`（checkpoint 基准 1036×518 × 0.65；已在本机 RTX 4070 Laptop GPU 8GB 上验证可稳定运行；`da360_server.py` 自身的默认值是 `1.0`，即按 checkpoint 原分辨率推理）。
+
+全景 RGB 默认就采集 `384x192` ERP，右下角显示即此原始尺寸；这个尺寸与 DA360 输出、YOPO 消费的尺寸完全一致，因此 `da360UploadScale` 默认为 `1.0`——原样上传、不再缩放，服务端 resize 到 `672x336` 模型输入，推理后把深度贴回 `384x192`。在本机 RTX 4070 Laptop GPU（8GB）上，单次 DA360 深度推理约 **50ms（≈20Hz）**；前端默认 `depthMs=33`（深度请求最小间隔 ≈30Hz，略高于推理耗时）以保证推理不会堆积请求。
+
+默认不建议换模型；实验中 `DA360_large` 的 fast 档比 `DA360_small` 保留了更好的深度排序和边缘一致性。只有显存、功耗或部署体积受限时，再自行覆盖模型名：
+
+```bash
+DA360_MODEL=<large|base|small> ./scripts/download_da360_model.sh
+DA360_MODEL=<large|base|small> ./scripts/start_da360_api.sh
+```
+
+如需主动调整 DA360 服务端模型输入尺寸，可设置推理 scale 或指定模型输入宽高；过低的 `DA360_INPUT_SCALE` 可能让 large 模型输出条带化深度，不建议低于 `0.46`。resize 采样方式在两处默认值不同：`da360_server.py` 自身默认 `bilinear`，而 `scripts/start_da360_api.sh` 默认用 `bicubic` 覆盖它并传入容器（即走一键启动时实际生效的是 `bicubic`）：
+
+```bash
+DA360_INPUT_SCALE=1.0 ./scripts/start_da360_api.sh
+DA360_INPUT_SCALE=0.46 ./scripts/start_da360_api.sh
+DA360_INPUT_WIDTH=476 ./scripts/start_da360_api.sh
+DA360_INPUT_WIDTH=672 DA360_INPUT_HEIGHT=336 ./scripts/start_da360_api.sh
+DA360_RESAMPLE=bilinear ./scripts/start_da360_api.sh
+```
+
+推理服务不在本机时：
+
+```text
+http://127.0.0.1:8080/?da360Url=http://<host>:5688/depth
 ```
 
 ## YOPO 自主导航
