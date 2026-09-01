@@ -1,7 +1,9 @@
 __pycache__/
 *.pyc
 tools/
-third_party/DA360/
+# DA360 源码纳入版本管理；仅排除权重(checkpoints)与缓存
+third_party/DA360/checkpoints/
+third_party/DA360/data/images/Thumbs.db
 .trae/
 # Broken symlinks (pointing at absolute paths outside the repo); do not commit
 third_party/yopo/saved/YOPO_1/epoch50.pth
