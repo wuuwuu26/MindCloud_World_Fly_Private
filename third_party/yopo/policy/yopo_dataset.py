@@ -197,7 +197,7 @@ class YOPODataset(Dataset):
 
     def plot_sample_distribution(self):
         import matplotlib.pyplot as plt
-        # ===== 采样 =====
+        # ===== sampling =====
         N = 10000
         goals = np.array([self._get_random_goal(self.fixed_height) for _ in range(N)])
         states = np.array([self._get_random_state() for _ in range(N)])
@@ -205,12 +205,12 @@ class YOPODataset(Dataset):
         accs = np.stack([s[1] for s in states])
 
         x, y, z = goals[:, 0], goals[:, 1], goals[:, 2]
-        yaw = np.degrees(np.arctan2(y, x))  # 水平角 [-180, 180]
-        pitch = np.degrees(np.arctan2(z, np.sqrt(x ** 2 + y ** 2)))  # 垂直角 [-90, 90]
+        yaw = np.degrees(np.arctan2(y, x))  # horizontal angle [-180, 180]
+        pitch = np.degrees(np.arctan2(z, np.sqrt(x ** 2 + y ** 2)))  # vertical angle [-90, 90]
 
         fig, axs = plt.subplots(3, 3, figsize=(15, 10))
 
-        # Goal方向角分布
+        # Goal bearing angle distribution
         axs[0, 0].hist(yaw, bins=180)
         axs[0, 0].set_title("Goal Yaw Distribution")
         axs[0, 0].set_xlabel("Yaw (deg)")
@@ -223,7 +223,7 @@ class YOPODataset(Dataset):
         axs[0, 1].set_xlim([-60, 60])
         axs[0, 1].grid(True)
 
-        # Goal往图像投影分布(未考虑机体旋转)
+        # Goal distribution projected into the image (body rotation not applied)
         axs[0, 2].scatter(yaw, pitch, s=2, alpha=0.3)
         axs[0, 2].set_title("Goal Distribution in Image")
         axs[0, 2].set_xlabel("Yaw (deg)")
@@ -232,13 +232,13 @@ class YOPODataset(Dataset):
         axs[0, 2].set_ylim([-30, 30])
         axs[0, 2].grid(True)
 
-        # Velocity分布
+        # Velocity distribution
         for i, name in enumerate(['Vx', 'Vy', 'Vz']):
             axs[1, i].hist(vels[:, i], bins=100)
             axs[1, i].set_title(f"Velocity {name}")
             axs[1, i].grid(True)
 
-        # Acceleration分布
+        # Acceleration distribution
         for i, name in enumerate(['Ax', 'Ay', 'Az']):
             axs[2, i].hist(accs[:, i], bins=100)
             axs[2, i].set_title(f"Acceleration {name}")
@@ -262,7 +262,7 @@ if __name__ == '__main__':
         data_loader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=nw)
         start = time.time()
         for i, _ in enumerate(data_loader):
-            if i > 50:  # 只测前50个batch
+            if i > 50:  # only benchmark the first 50 batches
                 break
         torch.cuda.synchronize() if torch.cuda.is_available() else None
         elapsed = time.time() - start
@@ -270,4 +270,4 @@ if __name__ == '__main__':
         print(f"num_workers={nw}: {elapsed:.3f}s")
 
     best = min(results, key=lambda x: x[1])
-    print(f"\n✅ 最优 num_workers = {best[0]}, 平均耗时={best[1]:.3f}s")
+    print(f"\nBest num_workers = {best[0]}, average time = {best[1]:.3f}s")

@@ -59,7 +59,7 @@ class Polys5Solver:
         return result.flatten()
 
 def wrap_to_pi(angle):
-    """将角度限制在 [-pi, pi]"""
+    """Wrap an angle into [-pi, pi]."""
     return (angle + np.pi) % (2 * np.pi) - np.pi
 
 def calculate_yaw(vel_dir, goal_dir, last_yaw, dt, max_yaw_rate=0.5):

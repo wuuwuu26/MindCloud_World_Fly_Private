@@ -1,9 +1,13 @@
 # IMPORTANT: velocity in testing (modifiable)
-# 规划巡航速度上限(米/秒)。归一化用 vel_max_train(固定 6.0), 改这里只放大物理轨迹速度,
-# 不影响网络输入分布。此处原始值 16.0 偏激进: 对应 acc_max≈42.7 m/s², 无人机易"突然猛冲"。
-# 实际部署默认由 restart_all.sh 设 YOPO_VELOCITY=8.0 覆盖: vel_max≈8 m/s, acc_max≈10.7 m/s²,
-# 兼顾速度与安全。可经 YOPO_VELOCITY 调回 10/12/16(重启生效); 注意速度越高,
-# 同推理延迟下滑行距离越长, 越容易追不上而出现速度突跳。
+# Upper bound on the planned cruise speed (m/s). Normalisation uses vel_max_train
+# (fixed at 6.0), so changing this only scales the physical trajectory speed and does
+# not alter the network input distribution. The upstream default of 16.0 is aggressive
+# (acc_max then works out at about 42.7 m/s^2, which makes the drone lurch).
+# Deployment overrides it through YOPO_VELOCITY=8.0 in restart_all.sh, giving vel_max
+# about 8 m/s and acc_max about 10.7 m/s^2 -- a compromise between speed and safety.
+# Set YOPO_VELOCITY to 10 / 12 / 16 to go back (takes effect after a restart); the
+# faster it flies, the longer the coast distance per inference delay, so tracking falls
+# behind and the commanded speed starts jumping.
 velocity: 16.0
 fixed_height: 0.8  # keep the local terminal altitude fixed in world frame
 
@@ -20,7 +24,7 @@ wc: 2.0    # collision    (distance to obstacle)
 wh: 20.0   # height hold  (keep the local trajectory close to the fixed-height plane)
 
 # dataset: set image_size = primitive_num × downsampling_factor (×32 for ResNet-18) in each axis
-# AirSim360 风格全 ERP: image_height = vertical_num × 32 = 6 × 32 = 192, image_width = horizon_num × 32 = 12 × 32 = 384
+# AirSim360-style full ERP: image_height = vertical_num × 32 = 6 × 32 = 192, image_width = horizon_num × 32 = 12 × 32 = 384
 dataset_path: "../dataset"
 image_height: 192
 image_width: 384
@@ -28,9 +32,9 @@ image_channels: 2     # 0: normalized depth, 1: validity mask (1=valid)
 
 # trajectory and primitive param (Note: traj_time = 2 * radio / vel_max) (can be visualized in rviz)
 horizon_num: 12               # 12 anchors evenly spaced over 360°
-vertical_num: 6               # AirSim360 全 ERP: 6 anchors over 180° vertical
+vertical_num: 6               # AirSim360-style full ERP: 6 anchors over 180° vertical
 horizon_camera_fov: 360.0     # full panorama
-vertical_camera_fov: 180.0    # AirSim360 全 ERP 垂直覆盖
+vertical_camera_fov: 180.0    # AirSim360-style full ERP vertical coverage
 horizon_anchor_fov: 30.0      # 360 / 12 = 30, exact closed loop
 vertical_anchor_fov: 30.0     # 180 / 6 = 30, exact closed loop
 radio_range: 5.0    # planning horizon: 2 * radio_range

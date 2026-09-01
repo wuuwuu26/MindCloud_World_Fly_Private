@@ -20,7 +20,7 @@ class StateTransform:
         # [B, 9, 3, 5] -> [B, 3, 5, 9] -> [B, 15, 9]
         endstate_pred = endstate_pred.permute(0, 2, 3, 1).reshape(B, V * H, 9)
 
-        # 获取 lattice angle 和 rotation (.flip: 由于lattice和grid的顺序相反)
+        # Get the lattice angle and rotation (.flip: the lattice and grid orders are reversed)
         yaw, pitch = self.lattice_primitive.getAngleLattice()  # [15]
         yaw = yaw.flip(0)[None, :].expand(B, -1)  # [B, 15]
         pitch = pitch.flip(0)[None, :].expand(B, -1)  # [B, 15]
@@ -41,7 +41,7 @@ class StateTransform:
         endstate_vp = endstate_pred[:, :, 3:6] * self.lattice_primitive.vel_max  # [B, 15, 3]
         endstate_ap = endstate_pred[:, :, 6:9] * self.lattice_primitive.acc_max  # [B, 15, 3]
 
-        # v/a 变换到 body frame
+        # Transform v/a into the body frame
         endstate_vb = torch.matmul(Rbp, endstate_vp.unsqueeze(-1)).squeeze(-1)  # [B, 15, 3]
         endstate_ab = torch.matmul(Rbp, endstate_ap.unsqueeze(-1)).squeeze(-1)
 
@@ -85,16 +85,16 @@ class StateTransform:
         """
         B, N = obs.shape[0], self.lattice_primitive.traj_num
 
-        # 获取所有 Rbp 并倒序排列 (由于lattice和grid的顺序相反)
+        # Collect every Rbp and reverse the order (the lattice and grid orders are reversed)
         Rbp_all = self.lattice_primitive.getRotation().flip(0)  # shape: [N, 3, 3]
 
         obs = obs.view(B, 3, 3)  # [B, 3, 3]
 
-        # 扩展 obs 和 Rbp 到 [B, N, 3, 3]
+        # Expand obs and Rbp to [B, N, 3, 3]
         obs_exp = obs[:, None, :, :].expand(B, N, 3, 3)
         Rbp_exp = Rbp_all[None, :, :, :].expand(B, N, 3, 3)
 
-        # 执行批量坐标变换
+        # Batched coordinate transform
         transformed = torch.matmul(obs_exp, Rbp_exp)  # [B, N, 3, 3]
 
         transformed_flat = transformed.view(B, N, 9)  # [B, N, 9]

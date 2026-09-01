@@ -3,5 +3,5 @@ __pycache__/
 tools/
 third_party/DA360/
 .trae/
-# 损坏的符号链接（指向仓库外绝对路径），不提交
+# Broken symlinks (pointing at absolute paths outside the repo); do not commit
 third_party/yopo/saved/YOPO_1/epoch50.pth
