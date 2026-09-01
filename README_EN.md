@@ -420,29 +420,24 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   `yopoFinalApproachDist=12.0` (judged by the **3D distance**, so a horizontally-close but
   vertically-far goal does not switch) a PD loop takes over (position loop + velocity/acceleration
   feed-forward, with a rate limit on the velocity change to avoid jitter).
-  - **The ray layer stays active inside the takeover zone and keeps priority**: probing and braking
-    run throughout; once the ray layer sees a real threat (filtered `brake < 0.97`), the tangential
-    detour (tan) fades in over 0.4 s with hysteresis and goes through the same lateral speed budget
-    as the PD (budget base ≥ `yopoCruiseMinSpd`), so avoidance takes **priority** over the
-    PD's straight-in component (`rep`/`vGo`/`vRep` stay off to avoid fighting the PD along the goal
-    line); it falls back to the pure PD once the corridor is clear again (`brake > 0.995`).
-    **The ray layer stands fully DOWN at the takeover end-game**: inside the last
-    `yopoTakeoverSteerEndDist = 3.0` m, or when the goal sits against a wall (the `gateBeyondGoal`
-    release puts `vCloseMax = ∞`, i.e. the threat IS the goal), the ray layer immediately backs off —
-    `brake` is forced to 1 (no more velTarget scaling), the tangential steer is switched off and the
-    braking feed-forward is dropped, handing full control back to the PD. Otherwise the ray layer reads
-    the wall-adjacent goal as an obstacle: tan keeps shoving the drone off the wall while the PD pulls
-    it back, the two fight back and forth → `yopoArrived` never latches because the speed is held off
-    the goal → the drone sways at the goal forever. This stand-down only switches **OFF the tangential
-    steer** (tan/vGo/vRep/upPush); `brake` and a *sanitised* `rep` (the component that would push the
-    drone AWAY from the goal is stripped, keeping the side/rear push) still run, so a wall-adjacent goal
-    does not swing while side/rear obstacles stay guarded (fixes "rear also hits obstacles"); the PD's
-    `holdMaxV = √(2ad)` already guarantees a physically stoppable run-in. Crucially, the whole ray block
-    used to be skipped entirely once `arrived` (`!yopoArrived`) → after arrival there was NO avoidance
-    and a side/rear obstacle could be hit. Now the ray layer **keeps running after arrival too** (brake +
-    sanitised rep only, never steer) — "the ray avoidance always has priority": when parked next to a
-    wall/obstacle the side/rear thrust keeps pushing the drone to a safe distance instead of pinning it
-    on the hazard.
+  - **Ray avoidance inside the takeover zone: brake only, no shoving (fixes "sways for ages after takeover")**:
+    across the whole zone (< 12 m, `yopoGoalRepSuppressDist = 12.0` aligned with `yopoFinalApproachDist`)
+    the ray layer keeps ONLY `brake` (speed-magnitude scaling) and the closing-speed gate (clips the
+    component closing on an obstacle) — the directional disturbances `rep` (repulsion) and `tan`
+    (tangential detour) are forced to zero. Reason: any residual rep/tan lateral force in the takeover
+    zone keeps the combined speed above the arrival threshold (`yopoArriveHoldV`), so `yopoArrived`
+    never latches and the drone is stuck oscillating inside the takeover PD fighting the avoidance layer
+    (= "sways for ages"). Once decoupled, the PD converges cleanly and the speed drops monotonically
+    below the threshold, so it locks `arrived` and switches to a pure hover (no swing).
+    **Full hand-over at the very end**: inside the last `yopoTakeoverSteerEndDist = 3.0` m, or when the
+    goal sits against a wall (`gateBeyondGoal` release puts `vCloseMax = ∞`, i.e. the threat IS the goal),
+    `brake` is forced to 1, the tangential steer is switched off and the braking feed-forward is dropped,
+    handing full control to the PD (whose `holdMaxV = √(2ad)` already guarantees a physically stoppable
+    run-in). **After arrival the side/rear protection still runs ("the ray avoidance always has priority")**:
+    the whole ray block is no longer skipped once `arrived` — it then keeps only a *sanitised* `rep`
+    (the component that would push the drone AWAY from the goal is stripped, keeping the side/rear push),
+    never steer, so a goal parked next to a wall/obstacle is pushed to a safe distance instead of pinned
+    on the hazard, and a wall-adjacent goal does not swing.
   - **Faster, calmer settle after takeover**: the velocity-target slew cap `yopoTakeoverSlew`
     20 → 14 m/s² (still above the airframe's acceleration ceiling, so it only filters frame-to-frame
     steps) and the slew now covers the **vertical axis** too (removes the vertical bobbing at the
@@ -476,7 +471,7 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   vertical channel with a P-converging climb/descent and keeps only 30% of the horizontal command,
   removing large circling; it yields back to the network when the clearance straight above / below is
   insufficient.
-- **Arrival and deadband**: arrival latches when within 3.5 m of the goal and below 1 m/s; inside the
+- **Arrival and deadband**: arrival latches when within 4.0 m of the goal and below 1.3 m/s (thresholds widened: with the takeover zone decoupled from directional avoidance the PD converges cleanly, so it can lock earlier and cut the end-game sway); inside the
   2.5 m horizontal deadband it switches to a direct climb/descent to converge the altitude, and below
   0.35 m the PD stops correcting and only trims the altitude slightly, avoiding jitter around the goal.
 
@@ -720,7 +715,7 @@ During navigation:
   this geometric layer goes to zero and does not interfere with navigation — see "Avoidance
   Architecture and Tuning".
 - Arrival has two layers: the server flags arrival within 2 m of the goal (`ARRIVE_THRESHOLD`); the
-  client additionally latches arrival within 3.5 m and below 1 m/s, so the asynchronous server reply
+  client additionally latches arrival within 4.0 m and below 1.3 m/s, so the asynchronous server reply
   cannot leave it "always one step short"
 - Press **`X`** (or click **"Stop Nav"**) to end navigation
 

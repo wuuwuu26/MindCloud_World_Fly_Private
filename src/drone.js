@@ -227,8 +227,14 @@ export class Drone {
         // overshoot in attitude and sway at the goal. A tighter cap = fewer steps get through =
         // a calmer, quicker settle.
         this.yopoTakeoverSlew = 14.0;
-        this.yopoArriveHoldM = 3.5;        // Client-side arrival lock distance threshold (m)
-        this.yopoArriveHoldV = 1.0;        // Client-side arrival lock speed threshold (m/s)
+        this.yopoArriveHoldM = 4.0;        // Client-side arrival lock distance threshold (m);
+                                          // RAISED 3.5 -> 4.0: with the takeover zone decoupled from
+                                          // directional avoidance the PD converges cleanly, so an earlier
+                                          // lock cuts the settle time (well inside the 12 m takeover zone).
+        this.yopoArriveHoldV = 1.3;        // Client-side arrival lock speed threshold (m/s);
+                                          // RAISED 1.0 -> 1.3: speed hovers near 1.0 m/s at the goal, so the
+                                          // old 1.0 made lock chatter / never latch -> "sways forever". 1.3
+                                          // latches as soon as the run-in is essentially stopped.
         // Deadband around the goal (m): once latched AND this close, the final-approach PD stops
         // correcting entirely. Without it the PD keeps chasing a sub-decimetre residual error and
         // the drone never truly goes still -- it traces a small jitter around the goal point.
@@ -2094,12 +2100,16 @@ export class Drone {
             this._updateAvoidProbe();
             avoid = this._avoidanceVelocity(velTargetX, velTargetZ);
             if (avoid) {
-                // ── "射线避障时刻优先"：接管末端 / 已到达也要避开侧/后方障碍 ──
-                // 过去整个射线块被 !yopoArrived 跳过，到达后彻底不做避开 -> 侧/后方障碍会撞；
-                // 现在 arrived 也进入本块。接管末端把 rep 里"把无人机推离目标"的分量剔除（贴墙
-                // 目标不会被 rep 推出去 swing），保留侧/后方障碍的排斥（解决"后方也容易撞到障碍物"）。
-                // arrived 之后只做 brake + 清洗后的 rep（侧/后方保护），关闭转向 steer，避免末端摆动。
-                if (nearGoalNoRep || this.yopoArrived) {
+                // ── 结构性修复"接管后晃很久"：接管区解耦方向性避障，到达后才做侧/后方保护 ──
+                // 根因：yopoArrived 一旦 lock 就保持，判定要求 distGoal<holdM 且 spdNow<holdV。
+                // 接管区(nearGoalNoRep 且 !arrived)若保留 rep / tan 的横向力，速度始终 > holdV，
+                // arrived 永远判不出 -> 无人机一直卡在接管 PD 里与避障拉扯 = 持续振荡（"晃很久"）。
+                // 故接管区(未到达)彻底关闭方向性扰动：repScale 保持 0、steerFade 保持 0（见下），
+                // 只留 brake(速度大小缩放) + closing-speed gate(抑制朝障碍的速度分量)。PD 干净收敛、
+                // 速度单调降到 < holdV，才能 lock arrived 切入纯 hover（无 swing）。
+                // 到达(arrived)之后：保留"剔除推离目标分量"的 rep 做侧/后方保护（射线避障时刻优先），
+                // 但关掉转向 steer，避免末端摆动。
+                if (this.yopoArrived) {
                     const gdx = this.yopoNavTarget.x - this.x;
                     const gdz = this.yopoNavTarget.z - this.z;
                     const gl = Math.hypot(gdx, gdz);
@@ -2112,11 +2122,8 @@ export class Drone {
                         }
                     }
                     repScale = 1.0;               // rep 已不含推离目标分量，安全启用（保护侧/后方）
-                }
-                if (this.yopoArrived) {
-                    // 已到达：只保留 brake + 清洗后的 rep（侧/后方保护），关闭转向 steer，避免末端摆动
                     this._takeoverSteerOn = false;
-                    this._takeoverSteerRamp = 0;
+                    this._takeoverSteerRamp = 0;  // 已到达：关 tan，仅 brake + 清洗后 rep
                 }
                 // Smooth the ray brake: asymmetric low-pass, TIGHTEN AT ONCE / RELEASE SLOWLY.
                 // The probe is noisy near a goal that sits against a building -- measured: brake
@@ -2215,7 +2222,7 @@ export class Drone {
                     // simply dropped there so it cannot shove the drone off a goal against a wall.
                     // steerFade is 1 in cruise and follows the takeover ramp inside the zone, so
                     // the tangential detour fades in/out smoothly there (see the ramp above).
-                    const steerFade = nearGoalNoRep ? (this._takeoverSteerRamp || 0) : 1.0;
+                    const steerFade = nearGoalNoRep ? 0.0 : 1.0;   // 接管区彻底关 tan：只 brake+closing gate，PD 干净收敛才能 lock arrived（否则横向力让速度降不到阈值 -> 持续振荡）
                     let steerX = avoid.repX * repScale + avoid.tanX * steerFade;
                     let steerZ = avoid.repZ * repScale + avoid.tanZ * steerFade;
                     // Cap the detour vector ITSELF. Previously lateralBudget only shrank fwdAllow
