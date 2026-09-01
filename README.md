@@ -508,23 +508,6 @@ GPU 渲染 + 回读同步），且**同步跑在渲染帧循环里**。单次探
 浏览器控制台执行 `__yopoPerf()` 可查看实测指标（`fps` / `probeMsAvg` / `probeHz` / `depthHz` /
 `cmdHz` / `ringAgeMaxMs`），用于判断瓶颈是否已解除。
 
-### 启动 YOPO 后端
-
-> YOPO 避障后端由 `restart_all.sh` 一键拉起（默认启用 TensorRT + `YOPO_VELOCITY=15`）；以下命令仅在需要手动单独构建/启动时使用。
-
-```bash
-# 首次需要构建 Docker 镜像
-YOPO_FORCE_BUILD=1 ./scripts/start_yopo_api.sh
-
-# 后续启动（自动跳过构建，挂载本地 yopo_server.py）
-./scripts/start_yopo_api.sh
-
-# 构建时如遇代理问题，确保本机 7890 端口代理可用
-# Dockerfile.yopo 使用 --network=host + http://127.0.0.1:7890
-```
-
-服务运行在 `http://127.0.0.1:5689`。`yopo_server.py` 通过 Docker volume 挂载，修改后无需重建镜像。
-
 ### YOPO 后端关键环境变量
 
 由 `scripts/start_yopo_api.sh` 转发进容器：
