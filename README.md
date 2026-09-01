@@ -19,7 +19,7 @@ git clone https://github.com/wuuwuu26/MindCloud_World_Fly_Private.git
 cd MindCloud_World_Fly_Private
 ```
 
-> 注意：DA360 的**源码**已随仓库纳入版本管理（`.gitignore` 仅忽略权重目录 `third_party/DA360/checkpoints/`），克隆后即可获得源码；但**权重**（`DA360_large.pth`，约 1.3GB，超 GitHub 100MB 限制）未入库，运行深度服务前需先下载权重。
+> 注意：DA360 的**源码**已随仓库纳入版本管理（对 DA360 而言 `.gitignore` 只忽略权重目录 `third_party/DA360/checkpoints/`，完整忽略清单见仓库根目录 `.gitignore`），克隆后即可获得源码；但**权重**（`DA360_large.pth`，约 1.3GB，超 GitHub 100MB 限制）未入库，运行深度服务前需先下载权重。
 
 ## 快速开始（一键启动全部服务）
 
@@ -31,13 +31,10 @@ cd MindCloud_World_Fly_Private
 
 该脚本等价于依次启动：DA360 深度服务 → YOPO 导航服务 → 主飞行进程（`launch.sh`）。启动后浏览器打开 `http://127.0.0.1:8080`，点击 **Start Google 3D Tiles Flight**，进入放置模式设置出生点后按 `O` 起飞，即可用键盘飞行。
 
-> YOPO 推理默认走 TensorRT 加速（引擎 `asset/yopo-trt/yopo_trt.pth` 已随仓库提供），`restart_all.sh` 检测到引擎即自动启用，无需额外操作；详情见「YOPO TensorRT 加速」。
+> YOPO 推理默认走 TensorRT 加速（引擎 `asset/yopo-trt/yopo_trt.pth` 已随仓库提供）。`restart_all.sh` **无条件**设 `YOPO_USE_TRT=1`，无需额外操作；引擎缺失时它只打印一条 WARN，实际由 `scripts/start_yopo_api.sh` 在 YOPO 容器内用 GPU 自动构建引擎。详情见「YOPO TensorRT 加速」。
 
 ```bash
-# 常用方式
-./restart_all.sh --detach          # 后台运行（Docker detach）
-
-# 只重启部分服务（其余保留）
+# 只重启部分服务（其余保留；三个服务默认都以后台 detach 方式运行）
 ./restart_all.sh --no-da360        # 只重启 YOPO + 主飞行
 ./restart_all.sh --no-yopo         # 只重启 DA360 + 主飞行
 ./restart_all.sh --no-main         # 只重启 DA360 + YOPO
@@ -57,7 +54,7 @@ docker rm -fv google-tiles-flight mindcloud-da360-api mindcloud-yopo-api
 | `mindcloud-da360-api` | DA360 深度服务（`http://127.0.0.1:5688`） | `scripts/start_da360_api.sh` 的 `DA360_CONTAINER_NAME` |
 | `mindcloud-yopo-api` | YOPO 避障后端（`http://127.0.0.1:5689`） | `scripts/start_yopo_api.sh` 的 `YOPO_CONTAINER_NAME` |
 
-如需改名，可设置对应的环境变量覆盖（如 `DA360_CONTAINER_NAME=my-da360 ./restart_all.sh`），停止时请用改动后的名字。
+容器名在 `restart_all.sh` 里是**硬编码赋值**（`DA360_NAME=` / `YOPO_NAME=` / `MAIN_NAME=`），**不接受环境变量覆盖**——`DA360_CONTAINER_NAME=my-da360 ./restart_all.sh` 不会生效。要改名请直接改这三个变量；或者单独调用对应的入口脚本，那三个脚本支持 `DA360_CONTAINER_NAME` / `YOPO_CONTAINER_NAME` / `NAME` 环境变量。
 
 若只想先飞（纯键盘/手柄/RC，不依赖子服务），也可单独运行主进程：
 
@@ -129,7 +126,7 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 
 ### YOPO 避障后端（`Dockerfile.yopo`）
 
-- 系统依赖：`libgl1-mesa-glx`、`libglib2.0-0`、`ca-certificates`；Python 依赖：`numpy<2`、`pillow`、`opencv-python-headless`、`scipy`、`flask`、`flask-cors`、`ruamel.yaml`、`websockets`。
+- 系统依赖：`libgl1-mesa-glx`、`libglib2.0-0`、`ca-certificates`；Python 依赖：`numpy<2`、`pillow`、`opencv-python-headless`、`scipy`、`flask`、`flask-cors`、`ruamel.yaml`、`websockets`，以及 TensorRT 相关的 `tensorrt==8.6.1.post1`、`onnx`。
 - 镜像内直接拷入 `scripts/yopo_server.py` 与 `third_party/yopo/`（含权重）。
 - `scripts/start_yopo_api.sh` 构建/运行要点：
   - 构建用 `--network=host`，让容器内 `127.0.0.1:7890` 能访问宿主机代理装 pip；并把宿主 `HTTP(S)/FTP/ALL/NO_PROXY` 转发为 build args（`YOPO_PIP_NO_PROXY=1` 可关闭）。
@@ -141,17 +138,17 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 ### DA360 深度服务（`Dockerfile.da360`）
 
 - Python 依赖：`numpy<2`、`flask`、`flask-cors`、`opencv-python-headless`、`pillow`、`timm`、`tqdm`、`xformers`。
-- `COPY third_party/DA360` 进镜像：DA360 **源码**已随仓库提供（`.gitignore` 仅忽略 `third_party/DA360/checkpoints/`；`.dockerignore` 同样只排除 `third_party/DA360/checkpoints/`），构建时无需先拉源码；**权重** `checkpoints/DA360_large.pth` 不入镜像，由 `scripts/start_da360_api.sh` 在运行前下载（或挂载本地权重）后通过 `--model-path` 指定。
+- `COPY third_party/DA360` 进镜像：DA360 **源码**已随仓库提供（`.gitignore` 与 `.dockerignore` 对 DA360 都只排除权重目录 `third_party/DA360/checkpoints/`，完整排除清单见仓库根目录 `.dockerignore`），构建时无需先拉源码；**权重** `checkpoints/DA360_large.pth` 不入镜像，由 `scripts/start_da360_api.sh` 在运行前下载（或挂载本地权重）后通过 `--model-path` 指定。
 - `scripts/start_da360_api.sh` 构建/运行要点：
   - 构建网络与代理转发同 YOPO（`DA360_BUILD_NETWORK`；额外从 `git config` 探测宿主机代理 `DA360_BUILD_PROXY`）。
-  - 会给镜像打 `mindcloud.da360.server_sha` label：已有镜像且 server 脚本 SHA 一致时**自动跳过重建**；`DA360_FORCE_BUILD=1` 或脚本内容变化才重建。
+  - 会给镜像打 `mindcloud.da360.server_sha` label。跳过重建有两条路径：默认 `DA360_MOUNT_SERVER=1` 时**只要镜像存在就无条件跳过**（不比较 SHA，因为脚本会被只读挂载进去覆盖同名文件）；设 `DA360_MOUNT_SERVER=0` 后才改为比较 SHA——已有镜像且 server 脚本 SHA 一致时跳过，`DA360_FORCE_BUILD=1` 或脚本内容变化才重建。
   - 构建失败时**默认不启动过期镜像**（可用 `DA360_ALLOW_STALE_IMAGE=1` 放宽）。
   - 端口 5688；运行时只读挂载 `da360_server.py` 与模型权重。
 
 ### 构建超时 / 失败的常见原因
 
 - 两个 CUDA 后端的基础镜像 `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime` 体积很大，网络差时从 Docker Hub 拉取容易超时（`start_da360_api.sh` 失败提示中也直接点明了这一点）。
-- 处理办法：脚本已内置 3 次重试，网络恢复后重跑即可；或保证本机 `127.0.0.1:7890` 代理可用；也可把 `YOPO_BASE_IMAGE` / `DA360_BASE_IMAGE` 指向本地或镜像源镜像。
+- 处理办法：脚本已内置 3 次重试，网络恢复后重跑即可；或保证代理可达（YOPO 侧 `Dockerfile.yopo` 内置默认走 `127.0.0.1:7890`；DA360 侧没有硬编码端口，只转发宿主的 `HTTP(S)/FTP/ALL/NO_PROXY` 并从 `git config` 探测）；也可把 `YOPO_BASE_IMAGE` / `DA360_BASE_IMAGE` 指向本地或镜像源镜像。
 - 装 pip 依赖失败时，请确认以 `--network=host` 构建且代理可达。
 
 ### `.dockerignore`
@@ -187,7 +184,7 @@ DA360_MODEL=<large|base|small> ./scripts/download_da360_model.sh
 DA360_MODEL=<large|base|small> ./scripts/start_da360_api.sh
 ```
 
-如需主动调整 DA360 服务端模型输入尺寸，可设置推理 scale 或指定模型输入宽高；过低的 `DA360_INPUT_SCALE` 可能让 large 模型输出条带化深度，不建议低于 `0.46`。服务端 resize 默认使用 `DA360_RESAMPLE=bilinear`（与 DA360 原项目一致）：
+如需主动调整 DA360 服务端模型输入尺寸，可设置推理 scale 或指定模型输入宽高；过低的 `DA360_INPUT_SCALE` 可能让 large 模型输出条带化深度，不建议低于 `0.46`。resize 采样方式在两处默认值不同：`da360_server.py` 自身默认 `bilinear`，而 `scripts/start_da360_api.sh` 默认用 `bicubic` 覆盖它并传入容器（即走一键启动时实际生效的是 `bicubic`）：
 
 ```bash
 DA360_INPUT_SCALE=1.0 ./scripts/start_da360_api.sh
@@ -251,7 +248,7 @@ pitch = vfov / 2 - (v + 0.5) / H * vfov
 常用参数：
 
 ```text
-# 提升精度（默认已为 384×192；显存充裕可调高，带宽吃紧可降到 672）
+# 提升精度（默认已为 384×192；显存充裕可升到 672/896，带宽吃紧可降到 320）
 http://127.0.0.1:8080/?panoWidth=896&panoFace=224
 
 # 调整采样视图等待时间
@@ -289,7 +286,8 @@ http://127.0.0.1:8080/?da360UploadWidth=512
 - **3D 导航**：不做水平面投影，垂直避障由网络预测的 z 终端状态决定。
 - **轨迹生成**：三轴五阶多项式（Poly5Solver），从上次指令状态出发（`plan_from_reference=True`），轨迹连续、无往复。
 - **控制输出**：50Hz 评估多项式 → 位置/速度/加速度 + 偏航 → 前端级联 PID 跟踪。
-- **保护逻辑**：深度异常（整帧被 2m 内包围）悬停等待；终点接管（< 12m）跳过网络推理，由前端 PD 接管平滑收敛到目标点（位置环 + 速度/加速度前馈，带速度变化率上限避免抖动）。
+- **终点接管（< 12m）**：两端各有一层。服务端 `FINAL_APPROACH_DIST=12.0` 内停止网络推理，直接规划一条"末端速度/加速度为零"的五阶多项式——近目标处 `argmin(score)` 会反复挑出过冲/折返轨迹，叠加 `plan_from_reference` 会让目标方向观测翻转、位置速度持续振荡而永远到不了。客户端同样在 `yopoFinalApproachDist=12.0`（按**3D 距离**判定，水平近但垂直远时不切换）内由 PD 接管收敛（位置环 + 速度/加速度前馈，带速度变化率上限避免抖动）。
+- **深度可用性**：DA360 深度失败/超时时**不回退射线检测**，无人机原地悬停并持续重试，直到拿到有效深度图才恢复导航（详见「深度图」）。注：早期版本曾有"整帧被 2 m 内包围即判定深度异常并悬停"的检测，因在城市楼群中会把"近处像素多"误判为深度失效而频繁悬停，已按上游实现移除；深度有效性现交由 mask 通道与网络自身判断。
 - **巡航速度地板（`yopoCruiseMinSpd=12`）**：路径畅通且目标较远时，沿目标方位补齐前进速度，避免网络把速度压到爬行；避障刹车时自动让位，距目标 < `yopoCruiseMinDist=5` m 时关闭，尊重接管/到达减速。
 - **垂直优先直升降（`yopoVertFirst*`）**：当高度差占主导（水平距离 < 20 m 且 |Δh| > 5 m 且 > 1.2× 水平偏移）时，直接接管垂直通道做 P 收敛升降、水平只留 30%，消除大幅盘旋；正上/正下净空不足时让位回网络。
 - **到达与死区**：锁定且距目标 < 3.5 m、速度 < 1 m/s 判定到达；进入 2.5 m 水平死区时改为直升降收敛高度，< 0.35 m 时 PD 停止校正仅做轻微高度收敛，避免围绕目标抖动。
@@ -305,11 +303,11 @@ http://127.0.0.1:8080/?da360UploadWidth=512
 
 客户端几何层工作机制（见 `_avoidanceVelocity`）：
 
-- **探测**：以机体为圆心发 24 条水平射线（半径 55 m，15° 间隔）；另对最对齐前进方向的若干射线做上/下两层探测（供竖直越障判断）；另有正上/正下竖直射线。
+- **探测**：以机体为圆心发 24 条水平射线（半径 55 m，15° 间隔）；另对最对齐前进方向的 3 条射线做**上两层 + 下一层**（`high`/`high2`/`low`）共 3 层探测（供竖直越障判断）；另有正上/正下竖直射线。
 - **输出分量**：`rep`（径向推离）/ `tan`（切向绕行）/ `brake`（近障刹车）/ `vRep`（竖直越障）/ `vGo`（竖直障碍足迹水平绕行）/ `upPush` + `vSafeDown`（地面与下降安全）。
 - **刹车（射线层优先于网络）**：运动学硬刹车 `v_safe = √(2·a·(d − standoff))` 规划安全速度（`a` 用保守的 `yopoAvoidBrakeDecel≈7.5 m/s²` 留足余量）。触发刹车时：①**压制 YOPO 网络的加速度前馈**（否则网络轨迹加速度会正顶着障碍、与刹车减速相互抵消）；②沿当前速度反方向直接注入最强减速前馈（最高 `yopoAvoidBrakeAccel≈17.0 m/s²`，对应 60° 倾转上限 `droneMaxAngle=60`），且进入刹车即至少交付 `yopoAvoidBrakeMinFrac=0.85`（≈14.5 m/s²）让减速一踩就猛、够及时。威胁距离 `dAhead` 同时按"网络指令方向"与"无人机实际航向"取较小值，避免网络把指令拐向旁边就把正前方障碍排除、导致不刹车。
 - **侧向速度预算**：绕行时把"前进"与"侧向绕行"拆开预算——侧向最多占速度上限的 68%、前向至少保留 10%，让速度矢量真正偏向切向、贴着障碍滑过，而不是"边全速前冲边轻蹭"。
-- **畅通直飞（`goalClear`）**：以"机体→目标"和"命令速度方向"做双走廊判定（走廊半宽 2.5 m，28 m 内无障即畅通）。**通道畅通时 `rep`/`tan`/`brake`/`vRep` 全部归零、`vGo` 被抑制**，无人机全速直飞目标，不会被无谓推离或莫名绕行。
+- **畅通直飞（`goalClear`）**：分别沿"机体→目标"（`dPath`）和"命令速度方向"（`dCmd`）各算一次走廊，走廊半宽 2.5 m，**任一**走廊在 `reach = min(yopoAvoidRepRange, 到目标的水平距离)` 内无障即判定畅通（截断到目标距离是为了让"目标背后的墙"不会把走廊永久判为被挡）。近距例外：若距目标 < `yopoCorridorGuardDist`（12 m）且 `dPath` 被挡，则封掉 `dCmd` 这条逃生通道，避免贴着障碍直冲。**通道畅通时 `rep`/`tan`/`brake`/`vRep` 全部归零、`vGo` 被抑制**，无人机全速直飞目标，不会被无谓推离或莫名绕行。
 
 关键参数（均位于 `src/drone.js` 构造函数）：
 
@@ -349,14 +347,14 @@ http://127.0.0.1:8080/?da360UploadWidth=512
 
 #### 高速响应（射线预算与自适应作用距离）
 
-飞得快时"避障来不及 + 深度/指令更新慢"的根因是同一次阻塞：完整的环形探测要发 47 条
-`forceFresh` 的 `scene.pickFromRay`（每条都是一次完整 GPU 渲染 + 回读同步），且**同步跑在渲染帧
-循环里**。单次探测耗时可达数十至上百毫秒——既让避障数据一出炉就过期，又把帧率拖垮，进而连带拖慢
+飞得快时"避障来不及 + 深度/指令更新慢"的根因是同一次阻塞：完整的环形探测要发 35 条
+`forceFresh` 的 `pickLocalRay`（24 条水平 + 3 层竖直共 9 条 + 正上/正下 2 条；每条都是一次完整
+GPU 渲染 + 回读同步），且**同步跑在渲染帧循环里**。单次探测耗时可达数十至上百毫秒——既让避障数据一出炉就过期，又把帧率拖垮，进而连带拖慢
 全景采集、DA360 深度与指令重规划。因此高速档改为给"每周期射线数"设预算，而不是靠拉长节流间隔
 （那只会让最要命的正前方数据变得更旧）：
 
-- **核心锥 `yopoAvoidCoreDeg`（±25°）**：任何速度下都保持 10° 全分辨率、每周期必探——刹车距离由
-  这一段决定，此处降采样会留下 20° 空隙（30 m 处约 10 m 盲区），是撞墙的直接原因。
+- **核心锥 `yopoAvoidCoreDeg`（±25°）**：任何速度下都保持 15° 全分辨率（24 条射线 → 360/24）、每周期必探——刹车距离由
+  这一段决定，此处降采样会留下 30° 空隙（30 m 处约 15 m 盲区），是撞墙的直接原因。
 - **外锥 `yopoAvoidConeDeg`（±55°，高速收窄到 ±45°）**：每周期必探，但高速时按
   `yopoAvoidStrideHi` 隔一条采样。
 - **外围 `yopoAvoidSliceMax`**：每周期轮询 6 条，约 3 个周期（≈60 ms）刷完整圈；未在本周期探测的
@@ -369,7 +367,7 @@ http://127.0.0.1:8080/?da360UploadWidth=512
 | `yopoAvoidFastSpeed` | 6.0 | 高速档起始速度 (m/s) |
 | `yopoAvoidRefSpeed` | 15.0 | 高速档完全生效的速度 (m/s) |
 | `yopoAvoidStrideHi` | 2 | 高速时环形射线隔几条采样（2 → 30° 间隔） |
-| `yopoAvoidCoreDeg` | 25 | 核心锥半角 (°)，始终保持 10° 全分辨率 |
+| `yopoAvoidCoreDeg` | 25 | 核心锥半角 (°)，始终保持 15° 全分辨率 |
 | `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 45 | 外锥半角 (°)，低速 / 高速 |
 | `yopoAvoidSliceMax` | 6 | 每周期轮询的外围射线数 |
 | `yopoAvoidRepRangeHi` | 50.0 | 高速时排斥/绕行/刹车的作用距离 (m) |
@@ -420,10 +418,11 @@ YOPO_FORCE_BUILD=1 ./scripts/start_yopo_api.sh
 YOPO 推理默认走 TensorRT（TRT）加速。将 `epoch50.pth` 固化为 fp16 引擎后，单次推理延迟从 PyTorch eager 的约 100~350ms 降到 1~5ms，使导航重规划更频繁、盲飞段更短、避障更顺。
 
 - **引擎路径**：`asset/yopo-trt/yopo_trt.pth`（已提交；fp16，绑定本机 GPU 架构）。
-- **一键启用**：`restart_all.sh` 检测到引擎存在即自动设 `YOPO_USE_TRT=1`，启动后后端日志打印 `[TensorRT] 已加载 … 推理加速启用`。强制退回 PyTorch eager：
+- **一键启用**：`restart_all.sh` 无条件设 `YOPO_USE_TRT=1`，启动后后端日志打印 `[TensorRT] loaded … -- inference acceleration enabled`。注意该赋值在 `restart_all.sh` 里是硬编码的，因此 `YOPO_USE_TRT=0 ./restart_all.sh` **不会生效**；要强制退回 PyTorch eager 请直接调用后端脚本：
   ```bash
-  YOPO_USE_TRT=0 ./restart_all.sh
+  YOPO_USE_TRT=0 ./scripts/start_yopo_api.sh
   ```
+  （`scripts/start_yopo_api.sh` 只在 `YOPO_USE_TRT` 未被设置时自行检测引擎：存在则自动启用，不存在则回退 PyTorch eager。）
 - **自动构建**：若启用 TRT 但引擎缺失，`scripts/start_yopo_api.sh` 会在 YOPO 容器内用 GPU 自动把当前模型（`YOPO_MODEL_PATH`，默认 `epoch50.pth`）固化为引擎并写入 `asset/yopo-trt/`（读写挂载），下次启动直接加载，无需手动预处理。
 - **手动转换**：更换模型或重建引擎时，在带 GPU 的容器内运行转换脚本（`scripts/yopo_trt_transfer.py`：`epoch50.pth` → `torch.onnx.export`（`depth[1,2,192,384]` + `obs[1,9,6,12]`）→ TRT fp16 引擎，兼容 TRT 8.x / 10+）：
   ```bash
@@ -443,7 +442,7 @@ YOPO 推理默认走 TensorRT（TRT）加速。将 `epoch50.pth` 固化为 fp16 
 1. 飞行模式下，按 **`T`**（或点击右侧 YOPO 面板 **"Pick Target"**）开始设置目标。
 2. 目标初始位置为无人机当前位置，用**数字键盘**移动（方向以**无人机当前机头朝向**为前方）：
    - `Numpad 8 / 2`：沿机头方向前进 / 后退
-   - `Numpad 4 / 6`：垂直机头方向左移 / 右移
+   - `Numpad 4 / 6`：垂直机头方向右移 / 左移（4 = 机身右侧、6 = 机身左侧，与小键盘的左右布局相反；见 `src/main.js` 的 `handleYOPOKeyDown`）
    - `Numpad 9 / 3`：上升 / 下降
 3. **`Numpad 5`**：确认目标点并**自动开始导航**。
 4. **`Numpad 0`** 或 **`Esc`**：取消选择。
@@ -456,7 +455,7 @@ YOPO 推理默认走 TensorRT（TRT）加速。将 `epoch50.pth` 固化为 fp16 
   反应式势场（360° 射线环：径向推离、切向绕行、近障刹车、竖直越障、竖直障碍
   足迹绕行），用于兜住深度重规划间隙内的突发近障。去往目标的水平通道畅通时该
   几何层自动归零、不干扰导航，详见「避障架构与调参」。
-- 到达目标 2m 内自动标记到达
+- 到达判定分两层：服务端在距目标 2 m（`ARRIVE_THRESHOLD`）内标记到达；客户端另有 3.5 m + 速度 < 1 m/s 的兜底锁定，避免服务端异步回传导致"总差一步"
 - 按 **`X`**（或点击 **"Stop Nav"**）结束导航
 
 目标点标记在导航、到达后、停止后均保持可见，直到重新选取或取消目标，因此第二次导航时仍能看到目标位置。
@@ -466,7 +465,7 @@ YOPO 推理默认走 TensorRT（TRT）加速。将 `epoch50.pth` 固化为 fp16 
 主界面左下角常驻一块 **Target Map (Top-Down)** 俯视小地图，飞行中实时刷新，用于直观掌握无人机与目标点的相对位置：
 
 - 地图以无人机为中心，按水平面投影显示无人机当前朝向、目标点位置，以及两者连线。
-- 地图下方两行文字分别给出**目标高度 y**（目标点在 Cesium 坐标系下的高度，单位 m）和**坐标差 Δx/Δy/Δz to target**（目标相对无人机的东/上/北方向位移，单位 m）。
+- 地图下方两行文字分别给出**目标高度 y**（目标点在**局部坐标系**下的 y，即相对局部原点的高度，单位 m）和**坐标差 Δx/Δy/Δz to target**（目标相对无人机的东/上/北方向位移，单位 m）。
 - 进入目标选择模式（按 `T`）后，地图会随数字键盘对目标点的移动同步更新，方便在空间上对齐目标。
 - 该小地图不含任何数据归属水印，纯前端绘制，不依赖外部地图服务。
 
@@ -476,7 +475,7 @@ YOPO 需要 **384×192 ERP 全景深度图**（YOPO 原生输入格式），双�
 
 1. DA360 全景深度估计 → ERP 深度图（米制）
 2. 前端重投影/裁剪为 384×192 ERP，附加有效 mask
-3. 直接作为网络输入（无 Cesium 射线参与）
+3. 直接作为网络输入（深度值本身由 DA360 给出，不会掺入射线合成的几何深度；仅用 4 条稀疏 Cesium 射线做**米制尺度标定**，把 DA360 的相对深度换算成米）
 
 **深度不可用时（DA360 失败/超时）不回退 Cesium 射线检测**——YOPO 的网络输入仍要求真实深度，此时无人机原地悬停并持续重试，直到拿到有效深度图才恢复导航。
 
