@@ -123,7 +123,16 @@ YOPO_FORCE_BUILD=1 ./scripts/start_yopo_api.sh   # YOPO 镜像
 DA360_FORCE_BUILD=1 ./scripts/start_da360_api.sh # DA360 镜像
 ```
 
-> YOPO 推理默认走 TensorRT 加速（引擎 `asset/yopo-trt/yopo_trt.pth` 已随仓库提供）。`restart_all.sh` **无条件**设 `YOPO_USE_TRT=1`，无需额外操作；引擎缺失时它只打印一条 WARN，实际由 `scripts/start_yopo_api.sh` 在 YOPO 容器内用 GPU 自动构建引擎。详情见「YOPO TensorRT 加速」。
+> YOPO 推理默认走 TensorRT 加速（引擎 `asset/yopo-trt/yopo_trt.pth` 已随仓库提供）。`restart_all.sh` **无条件**设 `YOPO_USE_TRT=1`，无需额外操作；引擎缺失时 `scripts/start_yopo_api.sh` 会在 YOPO 容器内用 GPU 自动构建引擎。
+>
+> **TRT 引擎与 GPU 的 SM 计算能力绑定**：仓库提供的引擎在 RTX 4070 上构建；如果你的 GPU 不同（如 Orin NX、其它桌面卡），首次启动前删除已有引擎，让启动脚本自动按你的 GPU 重建：
+>
+> ```bash
+> rm asset/yopo-trt/yopo_trt.pth
+> ./restart_all.sh
+> ```
+>
+> 若自动构建失败或需要手动控制，可使用「YOPO TensorRT 加速」中的手动转换命令。
 
 ### 第 4 步：确认三个服务都活着
 
@@ -555,7 +564,7 @@ GPU 渲染 + 回读同步），且**同步跑在渲染帧循环里**。单次探
 
 ### YOPO TensorRT 加速
 
-YOPO 推理默认走 TensorRT（TRT）加速。将 `epoch50.pth` 固化为 fp16 引擎后，单次推理延迟从 PyTorch eager 的约 100~350ms 降到 1~5ms，使导航重规划更频繁、盲飞段更短、避障更顺。
+YOPO 推理默认走 TensorRT（TRT）加速。将 `epoch50.pth` 固化为 fp16 引擎后，单次推理延迟从 PyTorch eager 的约 100–350ms 降到 1–5ms，使导航重规划更频繁、盲飞段更短、避障更顺。
 
 - **引擎路径**：`asset/yopo-trt/yopo_trt.pth`（已提交；fp16，绑定本机 GPU 架构）。
 - **一键启用**：`restart_all.sh` 无条件设 `YOPO_USE_TRT=1`，启动后后端日志打印 `[TensorRT] loaded … -- inference acceleration enabled`。注意该赋值在 `restart_all.sh` 里是硬编码的，因此 `YOPO_USE_TRT=0 ./restart_all.sh` **不会生效**；要强制退回 PyTorch eager 请直接调用后端脚本：
