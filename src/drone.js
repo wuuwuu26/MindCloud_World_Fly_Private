@@ -1926,6 +1926,28 @@ export class Drone {
                 velTargetY = clamp(this.yopoArriveAltKp * gErrY,
                                    -this.yopoArriveAltVMax, this.yopoArriveAltVMax);
             }
+            // ── 到达后锁定目标点（"接管后锁定目标点运动不就好了"）──
+            // arrived 之后控制仍走这条接管 PD 分支（yopoNearGoalHold 含 arrived）。此时若继续跑
+            // holdKp*gErr - holdKd*v，其中的速度反馈项 -holdKd*v(系数 2.8) 会把速度测量噪声成倍
+            // 放大进 velTarget，内环 D 项再二次微分放大 —— 表现为"到达目标点后持续晃动"，
+            // 与障碍物无关，是纯运动环的噪声/增益问题。所以到达后改为两级锁定：
+            //   1）已在死区内（水平 < yopoArriveDeadbandM 且垂直 < 0.3 m）：velTarget 直接归零，
+            //      完全停住 —— 这就是"锁定目标点"，不再有任何修正量去制造抖动。
+            //   2）仍在死区外（arrived 时可能还差几米）：只用 P 项低增益缓慢拉回，且刻意不含
+            //      -Kd*v 速度反馈（它放大噪声），速度限幅 2 m/s；走进死区后自动进入 1）锁死。
+            // 安全底线不受影响：垂直净空(vSafeDown/vSafeUp)、crashFloor、碰撞处理仍然生效。
+            if (this.yopoArrived) {
+                if (gErrH < this.yopoArriveDeadbandM && Math.abs(gErrY) < 0.3) {
+                    velTargetX = 0; velTargetZ = 0; velTargetY = 0;
+                } else {
+                    const lockKp = 2.0;      // 低增益：到达后的拉回只需缓慢收敛，不需要高带宽
+                    const lockVmax = 2.0;
+                    velTargetX = clamp(lockKp * gErrX, -lockVmax, lockVmax);
+                    velTargetZ = clamp(lockKp * gErrZ, -lockVmax, lockVmax);
+                    velTargetY = clamp(this.yopoArriveAltKp * gErrY,
+                                       -this.yopoArriveAltVMax, this.yopoArriveAltVMax);
+                }
+            }
             // Slew-rate limit (see yopoTakeoverSlew): cap how fast the velocity target may CHANGE.
             // The steady approach speed is a slow ramp that never reaches this cap, while a
             // frame-to-frame step does -- and a step in the velocity target is a step in the
@@ -2107,23 +2129,13 @@ export class Drone {
                 // 故接管区(未到达)彻底关闭方向性扰动：repScale 保持 0、steerFade 保持 0（见下），
                 // 只留 brake(速度大小缩放) + closing-speed gate(抑制朝障碍的速度分量)。PD 干净收敛、
                 // 速度单调降到 < holdV，才能 lock arrived 切入纯 hover（无 swing）。
-                // 到达(arrived)之后：保留"剔除推离目标分量"的 rep 做侧/后方保护（射线避障时刻优先），
-                // 但关掉转向 steer，避免末端摆动。
+                // 到达(arrived)之后：配合上面的"锁定目标点"，不再叠加任何方向性避障推力
+                // （repScale 保持 0、tan 保持 0）。到达后若还用 rep 去推侧/后方，rep 的推力会与
+                // "锁在目标点" 相互拉扯 -> 又变成晃动；这与障碍物无关，稳定停住优先。
+                // 安全底线仍保留：brake 的速度缩放、closing-speed gate、垂直净空与碰撞处理照常。
                 if (this.yopoArrived) {
-                    const gdx = this.yopoNavTarget.x - this.x;
-                    const gdz = this.yopoNavTarget.z - this.z;
-                    const gl = Math.hypot(gdx, gdz);
-                    if (gl > 0.5) {
-                        const gnx = gdx / gl, gnz = gdz / gl;
-                        const proj = avoid.repX * gnx + avoid.repZ * gnz;
-                        if (proj < 0) {            // rep 指向远离目标 -> 去掉，避免贴墙目标 swing
-                            avoid.repX -= proj * gnx;
-                            avoid.repZ -= proj * gnz;
-                        }
-                    }
-                    repScale = 1.0;               // rep 已不含推离目标分量，安全启用（保护侧/后方）
                     this._takeoverSteerOn = false;
-                    this._takeoverSteerRamp = 0;  // 已到达：关 tan，仅 brake + 清洗后 rep
+                    this._takeoverSteerRamp = 0;  // 已到达：锁定目标点，不推、不绕
                 }
                 // Smooth the ray brake: asymmetric low-pass, TIGHTEN AT ONCE / RELEASE SLOWLY.
                 // The probe is noisy near a goal that sits against a building -- measured: brake
@@ -2196,12 +2208,9 @@ export class Drone {
                     // safety is unchanged.
                     velTargetX = velTargetX * avoid.brake;
                     velTargetZ = velTargetZ * avoid.brake;
-                    // 接管末端 / 已到达：追加"侧/后方"排斥（已剔除推离目标分量），让射线避障
-                    // 时刻优先保护侧后方，避免撞后方障碍；仍不含 tan，不引入摆动。
-                    if (this.yopoArrived || distGoal < this.yopoTakeoverSteerEndDist) {
-                        velTargetX += avoid.repX * repScale;
-                        velTargetZ += avoid.repZ * repScale;
-                    }
+                    // 接管区内 repScale 恒为 0（nearGoalNoRep），所以这里刻意不再叠加任何 rep：
+                    // 接管末段与到达后都只做速度大小的刹车，不施加方向性推力，避免与
+                    // "锁定目标点" 拉扯产生晃动。避障的绕行/排斥职责全部留在巡航段。
                 } else {
                     // Core of horizontal obstacle avoidance: budget "forward progress" and
                     // "lateral detour (rep+tan)" separately.
@@ -2581,8 +2590,11 @@ export class Drone {
         // 全区间保持稳健(过冲 <= 0.89 m、尾部 <= 0.21 m/s、精确停在目标点)，收敛时间不变
         // (1.60 s -> 1.53 s)。接管区的速度目标由本地 PD + slew 限幅生成，网络前馈在区内已停止且
         // 陈旧(无 ffVel 跳变)，故 D 项不会放大噪声 —— 与 cruise 区(有前馈跳变，仍关 D)不同。
-        const velKd = ((useAccFeedforward && !yopoNearGoalHold) || (stickActive && horizActive))
-            ? 0.0 : this.sfVelKd;
+        // 到达后同样关闭速度环 D 项：此时误差已接近零，D 项只会微分放大速度测量噪声，形成
+        // "停在目标点上持续细抖"（原设计 arrived 后关 D 就是这个原因）。到达后的阻尼改由
+        // 外环的锁定逻辑(velTarget 归零 + 内环 P 跟踪 0 提供速度负反馈)保证。
+        const velKd = ((useAccFeedforward && !yopoNearGoalHold) || this.yopoArrived ||
+                       (stickActive && horizActive)) ? 0.0 : this.sfVelKd;
         const velErrClamp = aMaxHoriz / Math.max(0.01, velKp);
         const velErrXc = clamp(velErrX, -velErrClamp, velErrClamp);
         const velErrZc = clamp(velErrZ, -velErrClamp, velErrClamp);

@@ -483,9 +483,18 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   vertical channel with a P-converging climb/descent and keeps only 30% of the horizontal command,
   removing large circling; it yields back to the network when the clearance straight above / below is
   insufficient.
-- **Arrival and deadband**: arrival latches when within 4.0 m of the goal and below 1.3 m/s (thresholds widened: with the takeover zone decoupled from directional avoidance the PD converges cleanly, so it can lock earlier and cut the end-game sway); inside the
-  2.5 m horizontal deadband it switches to a direct climb/descent to converge the altitude, and below
-  0.35 m the PD stops correcting and only trims the altitude slightly, avoiding jitter around the goal.
+- **Lock straight onto the goal once arrived**: arrival latches when within 4.0 m of the goal and below
+  1.3 m/s; after that the goal is **locked** — with a horizontal error < 0.35 m and vertical < 0.3 m the
+  velocity target is **forced to zero** (parked), and while still outside the deadband it only pulls back
+  with a low-gain P term (2.0, capped at 2 m/s). **No directional avoidance thrust is added after arrival**
+  (`rep`/`tan` are both off). Previously the full takeover PD kept running after arrival, whose velocity
+  feedback term (`-holdKd*v`, gain 2.8) multiplied velocity-measurement noise into the velocity target and
+  the inner D term amplified it a second time — the "still swaying after reaching the goal" symptom,
+  which is a pure motion-loop noise/gain issue, unrelated to obstacles. The velocity-loop **D term is
+  therefore also switched off after arrival** (with the error near zero it only amplifies noise); damping
+  comes from `velTarget = 0` plus the inner P loop's velocity feedback toward zero. Safety nets are
+  unchanged: vertical clearance (`vSafeDown`/`vSafeUp`), `crashFloor` and collision handling stay active;
+  the vertical trim also keeps converging the altitude (stopping below 0.35 m) to avoid jitter around the goal.
 
 ### Avoidance Architecture and Tuning
 
