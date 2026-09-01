@@ -392,6 +392,26 @@ export class Drone {
                                       // Together with the "lateral speed budget reservation" inside
                                       // _controlYOPO (capped at 55%), the detour component is not
                                       // drowned by the forward component and the motion stays smooth.
+        // Guards against the detour carrying the drone AROUND THE FAR SIDE of an obstacle instead of
+        // past it (user report: "the way to the goal is clear, yet it goes around the other side of
+        // the building"). Both act on the angle between the tangential direction and the goal
+        // bearing:
+        this.yopoTanConeCos = 0.34;   // Cosine of the cone (+-70 deg) around the goal bearing in
+                                      // which an obstacle counts as "in the way" for the tangential
+                                      // detour. Obstacles further to the side / behind no longer
+                                      // supply the detour direction (they are handled by the
+                                      // repulsion instead). -1 restores the old behaviour of taking
+                                      // the globally nearest obstacle.
+        this.yopoTanAwayCos = -0.2;   // The remembered tangent from the previous frame is only kept
+                                      // while it still leads roughly toward the goal; below this
+                                      // cosine (> ~100 deg off the bearing) the direction memory is
+                                      // dropped and the turn-back toward the goal is allowed.
+                                      // -1 restores the old unconditional memory.
+        this.yopoTanAwayScale = 0.5;  // Scale applied to a tangent that points more than 90 deg away
+                                      // from the goal: it is no longer steering around the obstacle,
+                                      // it is carrying the drone away, so the goal-directed terms
+                                      // (trajectory / cruise floor) get the upper hand. 1.0 disables
+                                      // the guard, lower = the drone turns back sooner.
         this.yopoAvoidDecel = 8.5;    // 8.0 -> 9.5 -> 8.5: 9.5 passed ~9% more speed but the brake then engaged too late (impacts). Still well below yopoAccMax (11), so it can always stop physically.
                                       // v_safe = sqrt(2ad) brake threshold, deliberately lower than
                                       // yopoAccMax (11): it makes the kinematic brake trigger
@@ -2928,6 +2948,13 @@ export class Drone {
                              // decision, so vertical threats cannot shrink dAhead and wrongly
                              // trigger flying over / diving under.
         let openDirX = 0, openDirZ = 0, openMax = -1;
+        // Nearest obstacle that actually lies IN THE WAY, i.e. inside a wide cone around the goal
+        // bearing, plus its ray index. The tangential detour is computed from THIS direction.
+        // It used to be computed from dMin, the globally nearest obstacle -- which may sit behind
+        // or beside the drone. A building just passed / alongside then set the tangent, and the
+        // detour happily steered around to the far side of THAT building even though the way ahead
+        // was wide open ("the way to the goal is clear, yet it goes around the other side").
+        let dFront = R, miFront = -1;
         // Unit direction of the threat that produced dAhead, plus a validity flag. The call site
         // uses it to hard-clip the closing speed of the FINAL composed velocity target.
         // dAheadHasDir is false when dAhead came from a vertical threat (groundGap): there is no
@@ -2985,6 +3012,8 @@ export class Drone {
                 const latG = d * Math.sqrt(Math.max(0, 1 - dotG * dotG));
                 if (latG < surmountHalfW && d < dAheadH) dAheadH = d;
             }
+            // Detour reference: nearest obstacle in the way (wide cone around the goal bearing).
+            if (dotG > this.yopoTanConeCos && d < dFront) { dFront = d; miFront = i; }
         }
 
         // Authoritative threat: also brake on where the drone is ACTUALLY moving (inertia / drift /
@@ -3173,14 +3202,18 @@ export class Drone {
             repX *= s; repZ *= s;
         }
 
-        // Tangential detour: compute a deterministic tangent from the "nearest obstacle direction
-        // dMin" (steering around the nearest obstacle toward the goal side), without picking an
-        // opening / falling back to the emptiest direction -- that would detour to the side and,
-        // when the goal is blocked, wrongly choose "emptiest = the way it came" and turn back
-        // ("steers around then goes back"). On top of that a direction hysteresis memory: if the
-        // angle against the previous frame's tan exceeds 120 deg while that direction is still
-        // clear, keep the previous frame, preventing the resultant from flipping when passing the
-        // obstacle centre and causing back-and-forth detours.
+        // Tangential detour: compute a deterministic tangent from the direction of the obstacle
+        // that is actually IN THE WAY (dFront / miFront, a wide cone around the goal bearing),
+        // steering around it toward the goal side, without picking an opening / falling back to the
+        // emptiest direction -- that would detour to the side and, when the goal is blocked, wrongly
+        // choose "emptiest = the way it came" and turn back ("steers around then goes back").
+        // The reference used to be dMin, the GLOBALLY nearest obstacle, which may sit behind or
+        // beside the drone: a building just passed / alongside then supplied the tangent and the
+        // detour steered around to the far side of that building although the way ahead was open.
+        // On top of that a direction hysteresis memory: if the angle against the previous frame's
+        // tan exceeds 120 deg while that direction is still clear, keep the previous frame,
+        // preventing the resultant from flipping when passing the obstacle centre and causing
+        // back-and-forth detours.
         let tanX = 0, tanZ = 0;
         // Apply the tangential detour only when there really is an obstacle fairly close ahead.
         // The threshold is relaxed to repRange*0.8 ~= 16 m:
@@ -3194,16 +3227,17 @@ export class Drone {
         // (outside the final phase) pushes it off the side walls to keep it centred, while in the
         // final phase the PD converges onto the centre line, so the drone flies straight into the
         // corridor.
-        if (dMin < R && dAhead < repRange) {
-            // Find the nearest obstacle direction (the ray direction matching dMin)
-            let mi = -1;
-            for (let i = 0; i < dirs.length; i++) {
-                const d = dists[i];
-                if (!Number.isFinite(d) || d <= 0) continue;
-                if (mi < 0 || d < dists[mi]) mi = i;
-            }
-            if (mi >= 0) {
-                const ox = dirs[mi].x, oz = dirs[mi].z;   // Pointing at the nearest obstacle
+        // Reference direction: the obstacle in the goal cone when there is one, otherwise the
+        // commanded-velocity threat direction (dAheadDir) -- and no detour at all when neither
+        // exists, since there is then nothing to steer around.
+        const useFrontRef = miFront >= 0;
+        const tanHasRef = useFrontRef || dAheadHasDir;
+        if (tanHasRef && dAhead < repRange) {
+            {   // Scope kept so the tangent locals stay together; the detour runs whenever a
+                // reference direction was found above.
+                const ox = useFrontRef ? dirs[miFront].x : dAheadDirX;   // Pointing at the obstacle to steer around
+                const oz = useFrontRef ? dirs[miFront].z : dAheadDirZ;
+                const tanRefD = useFrontRef ? dFront : dAhead;
                 // Two tangential candidates (perpendicular to the obstacle direction): pick the
                 // side with the larger projection toward the goal (desired velocity);
                 // when the goal is directly behind the obstacle both candidates are ~0, so either
@@ -3214,7 +3248,7 @@ export class Drone {
                 const c2 = tx2 * udx + tz2 * udz;
                 let fx, fz;
                 if (c1 >= c2) { fx = tx1; fz = tz1; } else { fx = tx2; fz = tz2; }
-                const t = this.yopoAvoidTanGain * (1 - dMin / repRange);
+                const t = this.yopoAvoidTanGain * Math.max(0, 1 - tanRefD / repRange);
                 fx *= t; fz *= t;
                 // Direction hysteresis memory: if the angle against the previous frame's tan
                 // exceeds 120 deg while that direction is still clear, keep the previous frame
@@ -3231,7 +3265,32 @@ export class Drone {
                                 break;
                             }
                         }
-                        if (cos < -0.5 && lastOk) { fx = lt.x * nm / lm; fz = lt.z * nm / lm; }
+                        // The memory must not lock a FINISHED detour into a full circle. Passing the
+                        // obstacle centre the correct tangent flips (> 120 deg) and the memory holds
+                        // the old one -- that is what it is for. But exactly the same flip happens
+                        // when the corner has been rounded and the tangent should turn BACK toward
+                        // the goal: the old direction is by then wide open (it points along the far
+                        // side of the building, so lastOk is true), so it is kept and the drone
+                        // keeps sailing around to the other side of the building -- the "the way to
+                        // the goal is wide open yet it goes around the far side" report.
+                        // So the memory is only honoured while it still leads roughly toward the
+                        // goal; once the remembered tangent points more than ~100 deg away from the
+                        // goal bearing it is dropped and the flip back is allowed.
+                        const ltToGoal = (lt.x / lm) * gx + (lt.z / lm) * gz;
+                        if (cos < -0.5 && lastOk && ltToGoal > this.yopoTanAwayCos) {
+                            fx = lt.x * nm / lm; fz = lt.z * nm / lm;
+                        }
+                    }
+                }
+                // Second guard: a tangent that points more than ~90 deg off the goal bearing is no
+                // longer steering AROUND an obstacle, it is carrying the drone away from the goal.
+                // Scale it down so the goal-directed terms (network trajectory, cruise floor) win
+                // back the upper hand instead of the drone being pushed around the far side.
+                const nmA = Math.hypot(fx, fz);
+                if (nmA > 1e-3) {
+                    const fToGoal = (fx * gx + fz * gz) / nmA;
+                    if (fToGoal < 0) {
+                        fx *= this.yopoTanAwayScale; fz *= this.yopoTanAwayScale;
                     }
                 }
                 tanX = fx; tanZ = fz;
@@ -3269,6 +3328,9 @@ export class Drone {
         // released. The closing-speed gate uses it so that an obstacle BEHIND the goal can no
         // longer throttle the final approach (see gateBeyondGoal below).
         let goalDirect = false;
+        // Corridor measurements, hoisted so the periodic diagnostics log at the end of this method
+        // can report them (they are what decides "is the way to the goal clear").
+        let dPath = R, dCmd = R, reach = R;
         if (des > 0.3 || this.yopoNavTarget) {
             const pathHalfWidth = 2.5;                      // m, flight corridor half-width (body radius + margin)
             // Deliberately the fixed base value, NOT the speed-adaptive repRange: widening the
@@ -3282,7 +3344,7 @@ export class Drone {
             // drone then refuses to fly straight at a goal that is in fact wide open.
             // Obstacles NEARER than the goal are still checked at full strength, so genuine
             // blocking of the remaining path is detected exactly as before.
-            const reach = distGoalH > 0.5 ? Math.min(clearThresh, distGoalH) : clearThresh;
+            reach = distGoalH > 0.5 ? Math.min(clearThresh, distGoalH) : clearThresh;
             // Dual-corridor check:
             //   dPath — corridor clearance along the "body -> goal" bearing (is the way to the goal clear)
             //   dCmd  — corridor clearance along the "commanded velocity direction" (the actual
@@ -3295,7 +3357,7 @@ export class Drone {
             // points the velocity into a side building (large lateral offset) is not misjudged as
             // blocked -> continuous detour (the root cause of the earlier "still detouring
             // although the way to the goal is clear").
-            let dPath = R, dCmd = R;
+            dPath = R; dCmd = R;
             const cx = udx, cz = udz, cMag = Math.hypot(cx, cz);
             const cxn = cMag > 0.3 ? cx / cMag : gx;        // Fall back to the goal bearing when there is no valid forward speed
             const czn = cMag > 0.3 ? cz / cMag : gz;
@@ -3542,6 +3604,27 @@ export class Drone {
         const dGate = dAhead - standoff - reactionDist;
         const vCloseMax = (!dAheadHasDir || gateBeyondGoal) ? Infinity
             : (dGate > 0 ? Math.sqrt(2 * this.yopoAvoidBrakeDecel * dGate) : 0);
+
+        // ── Periodic diagnostics: everything needed to tell "the way really is blocked" from
+        // "it detours around the far side although the corridor is open" ──
+        // dPath / reach  = corridor clearance along the goal bearing vs. the distance inspected;
+        //                  dPath > reach is the "way to the goal is clear" verdict.
+        // dCmd           = the same along the commanded heading (the second corridor).
+        // tanToGoal      = cosine between the detour direction and the goal bearing
+        //                  (negative = the detour is carrying it AWAY from the goal).
+        if ((this._avoidLogN = (this._avoidLogN || 0) + 1) % 60 === 0) {
+            const tm = Math.hypot(tanX, tanZ);
+            const tanToGoal = tm > 1e-3 ? (tanX * gx + tanZ * gz) / tm : 0;
+            const repM = Math.hypot(repX, repZ);
+            console.log(
+                `_avoid goalClear=${goalClear ? 'Y' : 'N'} dPath=${dPath.toFixed(1)} ` +
+                `dCmd=${dCmd.toFixed(1)} reach=${reach.toFixed(1)} distGoalH=${distGoalH.toFixed(1)} ` +
+                `dAhead=${dAhead.toFixed(1)} dAheadH=${dAheadH.toFixed(1)} dMin=${dMin.toFixed(1)} ` +
+                `rep=${repM.toFixed(1)} tan=${tm.toFixed(1)} tanToGoal=${tanToGoal.toFixed(2)} ` +
+                `brake=${brake.toFixed(2)} vRep=${vRep.toFixed(1)} ` +
+                `vGo=${Math.hypot(vGoX, vGoZ).toFixed(1)} vUp=${Number.isFinite(p.vUpDist) ? p.vUpDist.toFixed(1) : 'n/a'} ` +
+                `vDown=${Number.isFinite(p.vDownDist) ? p.vDownDist.toFixed(1) : 'n/a'}`);
+        }
 
         return { repX, repZ, tanX, tanZ, brake, upPush, vRep, vSafeDown, vSafeUp, vGoX, vGoZ,
                  threatDirX: dAheadDirX, threatDirZ: dAheadDirZ,
