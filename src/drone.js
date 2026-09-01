@@ -207,8 +207,6 @@ export class Drone {
         // Trade-off: without rep there is no head-on push-away. If the run-in starts grazing
         // obstacles, split the zones (set this to e.g. 8 and leave the takeover at 12) so the
         // 8-12 m band keeps the repulsion.
-        // Both zones are measured in HORIZONTAL distance (see _controlYOPO): a goal high above
-        // the drone must still get the direct PD climb, not network circling.
         this.yopoGoalRepSuppressDist = 12.0;
         // Hard speed ceiling inside the final-approach zone (m/s). The former hard cap of 4 m/s
         // throttled the entire last 12 m; the per-distance sqrt(2*a*d) ramp in _controlYOPO is
@@ -1560,13 +1558,11 @@ export class Drone {
         // a PD convergence straight onto the goal point, guaranteeing entry into the arrival
         // circle.
         let distGoal = Number.POSITIVE_INFINITY;
-        let distGoalH = Number.POSITIVE_INFINITY;
         if (this.yopoNavTarget) {
             const gdx = this.yopoNavTarget.x - this.x;
             const gdy = this.yopoNavTarget.y - this.y;
             const gdz = this.yopoNavTarget.z - this.z;
             distGoal = Math.sqrt(gdx * gdx + gdy * gdy + gdz * gdz);
-            distGoalH = Math.hypot(gdx, gdz);
         }
         this.yopoDistToGoal = distGoal;
 
@@ -1580,22 +1576,21 @@ export class Drone {
             if (spdNow < this.yopoArriveHoldV) this.yopoArrived = true;
         }
 
-        // Takeover is keyed on the HORIZONTAL distance to the goal (matching nearGoal inside
-        // _avoidanceVelocity). The old 3D-distance check left a blind band: a goal that is
-        // horizontally close but vertically far (e.g. 10 m out / 25 m up on a rooftop) stayed on
-        // the cruise branch, where the network's lattice only holds cruise-type arcs -- so the
-        // drone could only gain/lose altitude by flying large circles, slowly, near obstacles.
-        // On horizontal distance the PD takes over and climbs/dives STRAIGHT onto the goal.
+        // Takeover stays keyed on the 3D distance to the goal: a horizontally-close but
+        // vertically-far goal must NOT switch to the straight-line PD, because the vertical run
+        // would cut straight through buildings / overhangs between the drone and the goal
+        // (the ray layer only caps the climb by the clearance straight ABOVE, not along the
+        // slanted approach). The cruise branch + network detour stays responsible there.
         const yopoNearGoalHold =
             this.yopoNavTarget && !stickActive &&
-            (this.yopoArrived || distGoalH < this.yopoFinalApproachDist);
+            (this.yopoArrived || distGoal < this.yopoFinalApproachDist);
         // Repulsion-suppression zone, INDEPENDENT of the deceleration zone above. With
         // yopoFinalApproachDist = 0 the approach stays on the cruise branch and no longer
         // switches to the hold PD, but the repulsion must still be dropped near the goal --
         // otherwise a goal sitting against a building gets repelled forever and yopoArrived
         // never latches.
         const nearGoalNoRep = this.yopoNavTarget &&
-            (this.yopoArrived || distGoalH < this.yopoGoalRepSuppressDist);
+            (this.yopoArrived || distGoal < this.yopoGoalRepSuppressDist);
         // Repulsion is either fully ON (outside the takeover zone) or fully OFF (inside it) --
         // there is no fade band any more. A graded fade used to soften the step at the boundary,
         // but it also left the repulsion only partially effective across that whole stretch,
@@ -1725,7 +1720,7 @@ export class Drone {
             // target over the first few metres inside the zone instead of switching hard.
             const blendBand = 4.0;   // scaled with the 12 m takeover zone (was 6.0 at 20 m) so the
                                      // blend does not eat half the zone
-            const insideZone = this.yopoFinalApproachDist - distGoalH;   // 0 right at the boundary
+            const insideZone = this.yopoFinalApproachDist - distGoal;   // 0 right at the boundary
             // Blend only inside the band right after the boundary (insideZone >= 0): the takeover
             // only ever starts at the zone edge, so the blend has to fade from cruise to PD over
             // the first few metres inside it.
