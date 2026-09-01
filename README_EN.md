@@ -423,7 +423,7 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   - **The ray layer stays active inside the takeover zone and keeps priority**: probing and braking
     run throughout; once the ray layer sees a real threat (filtered `brake < 0.97`), the tangential
     detour (tan) fades in over 0.4 s with hysteresis and goes through the same lateral speed budget
-    as the PD (budget scaled to the actual commanded speed), so avoidance takes **priority** over the
+    as the PD (budget base ≥ `yopoCruiseMinSpd`), so avoidance takes **priority** over the
     PD's straight-in component (`rep`/`vGo`/`vRep` stay off to avoid fighting the PD along the goal
     line); it falls back to the pure PD once the corridor is clear again (`brake > 0.995`).
   - **Faster, calmer settle after takeover**: the velocity-target slew cap `yopoTakeoverSlew`
@@ -480,9 +480,15 @@ How the client-side geometric layer works (see `_avoidanceVelocity`):
   "network-commanded direction" and the "drone's actual heading", so the network cannot turn the
   command aside and thereby exclude an obstacle straight ahead and skip braking.
 - **Lateral speed budget**: while detouring, "forward" and "lateral detour" are budgeted separately —
-  lateral takes at most 68% of the speed ceiling and forward keeps at least 10%, so the velocity
+  lateral takes at most 68% of the budget base and forward keeps at least 10%, so the velocity
   vector really tilts tangentially and slides along the obstacle instead of "charging at full speed
-  while grazing it".
+  while grazing it". The budget base is `max(yopoCruiseMinSpd, actual commanded speed)`: the network
+  itself slows its commands when the depth shows obstacles, so keying the budget to the commanded
+  speed alone made the detour collapse exactly when it was needed (commanded 8 m/s → only ~5.4 m/s
+  of steering authority). Also, **tan is NOT decayed by `repHold`** (0.85 floor):
+  `repHold = dMin/standoff` linearly scales the field down close to an obstacle — right for `rep`
+  ("once stopped, do not keep pushing away") but backwards for `tan`, which needs MORE authority the
+  closer the obstacle is.
 - **Clear straight flight (`goalClear`)**: a corridor is measured along "body → goal" (`dPath`) and
   along the "commanded velocity direction" (`dCmd`) separately, with a corridor half-width of 2.5 m;
   **either** corridor being clear within `reach = min(yopoAvoidRepRange, horizontal distance to the

@@ -2126,14 +2126,17 @@ export class Drone {
                     // the lateral detour, so the drone slides past obstacles faster instead of
                     // crawling around them. 0.70 was measured as "detouring too fast", so this
                     // deliberately stays just under it; drop back to 0.62 if the detour feels wild.
-                    // Budget base: the ACTUAL commanded speed (with a small floor), not the global
-                    // maxSpd. In cruise they coincide (~15 m/s), but inside the takeover zone the
-                    // PD target is much slower (holdMaxV shrinks with the remaining distance), so
-                    // keying the budget to maxSpd would let the detour dominate a 2 m/s approach
-                    // and keep swinging the drone around the goal. Scaling the budget with the real
-                    // commanded speed keeps avoidance proportionate: strong enough to steer clear,
-                    // gentle enough to settle.
-                    const budgetBase = Math.max(2.0, Math.hypot(velTargetX, velTargetZ));
+                    // Budget base: the cruise floor (yopoCruiseMinSpd) or the actual commanded
+                    // speed, whichever is LARGER. Keying it to the commanded speed alone was a
+                    // regression: the network itself slows its commands when the depth shows
+                    // obstacles, so during a real detour the budget collapsed exactly when it was
+                    // needed (commanded 8 m/s -> only ~5.4 m/s of steering authority, i.e. the
+                    // "detour is not decisive" report). The cruise floor keeps the detour strong;
+                    // inside the takeover zone the extra authority is still gated by the threat
+                    // hysteresis plus the 0.4 s steerFade ramp above, so it cannot swing a calm
+                    // settle.
+                    const budgetBase = Math.max(this.yopoCruiseMinSpd,
+                                                Math.hypot(velTargetX, velTargetZ));
                     const steerCap = budgetBase * 0.68;
                     let steerMag = Math.hypot(steerX, steerZ);
                     if (steerMag > steerCap) {
@@ -3553,7 +3556,15 @@ export class Drone {
         // with distance w it naturally weakens once away, never pushing too far.
         const repHold = clamp(dMin / standoff, 0, 1);
         repX *= repHold; repZ *= repHold;
-        tanX *= repHold; tanZ *= repHold;
+        // The tangential detour is NOT decayed by repHold: the closer the obstacle, the MORE
+        // steering authority the detour needs, and decaying it here (repHold < 1 whenever
+        // dMin < standoff) is exactly the "it slows down but does not go around" symptom.
+        // Raising the standoff to 7.5 m made it worse: the fade now starts 1.5 m earlier, so
+        // grazing an obstacle at 5 m lateral distance used to cut the detour to ~67% right
+        // where it matters most. The 0.85 floor keeps the detour decisive while still fading
+        // it slightly once truly glued to the obstacle.
+        const tanHold = Math.max(repHold, 0.85);
+        tanX *= tanHold; tanZ *= tanHold;
 
         // Completely release the horizontal repulsion / tangential / braking when the exit is
         // clear, flying straight at the goal:
