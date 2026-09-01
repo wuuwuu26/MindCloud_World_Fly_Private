@@ -433,9 +433,16 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
     braking feed-forward is dropped, handing full control back to the PD. Otherwise the ray layer reads
     the wall-adjacent goal as an obstacle: tan keeps shoving the drone off the wall while the PD pulls
     it back, the two fight back and forth → `yopoArrived` never latches because the speed is held off
-    the goal → the drone sways at the goal forever. This stand-down only happens once the drone is on
-    (or almost on) the goal; the PD's `holdMaxV = √(2ad)` already guarantees a physically stoppable
-    run-in, so the ray layer adds only jitter here and no real benefit.
+    the goal → the drone sways at the goal forever. This stand-down only switches **OFF the tangential
+    steer** (tan/vGo/vRep/upPush); `brake` and a *sanitised* `rep` (the component that would push the
+    drone AWAY from the goal is stripped, keeping the side/rear push) still run, so a wall-adjacent goal
+    does not swing while side/rear obstacles stay guarded (fixes "rear also hits obstacles"); the PD's
+    `holdMaxV = √(2ad)` already guarantees a physically stoppable run-in. Crucially, the whole ray block
+    used to be skipped entirely once `arrived` (`!yopoArrived`) → after arrival there was NO avoidance
+    and a side/rear obstacle could be hit. Now the ray layer **keeps running after arrival too** (brake +
+    sanitised rep only, never steer) — "the ray avoidance always has priority": when parked next to a
+    wall/obstacle the side/rear thrust keeps pushing the drone to a safe distance instead of pinning it
+    on the hazard.
   - **Faster, calmer settle after takeover**: the velocity-target slew cap `yopoTakeoverSlew`
     20 → 14 m/s² (still above the airframe's acceleration ceiling, so it only filters frame-to-frame
     steps) and the slew now covers the **vertical axis** too (removes the vertical bobbing at the

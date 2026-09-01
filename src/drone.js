@@ -1711,7 +1711,14 @@ export class Drone {
         // a building. The step itself is absorbed by the takeover slew limit (yopoTakeoverSlew)
         // and by the boundary direction blend (blendBand), which is why a hard switch is
         // affordable here.
-        const repScale = nearGoalNoRep ? 0.0 : 1.0;
+        let repScale = nearGoalNoRep ? 0.0 : 1.0;
+        // In the takeover zone (nearGoalNoRep) the repulsion is normally dropped (repScale = 0)
+        // because a plain rep would shove the drone straight off a goal that sits against a wall
+        // and fight the PD (swing). But that also threw away the SIDE / REAR repulsion, so an
+        // obstacle behind or beside the drone near the goal went unguarded ("rear also hits
+        // obstacles"). The avoidance block below re-enables a *sanitised* rep for nearGoalNoRep /
+        // arrived (it strips only the component that pushes the drone AWAY from the goal, keeping
+        // the side / rear push) -- see the sanitisation just after _avoidanceVelocity returns.
 
         // ---- 1. Diagnostics log ----
         if (this.yopoInferenceCount < 5 || this.yopoInferenceCount % 120 === 0) {
@@ -2083,10 +2090,34 @@ export class Drone {
         // tan+brake avoids obstacles inside the takeover range (detour + slowdown) without
         // fighting the PD. Collisions are additionally covered by _handleCollisions.
         if (this.yopoAvoidEnabled && this.yopoNavTarget &&
-            !stickActive && !this.yopoArrived) {
+            !stickActive) {
             this._updateAvoidProbe();
             avoid = this._avoidanceVelocity(velTargetX, velTargetZ);
             if (avoid) {
+                // ── "射线避障时刻优先"：接管末端 / 已到达也要避开侧/后方障碍 ──
+                // 过去整个射线块被 !yopoArrived 跳过，到达后彻底不做避开 -> 侧/后方障碍会撞；
+                // 现在 arrived 也进入本块。接管末端把 rep 里"把无人机推离目标"的分量剔除（贴墙
+                // 目标不会被 rep 推出去 swing），保留侧/后方障碍的排斥（解决"后方也容易撞到障碍物"）。
+                // arrived 之后只做 brake + 清洗后的 rep（侧/后方保护），关闭转向 steer，避免末端摆动。
+                if (nearGoalNoRep || this.yopoArrived) {
+                    const gdx = this.yopoNavTarget.x - this.x;
+                    const gdz = this.yopoNavTarget.z - this.z;
+                    const gl = Math.hypot(gdx, gdz);
+                    if (gl > 0.5) {
+                        const gnx = gdx / gl, gnz = gdz / gl;
+                        const proj = avoid.repX * gnx + avoid.repZ * gnz;
+                        if (proj < 0) {            // rep 指向远离目标 -> 去掉，避免贴墙目标 swing
+                            avoid.repX -= proj * gnx;
+                            avoid.repZ -= proj * gnz;
+                        }
+                    }
+                    repScale = 1.0;               // rep 已不含推离目标分量，安全启用（保护侧/后方）
+                }
+                if (this.yopoArrived) {
+                    // 已到达：只保留 brake + 清洗后的 rep（侧/后方保护），关闭转向 steer，避免末端摆动
+                    this._takeoverSteerOn = false;
+                    this._takeoverSteerRamp = 0;
+                }
                 // Smooth the ray brake: asymmetric low-pass, TIGHTEN AT ONCE / RELEASE SLOWLY.
                 // The probe is noisy near a goal that sits against a building -- measured: brake
                 // flipping 0.89 <-> 1.00 frame to frame as goalClear toggles N/Y. Now that the
@@ -2158,6 +2189,12 @@ export class Drone {
                     // safety is unchanged.
                     velTargetX = velTargetX * avoid.brake;
                     velTargetZ = velTargetZ * avoid.brake;
+                    // 接管末端 / 已到达：追加"侧/后方"排斥（已剔除推离目标分量），让射线避障
+                    // 时刻优先保护侧后方，避免撞后方障碍；仍不含 tan，不引入摆动。
+                    if (this.yopoArrived || distGoal < this.yopoTakeoverSteerEndDist) {
+                        velTargetX += avoid.repX * repScale;
+                        velTargetZ += avoid.repZ * repScale;
+                    }
                 } else {
                     // Core of horizontal obstacle avoidance: budget "forward progress" and
                     // "lateral detour (rep+tan)" separately.
