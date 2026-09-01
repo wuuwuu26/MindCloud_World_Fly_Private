@@ -475,12 +475,18 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 - **侧向速度预算**：绕行时把"前进"与"侧向绕行"拆开预算——侧向最多占速度上限的 68%、前向至少保留 10%，让速度矢量真正偏向切向、贴着障碍滑过，而不是"边全速前冲边轻蹭"。
 - **畅通直飞（`goalClear`）**：分别沿"机体→目标"（`dPath`）和"命令速度方向"（`dCmd`）各算一次走廊，走廊半宽 2.5 m，**任一**走廊在 `reach = min(yopoAvoidRepRange, 到目标的水平距离)` 内无障即判定畅通（截断到目标距离是为了让"目标背后的墙"不会把走廊永久判为被挡）。近距例外：若距目标 < `yopoCorridorGuardDist`（12 m）且 `dPath` 被挡，则封掉 `dCmd` 这条逃生通道，避免贴着障碍直冲。**通道畅通时 `rep`/`tan`/`brake`/`vRep` 全部归零、`vGo` 被抑制**，无人机全速直飞目标，不会被无谓推离或莫名绕行。
 
-关键参数（均位于 `src/drone.js` 构造函数）：
+关键参数（均位于 `src/drone.js` 构造函数，属于**客户端几何反应式避障层 `_avoidanceVelocity`**；独立于服务端 YOPO 网络，仅用于前端兜底避障，不参与网络输入与推理）：
 
 | 参数 | 默认值 | 含义 |
 |------|--------|------|
 | `yopoAvoidEnabled` | `true` | 几何层总开关 |
 | `yopoAvoidRayCount` | 24 | 360° 射线数（15° 间隔） |
+| `yopoAvoidFastSpeed` | 6.0 | 高速档起始速度 (m/s)：低于此用全分辨率射线剖面，高于此进入高速自适应 |
+| `yopoAvoidRefSpeed` | 15.0 | 高速档完全生效速度 (m/s)：排斥/切向/刹车作用距离、锥角、采样 stride 均按此线性插值到上限 |
+| `yopoAvoidStrideHi` | 2 | 高速时环形射线隔几条采样（2 → 30° 间隔，12 条代替 24 条），前向锥仍每周期全刷新 |
+| `yopoAvoidCoreDeg` | 25 | 核心锥半角 (°)：始终保持全分辨率，该扇区决定刹车距离，降分辨率会在最不该漏处开洞 |
+| `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 45 | 外锥半角 (°)：低速 / 高速，每周期重探测的前向锥张角（高速更窄、射线更少但仍每周期刷新） |
+| `yopoAvoidSliceMax` | 6 | 每周期轮询的外围射线数（round-robin），整环在数个周期内轮转刷新 |
 | `yopoAvoidRange` | 55.0 | 障碍探测半径 (m)，射线长度免费，加长只增不改 GPU 成本 |
 | `yopoAvoidRepRange` | 28.0 | 排斥/切向/刹车作用距离 (m)；同时是 `goalClear` 的畅通判定阈值，**不要**调大 |
 | `yopoAvoidRepRangeHi` | 50.0 | 高速档（≥ `yopoAvoidRefSpeed`）下上述作用距离 (m) |
