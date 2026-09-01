@@ -420,6 +420,17 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   `yopoFinalApproachDist=12.0` (judged by the **3D distance**, so a horizontally-close but
   vertically-far goal does not switch) a PD loop takes over (position loop + velocity/acceleration
   feed-forward, with a rate limit on the velocity change to avoid jitter).
+  - **The ray layer stays active inside the takeover zone and keeps priority**: probing and braking
+    run throughout; once the ray layer sees a real threat (filtered `brake < 0.97`), the tangential
+    detour (tan) fades in over 0.4 s with hysteresis and goes through the same lateral speed budget
+    as the PD (budget scaled to the actual commanded speed), so avoidance takes **priority** over the
+    PD's straight-in component (`rep`/`vGo`/`vRep` stay off to avoid fighting the PD along the goal
+    line); it falls back to the pure PD once the corridor is clear again (`brake > 0.995`).
+  - **Faster, calmer settle after takeover**: the velocity-target slew cap `yopoTakeoverSlew`
+    20 → 14 m/s² (still above the airframe's acceleration ceiling, so it only filters frame-to-frame
+    steps) and the slew now covers the **vertical axis** too (removes the vertical bobbing at the
+    goal); the damping `holdKd` is distance-scheduled — 1.5 across the zone, ramping linearly to 2.8
+    over the last 3 m — so it converges faster without end-point overshoot or sway.
 - **Depth availability**: when DA360 depth fails or times out it does **not** fall back to raycasting;
   the drone hovers in place and keeps retrying until a valid depth map arrives (see "Depth Map").
   Note: an earlier version had an "abnormal depth" check that hovered when the whole frame was
@@ -501,9 +512,11 @@ Key parameters (all in the `src/drone.js` constructor):
 | `yopoAvoidBrakeAccel` | 17.0 | Max *actual* deceleration the ray layer may command while braking (m/s²): matches the 60° tilt ceiling (`droneMaxAngle=60`). It injects a deceleration feed-forward opposing velocity and **suppresses the network's acceleration feed-forward** |
 | `yopoAvoidBrakeMinFrac` | 0.85 | Deliver at least 0.85×`BrakeAccel` (≈14.5 m/s²) as soon as braking starts |
 | `yopoAvoidBrakeReaction` | 0.32 / 0.48 | Brake reaction time (s): base / high-speed (≥ `yopoAvoidRefSpeed`) |
-| `yopoAvoidBrakeRange` / `BrakeRangeHi` | 18.0 / 32.0 | Progressive soft-brake zone (m): low / high speed |
+| `yopoAvoidBrakeRange` / `BrakeRangeHi` | 24.0 / 40.0 | Progressive soft-brake zone (m): low / high speed (raised together with `yopoAvoidStopH` 6→7.5 so the `(brakeClear − standoff×2)` normalisation does not degenerate) |
 | `yopoAvoidBrakeFloor` | 0.85 | Soft-brake speed floor ratio (still decelerates when close, without over-compressing the cruise) |
-| `yopoAvoidStop` | 6.0 | Safety clearance kept off obstacles (m): drives the brake standoff, climb/descent clearance and the vGo trigger |
+| `yopoAvoidStopH` | 7.5 | **Horizontal** brake safety standoff (m): drives the forward brake standoff and the repulsion decay — keeps further off walls / buildings (raised from 6.0 per request) |
+| `yopoAvoidStop` | 6.0 | **Vertical** safety clearance (m): drives the up/down clearance brakes (vSafeUp/vSafeDown) and the vertical-clearing block distance; deliberately NOT raised with StopH, because a clearance below it forbids descending entirely (`vSafeDown=0`) and a low goal / the ground would become unreachable |
+| `yopoMinAlt` | 3.0 | Minimum ground/roof clearance (m): below it the upward push engages (2.5 → 3.0, less terrain hugging) |
 | `yopoAvoidVClimbScale` | 2.2 | Vertical clearing climb strength |
 | `yopoAvoidVBlock` | 20.0 | Forward clearance below which vertical clearing triggers (m) |
 | `yopoAvoidVGoBase` / `VGoSpan` | 0.60 / 0.42 | Near / far strength of the "leave the footprint" speed (vGo) for an obstacle underfoot |
@@ -556,7 +569,7 @@ number of GPU picks per cycle:
 | `yopoAvoidRepRangeHi` | 50.0 | Repulsion/detour/brake action range at speed (m) |
 | `yopoAvoidTanGain` | 54.0 | Tangential detour gain (m/s), more decisive than 30 |
 | `yopoAvoidRepGain` | 20.0 | Maximum radial push-away speed (m/s), more decisive than 12 |
-| `yopoAvoidBrakeRangeHi` | 32.0 | Soft-brake start distance at speed (m) |
+| `yopoAvoidBrakeRangeHi` | 40.0 | Soft-brake start distance at speed (m) |
 | `yopoAvoidBrakeReaction` | 0.48 | Brake reaction time at speed (s): the lag (attitude build-up + control loop) is converted to a reaction distance `spd × reaction` subtracted from the stopping room, so at 15 m/s braking starts ~3 m earlier and still stops inside the standoff |
 
 Measured picks per cycle: about 35 at low speed (24 horizontal + 9 vertical layers + 2 straight

@@ -221,7 +221,12 @@ export class Drone {
         // approach speed holdKp*d/(1+holdKd) is a slow ramp that never reaches this cap).
         // Keep it above the airframe's real acceleration (~11-17 m/s^2) so legitimate braking is
         // never slowed down; it only bites on frame-to-frame steps.
-        this.yopoTakeoverSlew = 20.0;
+        // LOWERED 20 -> 14 (settle-faster request): 14 m/s^2 is still above the airframe's real
+        // acceleration ceiling (yopoAccMax = 11), so no genuine manoeuvre is ever throttled --
+        // the cap only bites on frame-to-frame STEPS, which are exactly what makes the airframe
+        // overshoot in attitude and sway at the goal. A tighter cap = fewer steps get through =
+        // a calmer, quicker settle.
+        this.yopoTakeoverSlew = 14.0;
         this.yopoArriveHoldM = 3.5;        // Client-side arrival lock distance threshold (m)
         this.yopoArriveHoldV = 1.0;        // Client-side arrival lock speed threshold (m/s)
         // Deadband around the goal (m): once latched AND this close, the final-approach PD stops
@@ -464,7 +469,10 @@ export class Drone {
         this._avoidCycle = 0;            // Probe cycle counter
         this._avoidPrevBlocked = false;  // Whether the previous cycle saw the forward corridor blocked (gates the extra vertical layers)
         this._avoidPerf = { probeMs: 0, rays: 0, rayTotal: 0, cycles: 0, ringAgeMax: 0 };
-        this.yopoMinAlt = 2.5;        // Minimum ground/roof clearance (m) -- threshold that triggers soft avoidance (upward push)
+        this.yopoMinAlt = 3.0;        // Minimum ground/roof clearance (m) -- threshold that triggers soft avoidance (upward push)
+                                      // RAISED 2.5 -> 3.0 (keep-further-away request): the push-up now engages
+                                      // 0.5 m earlier, so the drone stops hugging the ground / rooftops and
+                                      // keeps a wider margin under overhangs.
 
         this.yopoAvoidVertRay = true;     // Straight up/down vertical rays (prevents hitting the ceiling / an obstacle straight below)
         this.yopoAvoidVertRange = 12.0;   // Vertical ray detection range (m)
@@ -512,16 +520,25 @@ export class Drone {
         this.yopoAvoidStop = 6.0;     // Safety clearance (m): the distance the drone keeps off obstacles.
                                       // RAISED 2.5 -> 4.0 -> 6.0: holds further off walls / buildings per
                                       // request (still clipping obstacles with too little margin).
-                                      // Drives the forward brake standoff (2888), the down/up clearance
-                                      // (2844/2862), the vGo underfoot trigger (3224) and the vertical-
-                                      // clearing block distance (3137) -- all scale with it, so the whole
-                                      // avoidance envelope widens consistently rather than in one spot.
+                                      // Drives the down/up clearance (2844/2862) and the vertical-
+                                      // clearing block distance (3137).
                                       // Trade-off: a larger standoff shrinks dGate (= dAhead - standoff -
                                       // reactionDist), so vCloseMax drops and the drone is vetted to a
                                       // lower speed near obstacles. That is the intended direction here
                                       // (safety over cruise speed). Do NOT widen yopoAvoidRepRange to
                                       // compensate: it doubles as goalClear's clearThresh, so raising it
                                       // makes "corridor is clear" too strict and detours on open paths.
+        // HORIZONTAL brake standoff (m), split from yopoAvoidStop. RAISED 6.0 -> 7.5
+        // (keep-further-away request): the horizontal kinematic brake now plans its stop 7.5 m off
+        // the obstacle instead of 6.0 m, so the drone holds a wider margin from walls / buildings.
+        // The VERTICAL standoff (vSafeUp / vSafeDown above) deliberately KEEPS yopoAvoidStop = 6.0:
+        // a larger vertical standoff forbids descending entirely once the clearance below drops
+        // below it (vSafeDown = 0), so raising it would stop the drone from ever descending closer
+        // than that to a low goal / the ground.
+        // NOTE: the soft-brake zone (yopoAvoidBrakeRange) must stay comfortably above 2x this
+        // value, otherwise the (brakeClear - standoff*2) normalisation degenerates and the
+        // progressive soft brake stops shaping the approach at all (see BrakeRange below).
+        this.yopoAvoidStopH = 7.5;
         this.yopoAvoidVGoThresh = 7.0; // Underfoot / overhead blocking threshold for the horizontal vGo
                                       // detour (m). Deliberately DECOUPLED from yopoAvoidStop (it used to
                                       // be yopoAvoidStop + 3.0, i.e. 7.0 at stop = 4.0) and pinned to that
@@ -548,10 +565,14 @@ export class Drone {
         // permanently squeezed to 30%-70% of the commanded speed (the main cause of the 1-4 m/s the
         // user measured). After decoupling, it only engages within 12 m and never drops below 0.55;
         // close range is handled by the kinematic brake, which guarantees a real stop.
-        this.yopoAvoidBrakeRange = 18.0;  // Soft-brake deceleration zone (m): earlier ease-off
-        this.yopoAvoidBrakeRangeHi = 32.0; // Soft-brake zone at yopoAvoidRefSpeed (m): at 15 m/s the drone
+        this.yopoAvoidBrakeRange = 24.0;  // Soft-brake deceleration zone (m). RAISED 18 -> 24 together
+                                          // with yopoAvoidStopH 6 -> 7.5: the soft zone is normalised as
+                                          // (brakeClear - standoff*2) / (range - standoff*2), so with the
+                                          // wider standoff the old 18 m left only a 6 m band and the
+                                          // "ease off as you get closer" shaping nearly vanished.
+        this.yopoAvoidBrakeRangeHi = 40.0; // Soft-brake zone at yopoAvoidRefSpeed (m): at 15 m/s the drone
                                           // needs to start easing off much earlier. Safe to widen because
-                                          // the floor (0.55) caps how much it can ever slow down on its
+                                          // the floor (0.85) caps how much it can ever slow down on its
                                           // own -- the physical stop is always the kinematic brake.
         this.yopoAvoidBrakeFloor = 0.85;  // Soft-brake floor: RAISED 0.55 -> 0.80 -> 0.85. The soft brake only
                                           // shapes the "ease off as you get closer" deceleration -- the
@@ -1711,6 +1732,11 @@ export class Drone {
         if (!yopoNearGoalHold) {
             this._holdVelPrevX = undefined;
             this._holdVelPrevZ = undefined;
+            this._holdVelPrevY = undefined;
+            // Re-arm the takeover steering hysteresis so a fresh run into the zone starts from
+            // "unarmed" (pure PD) and only steers once the rays actually see a threat.
+            this._takeoverSteerOn = false;
+            this._takeoverSteerRamp = 0;
         }
 
         if (yopoNearGoalHold) {
@@ -1746,7 +1772,15 @@ export class Drone {
             // forced-arrival latch -- both were tried here and caused the target to jump
             // (holdKd 1.5 -> 3.2 on the arrived edge) or the deadband to chatter in/out, which is
             // exactly the X-axis jitter reported at the goal.
-            const holdKp = 5.0, holdAltKp = 4.5, holdKd = 1.5;
+            const holdKp = 5.0, holdAltKp = 4.5;
+            // Damping is DISTANCE-SCHEDULED (settle-faster / no-sway request): out in the zone the
+            // run-in should stay responsive, so the base Kd 1.5 is kept; over the last ~3 m the
+            // damping ramps up smoothly (a linear ramp -- no step, so no chatter) to 2.8. A
+            // first-order PD with a larger Kd has a larger damping ratio, which kills the residual
+            // sway around the goal WITHOUT slowing the run-in (the approach speed is set by
+            // holdMaxV = sqrt(2*a*d), not by Kd), and it also damps any steering the ray layer adds
+            // near an obstacle (see the takeover steering arm below).
+            const holdKd = 1.5 + 1.3 * clamp(1 - distGoal / 3.0, 0, 1);
             const collideStall = this.isColliding ? 0.35 : 1.0;
             // Conservative deceleration kept in reserve for the stop. Matched to the
             // yopo-native-only branch (7.0): below yopoAccMax 11 and far below the 17.0 the
@@ -1836,19 +1870,26 @@ export class Drone {
             // The steady approach speed is a slow ramp that never reaches this cap, while a
             // frame-to-frame step does -- and a step in the velocity target is a step in the
             // acceleration command, which is exactly what makes the airframe sway.
+            // The slew now covers ALL THREE axes: an unslewed vertical target was the main source
+            // of the vertical bobbing at the goal (the altitude trim / PD could step the Y target
+            // between frames with no limit at all).
             const maxDv = this.yopoTakeoverSlew * dt;
-            if (this._holdVelPrevX !== undefined && this._holdVelPrevZ !== undefined) {
+            if (this._holdVelPrevX !== undefined && this._holdVelPrevZ !== undefined &&
+                this._holdVelPrevY !== undefined) {
                 const dvx = velTargetX - this._holdVelPrevX;
                 const dvz = velTargetZ - this._holdVelPrevZ;
-                const dv = Math.hypot(dvx, dvz);
+                const dvy = velTargetY - this._holdVelPrevY;
+                const dv = Math.sqrt(dvx * dvx + dvz * dvz + dvy * dvy);
                 if (dv > maxDv) {
                     const s = maxDv / dv;
                     velTargetX = this._holdVelPrevX + dvx * s;
                     velTargetZ = this._holdVelPrevZ + dvz * s;
+                    velTargetY = this._holdVelPrevY + dvy * s;
                 }
             }
             this._holdVelPrevX = velTargetX;
             this._holdVelPrevZ = velTargetZ;
+            this._holdVelPrevY = velTargetY;
         } else if (stickActive) {
             // Stick override: use manual control.
             // Smooth hand-over on release: ramp the velocity target from the speed AT THE MOMENT
@@ -2019,17 +2060,38 @@ export class Drone {
                 avoid.brake = this._avoidBrakeFilt;
                 braking = avoid.brake < 0.95;
                 avoidBrake = avoid.brake;
-                if (nearGoalNoRep) {
-                    // Inside the takeover zone the ray layer only BRAKES: the tangential detour (tan)
-                    // is deliberately NOT added here (per request) -- it fights the PD that is
-                    // converging straight on the goal. Obstacle handling inside the zone is the ray
-                    // brake + the closing-speed gate below (both pure speed limits, no steering).
-                    // Navigation accuracy stays correct because the real cause of the earlier
-                    // "wanders near a wall" symptom -- a wall BEHIND the goal being treated as
-                    // blocking -- is fixed at the source (beyondGoal / yopoAvoidGoalBrakeFloor),
-                    // not by tan; and collision safety relies on the conservative
-                    // yopoAvoidBrakeDecel plus the client-side ray layer running every frame,
-                    // rather than steering inside the zone.
+                // Inside the takeover zone the ray layer must still take PRIORITY over the PD when a
+                // real threat shows up (user request: "接管时也要有射线避障且优先"). Gated by a
+                // HYSTERESIS on the (already low-pass filtered) brake so it cannot chatter:
+                //   arm  when brake < 0.97  (any measurable slowdown -> a threat is real)
+                //   keep until brake > 0.995 (fully clear again)
+                // While armed we fall through to the same steering branch the cruise phase uses:
+                // the tangential detour (tan) is added and the lateral speed budget applies, so
+                // avoidance genuinely STEERS around the obstacle instead of only slowing down.
+                // Still suppressed inside the zone: repulsion (rep, via repScale = 0 -- it pushes
+                // straight away from a goal that sits against a wall and made the drone swing back
+                // and forth along the goal line) and vGo / vRep / upPush (gated on !nearGoalNoRep
+                // below -- they override the PD's straight convergence). So the zone keeps "brake +
+                // steer around", which is exactly "avoidance with priority", while an open path
+                // keeps the pure, non-fighting PD (fast, calm settle).
+                const steerArm = avoid.brake < 0.97;
+                const steerRelease = avoid.brake > 0.995;
+                this._takeoverSteerOn = this._takeoverSteerOn
+                    ? !(steerRelease)      // keep armed until fully clear
+                    : steerArm;
+                // Fade the takeover steering in/out over ~0.4 s instead of stepping it: an
+                // instant tan onset is an acceleration step -> attitude overshoot -> exactly the
+                // sway the settle-faster request asks to avoid. The BRANCH below keys off the
+                // ramp (not the raw arm flag) so both directions are smooth.
+                if (this._takeoverSteerOn) {
+                    this._takeoverSteerRamp = Math.min(1, (this._takeoverSteerRamp || 0) + dt / 0.4);
+                } else {
+                    this._takeoverSteerRamp = Math.max(0, (this._takeoverSteerRamp || 0) - dt / 0.4);
+                }
+                if (nearGoalNoRep && (this._takeoverSteerRamp || 0) <= 0) {
+                    // Unarmed: the ray layer only BRAKES (pure speed limit, no steering). The
+                    // closing-speed gate below still clips any residual closing component, so
+                    // safety is unchanged.
                     velTargetX = velTargetX * avoid.brake;
                     velTargetZ = velTargetZ * avoid.brake;
                 } else {
@@ -2050,8 +2112,11 @@ export class Drone {
                     const fwdZ = velTargetZ * avoid.brake;
                     // repScale is 1 outside the takeover zone and 0 inside it: the repulsion is
                     // simply dropped there so it cannot shove the drone off a goal against a wall.
-                    let steerX = avoid.repX * repScale + avoid.tanX;
-                    let steerZ = avoid.repZ * repScale + avoid.tanZ;
+                    // steerFade is 1 in cruise and follows the takeover ramp inside the zone, so
+                    // the tangential detour fades in/out smoothly there (see the ramp above).
+                    const steerFade = nearGoalNoRep ? (this._takeoverSteerRamp || 0) : 1.0;
+                    let steerX = avoid.repX * repScale + avoid.tanX * steerFade;
+                    let steerZ = avoid.repZ * repScale + avoid.tanZ * steerFade;
                     // Cap the detour vector ITSELF. Previously lateralBudget only shrank fwdAllow
                     // and the steer vector was added unclamped -- with the tangential gain at
                     // 34 m/s and the repulsion at 15, the detour could alone command maxSpd even
@@ -2061,7 +2126,15 @@ export class Drone {
                     // the lateral detour, so the drone slides past obstacles faster instead of
                     // crawling around them. 0.70 was measured as "detouring too fast", so this
                     // deliberately stays just under it; drop back to 0.62 if the detour feels wild.
-                    const steerCap = maxSpd * 0.68;
+                    // Budget base: the ACTUAL commanded speed (with a small floor), not the global
+                    // maxSpd. In cruise they coincide (~15 m/s), but inside the takeover zone the
+                    // PD target is much slower (holdMaxV shrinks with the remaining distance), so
+                    // keying the budget to maxSpd would let the detour dominate a 2 m/s approach
+                    // and keep swinging the drone around the goal. Scaling the budget with the real
+                    // commanded speed keeps avoidance proportionate: strong enough to steer clear,
+                    // gentle enough to settle.
+                    const budgetBase = Math.max(2.0, Math.hypot(velTargetX, velTargetZ));
+                    const steerCap = budgetBase * 0.68;
                     let steerMag = Math.hypot(steerX, steerZ);
                     if (steerMag > steerCap) {
                         const s = steerCap / steerMag;
@@ -2073,7 +2146,7 @@ export class Drone {
                         // the repulsion becomes the dominant velocity component -- the ray
                         // avoidance has the highest priority and the drone slides past the
                         // obstacle instead of pushing into it.
-                        const fwdAllow = Math.max(maxSpd * 0.10, maxSpd - lateralBudget);
+                        const fwdAllow = Math.max(budgetBase * 0.10, budgetBase - lateralBudget);
                         const fwdMag = Math.hypot(fwdX, fwdZ);
                         if (fwdMag > fwdAllow) {
                             const s = fwdAllow / fwdMag;
@@ -3128,7 +3201,10 @@ export class Drone {
         //      physical stop belongs to (1) -- the soft brake must no longer be squeezed all the
         //      way to 0 and dominate the speed limit (that was exactly what caused 1-4 m/s).
         let brake = 1;
-        const standoff = this.yopoAvoidStop;
+        // Horizontal standoff: the WIDER yopoAvoidStopH (7.5 m) so the drone keeps further off
+        // walls / buildings (keep-further-away request). The vertical clearances (vSafeUp /
+        // vSafeDown above) still use the narrower yopoAvoidStop on purpose -- see the note there.
+        const standoff = this.yopoAvoidStopH;
         // Use the LARGER of the commanded and the actual velocity for the reaction distance: if the
         // drone is actually moving faster than the network commands (glide / overshoot), braking must
         // cover the real closing speed, not the optimistic commanded one.
