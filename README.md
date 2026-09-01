@@ -381,7 +381,7 @@ DA360_RESAMPLE=bilinear ./scripts/start_da360_api.sh
 http://127.0.0.1:8080/?da360Url=http://<host>:5688/depth
 ```
 
-### 深度图（YOPO 输入）
+## 输入给 YOPO 的深度图
 
 YOPO 需要 **384×192 ERP 全景深度图**（YOPO 原生输入格式），双通道：通道 0 = 归一化深度 `[0,1]`，通道 1 = 有效 mask。获取流程：
 
@@ -389,7 +389,7 @@ YOPO 需要 **384×192 ERP 全景深度图**（YOPO 原生输入格式），双�
 2. 前端重投影/裁剪为 384×192 ERP，附加有效 mask
 3. 直接作为网络输入（深度值本身由 DA360 给出，不会掺入射线合成的几何深度；仅用稀疏 Cesium 射线做**米制尺度标定**，把 DA360 的相对深度换算成米）
 
-#### 米制尺度标定（实现）
+### 米制尺度标定（实现）
 
 DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0），不是米制，需要估计一个全局尺度因子 `scale`，使 `metric = rel × scale`。实现位于 `src/yopo-depth-from-panorama.js`：
 
