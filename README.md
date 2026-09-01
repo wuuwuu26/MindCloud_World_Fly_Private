@@ -14,7 +14,7 @@
 
 ## 从零开始（首次部署）
 
-下面按「一台全新机器 → 能手动飞 + 能 YOPO 自主导航」的顺序走一遍，包含 Docker / NVIDIA Container Toolkit 安装、拉取代码、权重下载、Cesium Ion token 配置和首次镜像构建。**首次部署完成后，日常只需 `./restart_all.sh`**（见「日常启动 / 部分重启 / 停止」）。
+下面按「一台全新机器 → 能手动飞 + 能 YOPO 自主导航」的顺序走一遍，包含 Docker / NVIDIA Container Toolkit 安装、拉取代码、权重下载和首次镜像构建。**首次部署完成后，日常只需 `./restart_all.sh`**（见「日常启动 / 部分重启 / 停止」）。
 
 ### 第 0 步：安装前置软件
 
@@ -68,21 +68,7 @@ python3 -m pip install --user gdown
 
 DA360 源码已随仓库提供，脚本检测到源码存在时只下载权重。
 
-### 第 3 步：配置 Cesium Ion token（推荐）
-
-主视图与全景相机都通过 Cesium Ion 拉取 Google Photorealistic 3D Tiles。仓库内置的默认 token（`src/cesium-world.js` 里的 `DEFAULT_ION_TOKEN`）仅供体验，随时可能失效或撞配额，**建议换成自己的**：
-
-1. 在 <https://ion.cesium.com/tokens> 新建 token；
-2. 为它开通 Google Photorealistic 3D Tiles / `assets:read` 权限；
-3. 用 URL 参数传入：
-
-```text
-http://127.0.0.1:8080/?ionToken=你的token
-```
-
-也可以直接改 `src/cesium-world.js` 的 `DEFAULT_ION_TOKEN` 常量把它固化下来（`src/` 是只读挂载进容器的，改完浏览器 Ctrl+F5 强刷即可，**不用重建镜像**）。若 token 没有 Google 3D Tiles 权限，页面会自动回退到内置 ion 资产 `2275207`（`DEFAULT_ASSET_ID`），也可用 `?assetId=` 覆盖。
-
-### 第 4 步：一键启动（首次会自动构建三个镜像）
+### 第 3 步：一键启动（首次会自动构建三个镜像）
 
 ```bash
 ./restart_all.sh
@@ -108,7 +94,7 @@ DA360_FORCE_BUILD=1 ./scripts/start_da360_api.sh # DA360 镜像
 
 > YOPO 推理默认走 TensorRT 加速（引擎 `asset/yopo-trt/yopo_trt.pth` 已随仓库提供）。`restart_all.sh` **无条件**设 `YOPO_USE_TRT=1`，无需额外操作；引擎缺失时它只打印一条 WARN，实际由 `scripts/start_yopo_api.sh` 在 YOPO 容器内用 GPU 自动构建引擎。详情见「YOPO TensorRT 加速」。
 
-### 第 5 步：确认三个服务都活着
+### 第 4 步：确认三个服务都活着
 
 ```bash
 docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'  # 应看到下面 3 个容器
@@ -117,7 +103,7 @@ curl http://127.0.0.1:5688/health        # DA360：健康自检
 curl http://127.0.0.1:5689/yopo/status   # YOPO：服务状态
 ```
 
-### 第 6 步：打开浏览器起飞
+### 第 5 步：打开浏览器起飞
 
 访问 `http://127.0.0.1:8080` → 点 **Start Google 3D Tiles Flight** → 搜索框选城市 → 按住 `I` 点地面设出生点 → 按 `O` 起飞，详见「使用流程说明」。
 
@@ -132,7 +118,6 @@ curl http://127.0.0.1:5689/yopo/status   # YOPO：服务状态
 | `Port 8080 is already in use` | 换端口：`PORT=18081 ./launch.sh` 或 `./launch.sh --port 18081` |
 | DA360 长时间不 ready | 看 `/tmp/restart_da360.log`；权重缺失时脚本会自动调用 `download_da360_model.sh`，慢通常是 Google Drive 下载慢 |
 | YOPO 首次启动较慢 | 启用 TensorRT 但 `asset/yopo-trt/yopo_trt.pth` 不存在时，会在容器内用 GPU 现场固化引擎并写回该目录，之后直接加载 |
-| 页面空白 / 3D Tiles 加载不出来 | 多半是 token 失效或无 Google 3D Tiles 权限，按第 3 步换自己的 token；同时确认浏览器能访问 Ion 与 `cdn.jsdelivr.net` |
 
 ## 日常启动 / 部分重启 / 停止
 
