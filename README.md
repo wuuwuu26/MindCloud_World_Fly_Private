@@ -21,11 +21,11 @@ cd MindCloud_World_Fly_Private
 
 > 注意：DA360 的**源码**已随仓库纳入版本管理（对 DA360 而言 `.gitignore` 只忽略权重目录 `third_party/DA360/checkpoints/`，完整忽略清单见仓库根目录 `.gitignore`），克隆后即可获得源码；但**权重**（`DA360_large.pth`，约 1.3GB，超 GitHub 100MB 限制）未入库，运行深度服务前需先下载权重。
 
-> **新机器请看下一节「从零开始（首次部署）」**：它包含 Docker / NVIDIA Container Toolkit 安装、权重下载、Cesium Ion token 配置和首次镜像构建的完整步骤。已经部署过的机器直接跳到「快速开始（一键启动全部服务）」。
+> **新机器请看下一节「从零开始（首次部署）」**：它包含 Docker / NVIDIA Container Toolkit 安装、权重下载、Cesium Ion token 配置和首次镜像构建的完整步骤。已经部署过的机器直接看「日常启动 / 部分重启 / 停止」。
 
 ## 从零开始（首次部署）
 
-下面按「一台全新机器 → 能手动飞 + 能 YOPO 自主导航」的顺序走一遍。**首次部署完成后，日常只需 `./restart_all.sh`**（见下一节）。
+下面按「一台全新机器 → 能手动飞 + 能 YOPO 自主导航」的顺序走一遍。**首次部署完成后，日常只需 `./restart_all.sh`**（见下一节「日常启动 / 部分重启 / 停止」）。
 
 ### 第 0 步：安装前置软件
 
@@ -116,6 +116,8 @@ YOPO_FORCE_BUILD=1 ./scripts/start_yopo_api.sh   # YOPO 镜像
 DA360_FORCE_BUILD=1 ./scripts/start_da360_api.sh # DA360 镜像
 ```
 
+> YOPO 推理默认走 TensorRT 加速（引擎 `asset/yopo-trt/yopo_trt.pth` 已随仓库提供）。`restart_all.sh` **无条件**设 `YOPO_USE_TRT=1`，无需额外操作；引擎缺失时它只打印一条 WARN，实际由 `scripts/start_yopo_api.sh` 在 YOPO 容器内用 GPU 自动构建引擎。详情见「YOPO TensorRT 加速」。
+
 ### 第 5 步：确认三个服务都活着
 
 ```bash
@@ -142,34 +144,23 @@ curl http://127.0.0.1:5689/yopo/status   # YOPO：服务状态
 | YOPO 首次启动较慢 | 启用 TensorRT 但 `asset/yopo-trt/yopo_trt.pth` 不存在时，会在容器内用 GPU 现场固化引擎并写回该目录，之后直接加载 |
 | 页面空白 / 3D Tiles 加载不出来 | 多半是 token 失效或无 Google 3D Tiles 权限，按第 3 步换自己的 token；同时确认浏览器能访问 Ion 与 `cdn.jsdelivr.net` |
 
-## 快速开始（一键启动全部服务）
+## 日常启动 / 部分重启 / 停止
 
-> 已完成上面「从零开始（首次部署）」后，日常启动/重启只需这一节的内容，镜像不会重建。
-
-推荐使用 `restart_all.sh` 一次性拉起主进程、DA360 与 YOPO 三个服务：
+首次部署完成后（见上一节），日常只需 `./restart_all.sh`。镜像已存在时不会重建，所以这是最快的重启方式；三个服务默认都以后台 detach 方式运行：
 
 ```bash
-./restart_all.sh
-```
+./restart_all.sh                 # 全部重启
+./restart_all.sh --no-da360      # 只重启 YOPO + 主飞行（DA360 保留）
+./restart_all.sh --no-yopo       # 只重启 DA360 + 主飞行（YOPO 保留）
+./restart_all.sh --no-main       # 只重启 DA360 + YOPO（主飞行保留）
 
-该脚本等价于依次启动：DA360 深度服务 → YOPO 导航服务 → 主飞行进程（`launch.sh`）。启动后浏览器打开 `http://127.0.0.1:8080`，点击 **Start Google 3D Tiles Flight**，进入放置模式设置出生点后按 `O` 起飞，即可用键盘飞行。
-
-> YOPO 推理默认走 TensorRT 加速（引擎 `asset/yopo-trt/yopo_trt.pth` 已随仓库提供）。`restart_all.sh` **无条件**设 `YOPO_USE_TRT=1`，无需额外操作；引擎缺失时它只打印一条 WARN，实际由 `scripts/start_yopo_api.sh` 在 YOPO 容器内用 GPU 自动构建引擎。详情见「YOPO TensorRT 加速」。
-
-```bash
-# 只重启部分服务（其余保留；三个服务默认都以后台 detach 方式运行）
-./restart_all.sh --no-da360        # 只重启 YOPO + 主飞行
-./restart_all.sh --no-yopo         # 只重启 DA360 + 主飞行
-./restart_all.sh --no-main         # 只重启 DA360 + YOPO
-
-# 查看某服务日志（容器名见下方表格）
-docker logs -f mindcloud-yopo-api
+docker logs -f mindcloud-yopo-api   # 查看某服务日志
 
 # 停止全部后台容器（与 restart_all.sh 的停止逻辑一致，带 -v 清理匿名卷）
 docker rm -fv google-tiles-flight mindcloud-da360-api mindcloud-yopo-api
 ```
 
-三个容器的名字由 [restart_all.sh](restart_all.sh) 顶部的 `MAIN_NAME` / `DA360_NAME` / `YOPO_NAME` 定义（与各入口脚本的默认容器名一致）：
+容器名由 [restart_all.sh](restart_all.sh) 顶部的 `MAIN_NAME` / `DA360_NAME` / `YOPO_NAME` 定义（与各入口脚本的默认容器名一致）：
 
 | 容器名 | 用途 | 定义处 |
 |--------|------|--------|
