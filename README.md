@@ -125,7 +125,7 @@ DA360_FORCE_BUILD=1 ./scripts/start_da360_api.sh # DA360 镜像
 
 > YOPO 推理默认走 TensorRT 加速（引擎 `asset/yopo-trt/yopo_trt.pth` 已随仓库提供）。`restart_all.sh` **无条件**设 `YOPO_USE_TRT=1`，无需额外操作；引擎缺失时 `scripts/start_yopo_api.sh` 会在 YOPO 容器内用 GPU 自动构建引擎。
 >
-> **TRT 引擎与 GPU 的 SM 计算能力绑定**：仓库提供的引擎在 RTX 4070 上构建；如果你的 GPU 不同（如 Orin NX、其它桌面卡），首次启动前删除已有引擎，让启动脚本自动按你的 GPU 重建：
+> **TRT 引擎与 GPU 的 SM 计算能力绑定**：仓库提供的引擎在 RTX 4070 Laptop GPU 上构建；如果你的 GPU 不同（如 Orin NX、其它桌面卡），首次启动前删除已有引擎，让启动脚本自动按你的 GPU 重建：
 >
 > ```bash
 > rm asset/yopo-trt/yopo_trt.pth
@@ -583,7 +583,7 @@ YOPO 推理默认走 TensorRT（TRT）加速。将 `epoch50.pth` 固化为 fp16 
     mindcloud-yopo:latest python /opt/mindcloud-yopo/scripts/yopo_trt_transfer.py \
       --model /models/epoch50.pth --out /opt/mindcloud-yopo/trt/yopo_trt.pth
   ```
-- **换 GPU / 架构**：TRT 引擎与 GPU 的 SM 计算能力绑定，当前引擎在 RTX 4070 上构建。部署到 Orin NX 或其它卡时，在目标机删除旧引擎并让 `start_yopo_api.sh` 自动重建（或重新跑上面命令）。
+- **换 GPU / 架构**：TRT 引擎与 GPU 的 SM 计算能力绑定，当前引擎在 RTX 4070 Laptop GPU 上构建。部署到 Orin NX 或其它卡时，在目标机删除旧引擎并让 `start_yopo_api.sh` 自动重建（或重新跑上面命令）。
 - **环境约束**：容器内 TensorRT 固定为 `8.6.1`（匹配 CUDA 12.1 运行时与 `yopo_server` 的 TRT 8 加载 API）；TRT 8.6 pip 包不自带 cuDNN，转而复用镜像内 torch 捆绑的 cuDNN8 提供 `libcudnn.so.8`（见 `Dockerfile.yopo` 的 `LD_LIBRARY_PATH`）。
 
 ### 俯视小地图（目标地图）
