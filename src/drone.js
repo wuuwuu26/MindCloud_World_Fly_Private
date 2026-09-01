@@ -453,6 +453,16 @@ export class Drone {
         // ...and in that case the brake may never go below this, so a beyond-goal obstacle can
         // only slow the run-in, never pin the drone metres short of the goal.
         this.yopoAvoidGoalBrakeFloor = 0.40;   // 0..1 floor applied for a beyond-goal obstacle
+        // Tolerance (m) for the "threat is the goal itself" verdict. When the goal sits against
+        // a wall the forward ray hits that wall at (almost exactly) the goal's horizontal
+        // distance, so dAhead ~= distGoalH and a strict `dAhead > distGoalH` test misses it:
+        // brakeClear then falls to ~distGoalH, which is inside standoff(7.5) + reactionDist ->
+        // brake = 0 AND the closing-speed gate clips the goalward component to 0 -> the drone is
+        // pinned metres short of the goal and takes forever to arrive ("接管时比较久才能停下").
+        // A threat within this margin of the goal is treated as beyond-goal: the brake keeps its
+        // floor (never 0) and the gate stands down, leaving the stop to the final-approach PD,
+        // whose holdMaxV = sqrt(2*a*d) already guarantees a physically stoppable run-in.
+        this.yopoAvoidGoalGateMargin = 1.0;
         this.yopoAvoidStrideHi = 2;      // Use every 2nd ray (30 deg spacing) at high speed: 12 rays instead of 24
         this.yopoAvoidCoreDeg = 25;      // Half-angle (deg) of the core cone: keeps the full 10 deg
                                          // resolution at every speed, because it is the sector that
@@ -1772,7 +1782,17 @@ export class Drone {
             // forced-arrival latch -- both were tried here and caused the target to jump
             // (holdKd 1.5 -> 3.2 on the arrived edge) or the deadband to chatter in/out, which is
             // exactly the X-axis jitter reported at the goal.
-            const holdKp = 5.0, holdAltKp = 4.5;
+            // Kp is DISTANCE-SCHEDULED the same way the damping below is: base 5.0 out in the
+            // zone, ramping linearly (no step, no chatter) to 8.0 over the last ~3 m. The
+            // distance-scheduled damping (1.5 -> 2.8) raised (1+Kd), which quietly dropped the
+            // terminal steady-state coefficient v = Kp*dist/(1+Kd) from 2.0x to 1.32x the
+            // remaining distance and stretched the settling time constant tau = (1+Kd)/Kp from
+            // 0.30 s to 0.76 s -- the drone approached fine but then took ages to actually come
+            // to a stop ("接管时比较久才能停下来"). Scheduling Kp up to 8.0 restores the
+            // terminal coefficient to ~2.1x while KEEPING the high damping (no sway), and the
+            // settling tau drops to 0.48 s.
+            const holdKp = 5.0 + 3.0 * clamp(1 - distGoal / 3.0, 0, 1);
+            const holdAltKp = 4.5;
             // Damping is DISTANCE-SCHEDULED (settle-faster / no-sway request): out in the zone the
             // run-in should stay responsive, so the base Kd 1.5 is kept; over the last ~3 m the
             // damping ramps up smoothly (a linear ramp -- no step, so no chatter) to 2.8. A
@@ -1793,6 +1813,14 @@ export class Drone {
             velTargetX = holdKp * gErrX - holdKd * this.vx;
             velTargetZ = holdKp * gErrZ - holdKd * this.vz;
             velTargetY = holdAltKp * gErrY - holdKd * this.vy;
+            // Vertical speed ceiling: the vertical loop had NO holdMaxV-style cap, so a 2-3 m
+            // height error commanded a 9-13 m/s climb/descent that then had to be undone at the
+            // goal -- a big part of "takes ages to settle" (and of the vertical bobbing). Cap it
+            // with the same kinematic ramp as the horizontal run-in, plus a 4 m/s absolute limit
+            // (the altitude trim below is capped at yopoArriveAltVMax = 2 anyway).
+            const vYMax = Math.min(Math.sqrt(2 * holdDecel * Math.abs(gErrY)), 4.0);
+            if (velTargetY > vYMax) velTargetY = vYMax;
+            else if (velTargetY < -vYMax) velTargetY = -vYMax;
             // Never command motion AWAY from the goal. Now that the approach no longer
             // decelerates, the drone can latch arrived while still carrying speed, and the
             // -holdKd*v damping term then overwhelms holdKp*gErr and commands a large REVERSE
@@ -3235,9 +3263,13 @@ export class Drone {
         // there: the "navigation is inaccurate near the goal / never quite reaches it" symptom.
         // This got much worse once the tangential detour (tan) was removed from the takeover zone,
         // because braking is then the only obstacle reaction left.
-        // A threat NEARER than the goal (dAhead <= distGoalH) still uses the real ray distance, so
-        // genuine blocking of the remaining path stays fully covered.
-        const beyondGoal = this.yopoNavTarget && distGoalH > 0.5 && dAhead > distGoalH;
+        // A threat NEARER than the goal (dAhead <= distGoalH - yopoAvoidGoalGateMargin) still uses
+        // the real ray distance, so genuine blocking of the remaining path stays fully covered.
+        // Threats within the margin of the goal ARE the goal's wall (see yopoAvoidGoalGateMargin):
+        // they must take the beyond-goal path, otherwise brake lands in the `brake = 0` branch
+        // below (brakeClear ~= distGoalH <= standoff + reactionDist) and the drone is pinned.
+        const beyondGoal = this.yopoNavTarget && distGoalH > 0.5 &&
+            dAhead > distGoalH - this.yopoAvoidGoalGateMargin;
         const brakeClear = beyondGoal ? distGoalH + this.yopoAvoidGoalMargin : dAhead;
         if (brakeClear <= standoff + reactionDist) {
             brake = 0;  // Already inside the safety clearance + reaction distance -> stop advancing entirely
@@ -3267,11 +3299,14 @@ export class Drone {
             const soft = this.yopoAvoidBrakeFloor +
                 (1 - this.yopoAvoidBrakeFloor) * softT;
             brake = Math.min(kinBrake, soft);
-            // A beyond-goal obstacle may only slow the run-in, never pin the drone metres short of
-            // the goal: keep enough authority to keep closing on it.
-            if (beyondGoal && brake < this.yopoAvoidGoalBrakeFloor) {
-                brake = this.yopoAvoidGoalBrakeFloor;
-            }
+        }
+        // A beyond-goal obstacle may only slow the run-in, never pin the drone metres short of the
+        // goal: keep enough authority to keep closing on it. This is deliberately applied AFTER
+        // the branch above so it also lifts the `brake = 0` case -- that branch is exactly where a
+        // goal-adjacent wall used to pin the drone (brakeClear ~= distGoalH <= standoff +
+        // reactionDist -> brake = 0 with no floor).
+        if (beyondGoal && brake < this.yopoAvoidGoalBrakeFloor) {
+            brake = this.yopoAvoidGoalBrakeFloor;
         }
 
         const repMag = Math.hypot(repX, repZ);
@@ -3403,10 +3438,6 @@ export class Drone {
         // gx/gz (goal bearing) were computed at the top of the function and are shared by dAheadH
         // and this corridor check.
         let goalClear = false;
-        // True once the goal corridor is confirmed open and the avoidance terms are fully
-        // released. The closing-speed gate uses it so that an obstacle BEHIND the goal can no
-        // longer throttle the final approach (see gateBeyondGoal below).
-        let goalDirect = false;
         // Corridor measurements, hoisted so the periodic diagnostics log at the end of this method
         // can report them (they are what decides "is the way to the goal clear").
         let dPath = R, dCmd = R, reach = R;
@@ -3588,7 +3619,6 @@ export class Drone {
             tanX = 0; tanZ = 0;          // Tangential removed entirely (avoids detouring back to the start)
             brake = 1.0;                 // Clear exit means full speed, not slowed by vertical threats
             vRep = 0;                    // Vertical clearing released too: a clear corridor means no climbing / diving
-            goalDirect = true;           // Remember the release so the closing-speed gate follows it
         }
 
         // ---- Horizontal detour around vertical obstacles (B) ----
@@ -3686,7 +3716,13 @@ export class Drone {
         // closing-speed clip is pointless and must stand down. distGoalH > 0.5 guards both releases
         // so the gate is never disabled right at the goal. A genuinely blocking threat (dAhead <=
         // distGoalH AND inside the corridor) makes goalClear false, so it still throttles normally.
-        const gateBeyondGoal = (goalDirect && distGoalH > 0.5 && dAhead > distGoalH) ||
+        // Third release: the threat IS the goal's wall (dAhead within yopoAvoidGoalGateMargin of
+        // distGoalH). goalClear is false there (the goal corridor ends at the wall), so without
+        // this arm the gate clipped the goalward component to 0 (dGate = distGoalH - standoff -
+        // reactionDist <= 0) and the drone could never close the last metres -- the stop belongs
+        // to the final-approach PD, whose holdMaxV already guarantees a stoppable run-in.
+        const gateBeyondGoal = (distGoalH > 0.5 &&
+                                dAhead > distGoalH - this.yopoAvoidGoalGateMargin) ||
                                (goalClear && distGoalH > 0.5);
         const dGate = dAhead - standoff - reactionDist;
         const vCloseMax = (!dAheadHasDir || gateBeyondGoal) ? Infinity

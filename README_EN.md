@@ -430,7 +430,20 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
     20 → 14 m/s² (still above the airframe's acceleration ceiling, so it only filters frame-to-frame
     steps) and the slew now covers the **vertical axis** too (removes the vertical bobbing at the
     goal); the damping `holdKd` is distance-scheduled — 1.5 across the zone, ramping linearly to 2.8
-    over the last 3 m — so it converges faster without end-point overshoot or sway.
+    over the last 3 m — and `holdKp` is scheduled the same way (5 → 8) to compensate: the terminal
+    steady-state coefficient returns to ~2.1× the remaining distance and the settling time constant
+    drops from 0.76 s to 0.48 s. The vertical velocity target now gets a
+    `min(√(2a·|Δh|), 4 m/s)` cap as well (the vertical loop previously had no holdMaxV-style
+    ceiling, so a 2-3 m height error commanded a 9-13 m/s climb/descent that then took ages to undo).
+  - **A wall-adjacent goal no longer pins the drone metres short**: with the goal against a wall the
+    forward ray measures `dAhead ≈ distGoalH`, so the strict `dAhead > distGoalH` test missed the
+    beyond-goal exemption → `brakeClear ≤ standoff + reaction distance` gave `brake = 0` (the 0.40
+    floor sat inside the branch that never ran) AND the closing gate clipped the goalward component
+    to 0 — the drone stalled metres short and took forever to arrive. A new
+    `yopoAvoidGoalGateMargin = 1.0` treats a threat within 1 m of the goal's horizontal distance as
+    beyond-goal (the `yopoAvoidGoalBrakeFloor = 0.40` floor now applies after the branch, covering
+    the `brake = 0` case, and the gate gains a third release); the final deceleration stays with the
+    PD, whose `holdMaxV = √(2ad)` already guarantees a physically stoppable run-in.
 - **Depth availability**: when DA360 depth fails or times out it does **not** fall back to raycasting;
   the drone hovers in place and keeps retrying until a valid depth map arrives (see "Depth Map").
   Note: an earlier version had an "abnormal depth" check that hovered when the whole frame was
