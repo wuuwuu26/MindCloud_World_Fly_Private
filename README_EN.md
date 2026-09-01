@@ -426,6 +426,16 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
     as the PD (budget base ≥ `yopoCruiseMinSpd`), so avoidance takes **priority** over the
     PD's straight-in component (`rep`/`vGo`/`vRep` stay off to avoid fighting the PD along the goal
     line); it falls back to the pure PD once the corridor is clear again (`brake > 0.995`).
+    **The ray layer stands fully DOWN at the takeover end-game**: inside the last
+    `yopoTakeoverSteerEndDist = 3.0` m, or when the goal sits against a wall (the `gateBeyondGoal`
+    release puts `vCloseMax = ∞`, i.e. the threat IS the goal), the ray layer immediately backs off —
+    `brake` is forced to 1 (no more velTarget scaling), the tangential steer is switched off and the
+    braking feed-forward is dropped, handing full control back to the PD. Otherwise the ray layer reads
+    the wall-adjacent goal as an obstacle: tan keeps shoving the drone off the wall while the PD pulls
+    it back, the two fight back and forth → `yopoArrived` never latches because the speed is held off
+    the goal → the drone sways at the goal forever. This stand-down only happens once the drone is on
+    (or almost on) the goal; the PD's `holdMaxV = √(2ad)` already guarantees a physically stoppable
+    run-in, so the ray layer adds only jitter here and no real benefit.
   - **Faster, calmer settle after takeover**: the velocity-target slew cap `yopoTakeoverSlew`
     20 → 14 m/s² (still above the airframe's acceleration ceiling, so it only filters frame-to-frame
     steps) and the slew now covers the **vertical axis** too (removes the vertical bobbing at the

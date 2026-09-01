@@ -463,6 +463,13 @@ export class Drone {
         // floor (never 0) and the gate stands down, leaving the stop to the final-approach PD,
         // whose holdMaxV = sqrt(2*a*d) already guarantees a physically stoppable run-in.
         this.yopoAvoidGoalGateMargin = 1.0;
+        // Distance threshold (m) under which the takeover-zone ray-avoidance STEERING is switched
+        // off. The front part of the takeover (large distGoal) still keeps the ray layer in priority
+        // (user request: "接管时也要有射线避障且优先"); but over the last few metres the drone is
+        // essentially on the goal, and any tangential detour just shoves it off the goal point ->
+        // sway at the arrival. The final-approach PD's holdMaxV = sqrt(2*a*d) already guarantees a
+        // stoppable run-in, so the ray steering stands down here to kill the back-and-forth.
+        this.yopoTakeoverSteerEndDist = 3.0;
         this.yopoAvoidStrideHi = 2;      // Use every 2nd ray (30 deg spacing) at high speed: 12 rays instead of 24
         this.yopoAvoidCoreDeg = 25;      // Half-angle (deg) of the core cone: keeps the full 10 deg
                                          // resolution at every speed, because it is the sector that
@@ -2086,6 +2093,23 @@ export class Drone {
                     this._avoidBrakeFilt += (avoid.brake - this._avoidBrakeFilt) * brakeAlpha;
                 }
                 avoid.brake = this._avoidBrakeFilt;
+                // Takeover-zone end-game: stand the ray layer DOWN in favour of the final-approach
+                // PD, to kill the back-and-forth sway right at the goal.
+                //   - goal sits against a wall (threat IS the goal: vCloseMax === Infinity via the
+                //     gateBeyondGoal release), OR
+                //   - we are already inside the last yopoTakeoverSteerEndDist metres.
+                // In either case the ray layer reads the goal as an obstacle -> the tangential steer
+                // keeps shoving the drone off the wall while the PD pulls it back, and yopoArrived
+                // never latches (speed is held off the goal) -> the drone sways at the goal forever.
+                // Force brake = 1 (no velTarget scaling), disarm steer and drop the braking
+                // feed-forward; the PD's holdMaxV = sqrt(2*a*d) already guarantees a stoppable
+                // run-in, so the ray layer has nothing to add and only adds jitter here.
+                if (yopoNearGoalHold &&
+                    (!Number.isFinite(avoid.vCloseMax) || distGoal < this.yopoTakeoverSteerEndDist)) {
+                    avoid.brake = 1.0;
+                    this._takeoverSteerOn = false;
+                    this._takeoverSteerRamp = 0;
+                }
                 braking = avoid.brake < 0.95;
                 avoidBrake = avoid.brake;
                 // Inside the takeover zone the ray layer must still take PRIORITY over the PD when a
