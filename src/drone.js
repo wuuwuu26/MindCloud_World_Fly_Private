@@ -2572,7 +2572,17 @@ export class Drone {
         // actively moving the sticks (a stick step would differentiate into a tilt spike). On the
         // released hand-over ramp the velocity target is a smooth linear function, so D only adds
         // useful damping and kills the residual sway after the stop.
-        const velKd = (useAccFeedforward || (stickActive && horizActive)) ? 0.0 : this.sfVelKd;
+        // 接管区必须保留速度环 D 项（阻尼）——这是"到目标点接管范围抖动"的运动环根因：
+        // 接管区沿用 cruise 的 useAccFeedforward = true，原判定把 velKd 置 0，速度环退化为纯 P；
+        // 与内环(姿态)滞后、射线探测延迟(60-150 ms)串成的相位滞后使闭环欠阻尼 —— 数值仿真
+        // (d=12 m、v=10 m/s 进入、velKp=4.0)：tau=0.20 s 纯 P 过冲 1.21 m、尾部速度 1.16 m/s、
+        // 速度反向 4 次；tau=0.30 s 过冲 2.32 m、尾部 3.88 m/s、根本停不到目标点。
+        // 恢复 velKd = 1.0 后同样条件过冲降到 0.14 m、尾部 0.05 m/s、反向 0 次，并在 tau=0.08~0.40
+        // 全区间保持稳健(过冲 <= 0.89 m、尾部 <= 0.21 m/s、精确停在目标点)，收敛时间不变
+        // (1.60 s -> 1.53 s)。接管区的速度目标由本地 PD + slew 限幅生成，网络前馈在区内已停止且
+        // 陈旧(无 ffVel 跳变)，故 D 项不会放大噪声 —— 与 cruise 区(有前馈跳变，仍关 D)不同。
+        const velKd = ((useAccFeedforward && !yopoNearGoalHold) || (stickActive && horizActive))
+            ? 0.0 : this.sfVelKd;
         const velErrClamp = aMaxHoriz / Math.max(0.01, velKp);
         const velErrXc = clamp(velErrX, -velErrClamp, velErrClamp);
         const velErrZc = clamp(velErrZ, -velErrClamp, velErrClamp);

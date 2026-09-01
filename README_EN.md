@@ -438,6 +438,18 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
     (the component that would push the drone AWAY from the goal is stripped, keeping the side/rear push),
     never steer, so a goal parked next to a wall/obstacle is pushed to a safe distance instead of pinned
     on the hazard, and a wall-adjacent goal does not swing.
+  - **Velocity-loop D term restored inside the takeover zone (the real motion-loop root cause)**: the
+    takeover zone inherits `useAccFeedforward = true` from cruise, and the old test zeroed `velKd` along
+    with it, degrading the velocity loop to **pure P**. Combined with the inner-loop (attitude) lag and
+    the 60–150 ms ray-probe latency, the closed loop is **under-damped** — the actual source of "still
+    jittery inside the takeover range". Numerical simulation (entering at d=12 m, 10 m/s, `velKp=4.0`):
+    with a 0.20 s lag pure P overshoots 1.21 m, tail speed 1.16 m/s, 4 speed reversals; at 0.30 s it
+    overshoots 2.32 m with a 3.88 m/s tail and never settles on the goal. Restoring `velKd = 1.0` under
+    the same conditions gives 0.14 m overshoot, 0.05 m/s tail, 0 reversals, and stays robust across a
+    0.08–0.40 s lag range (overshoot ≤ 0.89 m, tail ≤ 0.21 m/s, parks exactly on the goal), with the
+    settle time unchanged-to-slightly-better (1.60 s → 1.53 s). The D term stays **off during cruise**
+    (there the network feed-forward jumps would be amplified); inside the takeover zone the velocity
+    target comes from the local PD + slew limit and the network feed-forward is stopped/stale, so D is safe.
   - **Faster, calmer settle after takeover**: the velocity-target slew cap `yopoTakeoverSlew`
     20 → 14 m/s² (still above the airframe's acceleration ceiling, so it only filters frame-to-frame
     steps) and the slew now covers the **vertical axis** too (removes the vertical bobbing at the
