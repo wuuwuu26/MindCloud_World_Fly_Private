@@ -258,22 +258,6 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 
 ## DA360 深度估计
 
-DA360 深度服务由 `restart_all.sh` 一键拉起（默认使用 `large` 模型）。DA360 **源码**已随仓库提供，但**权重**（`DA360_large.pth`，约 1.3GB，超 GitHub 100MB 限制）未入库，**首次运行深度服务前只需下载权重**（构建镜像无需先下载源码）：
-
-```bash
-python3 -m pip install --user gdown
-./scripts/download_da360_model.sh
-# 脚本会将权重放到 third_party/DA360/checkpoints/DA360_large.pth
-```
-
-启动后心跳自检：
-
-```text
-curl http://127.0.0.1:5688/health
-```
-
-停止或重启 DA360 直接重跑 `restart_all.sh`（或 `docker rm -fv mindcloud-da360-api`）。
-
 注意，默认使用 `DA360_large`，`scripts/start_da360_api.sh` 以 `DA360_INPUT_SCALE=0.65` 启动其容器，模型输入约为 `672x336`（checkpoint 基准 1036×518 × 0.65；已在本机 RTX 4070 Laptop GPU 8GB 上验证可稳定运行；`da360_server.py` 自身的默认值是 `1.0`，即按 checkpoint 原分辨率推理）。
 
 全景 RGB 默认就采集 `384x192` ERP，右下角显示即此原始尺寸；这个尺寸与 DA360 输出、YOPO 消费的尺寸完全一致，因此 `da360UploadScale` 默认为 `1.0`——原样上传、不再缩放，服务端 resize 到 `672x336` 模型输入，推理后把深度贴回 `384x192`。在本机 RTX 4070 Laptop GPU（8GB）上，单次 DA360 深度推理约 **50ms（≈20Hz）**；前端默认 `depthMs=33`（深度请求最小间隔 ≈30Hz，略高于推理耗时）以保证推理不会堆积请求。
