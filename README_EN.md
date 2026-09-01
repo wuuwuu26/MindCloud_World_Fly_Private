@@ -544,8 +544,9 @@ Key parameters (all in the `src/drone.js` constructor):
 | `yopoAvoidBrakeRange` / `BrakeRangeHi` | 24.0 / 40.0 | Progressive soft-brake zone (m): low / high speed (raised together with `yopoAvoidStopH` 6→7.5 so the `(brakeClear − standoff×2)` normalisation does not degenerate) |
 | `yopoAvoidBrakeFloor` | 0.85 | Soft-brake speed floor ratio (still decelerates when close, without over-compressing the cruise) |
 | `yopoAvoidStopH` | 7.5 | **Horizontal** brake safety standoff (m): drives the forward brake standoff and the repulsion decay — keeps further off walls / buildings (raised from 6.0 per request) |
-| `yopoAvoidStop` | 6.0 | **Vertical** safety clearance (m): drives the up/down clearance brakes (vSafeUp/vSafeDown) and the vertical-clearing block distance; deliberately NOT raised with StopH, because a clearance below it forbids descending entirely (`vSafeDown=0`) and a low goal / the ground would become unreachable |
-| `yopoMinAlt` | 3.0 | Minimum ground/roof clearance (m): below it the upward push engages (2.5 → 3.0, less terrain hugging) |
+| `yopoAvoidStop` | 6.0 | **Vertical UP** safety clearance (m): drives the up-clearance brake (vSafeUp) and the vertical-clearing block distance; deliberately NOT raised with StopH, because a clearance below it would over-restrict climbing / over-head clearance |
+| `yopoAvoidStopDown` | 7.5 | **Down (descent)** safety clearance (m), SEPARATE from `yopoAvoidStop`: drives only `vSafeDown` (the descent kinematic brake against an obstacle straight below). Raised 6.0 → 7.5 (per "keep further from obstacles below"): the descent now keeps 1.5 m more margin above whatever is directly below. Because it is a separate parameter, raising it does NOT affect the up / over-head clearance nor the horizontal avoidance. |
+| `yopoMinAlt` | 4.0 | Minimum ground/roof clearance (m): below it the upward push engages (2.5 → 3.0 → 4.0, even less terrain / rooftop hugging, wider margin below) |
 | `yopoAvoidVClimbScale` | 2.2 | Vertical clearing climb strength |
 | `yopoAvoidVBlock` | 20.0 | Forward clearance below which vertical clearing triggers (m) |
 | `yopoAvoidVGoBase` / `VGoSpan` | 0.60 / 0.42 | Near / far strength of the "leave the footprint" speed (vGo) for an obstacle underfoot |

@@ -298,7 +298,9 @@ export class Drone {
         // potential-field method on top. The values below only keep the safety and scaling
         // parameters needed to interpret YOPO commands, plus a passive ground safety net based
         // on pure terrain sampling (see the hard ground floor inside _controlYOPO).
-        this.yopoCrashFloor = 1.0;    // Hard ground safety floor (m): below this clearance a climb is forced, preventing blind descent into the ground
+        this.yopoCrashFloor = 1.5;    // Hard ground safety floor (m): below this clearance a climb is forced, preventing blind descent into the ground.
+                                      // RAISED 1.0 -> 1.5 (keep-further-from-obstacles-below request): the last-resort push-away now
+                                      // triggers 0.5 m higher, so the drone never skims the ground / rooftops.
         // Desired acceleration safety ceiling (m/s^2): clamps the actually reachable combined
         // horizontal + vertical acceleration (including avoidance braking / detour /
         // obstacle clearing).
@@ -486,10 +488,10 @@ export class Drone {
         this._avoidCycle = 0;            // Probe cycle counter
         this._avoidPrevBlocked = false;  // Whether the previous cycle saw the forward corridor blocked (gates the extra vertical layers)
         this._avoidPerf = { probeMs: 0, rays: 0, rayTotal: 0, cycles: 0, ringAgeMax: 0 };
-        this.yopoMinAlt = 3.0;        // Minimum ground/roof clearance (m) -- threshold that triggers soft avoidance (upward push)
-                                      // RAISED 2.5 -> 3.0 (keep-further-away request): the push-up now engages
-                                      // 0.5 m earlier, so the drone stops hugging the ground / rooftops and
-                                      // keeps a wider margin under overhangs.
+        this.yopoMinAlt = 4.0;        // Minimum ground/roof clearance (m) -- threshold that triggers soft avoidance (upward push)
+                                      // RAISED 2.5 -> 3.0 -> 4.0 (keep-further-from-obstacles-below request): the push-up now
+                                      // engages 1.0 m earlier, so the drone stops hugging the ground / rooftops and
+                                      // keeps a wider margin under overhangs / below building tops.
 
         this.yopoAvoidVertRay = true;     // Straight up/down vertical rays (prevents hitting the ceiling / an obstacle straight below)
         this.yopoAvoidVertRange = 12.0;   // Vertical ray detection range (m)
@@ -548,14 +550,22 @@ export class Drone {
         // HORIZONTAL brake standoff (m), split from yopoAvoidStop. RAISED 6.0 -> 7.5
         // (keep-further-away request): the horizontal kinematic brake now plans its stop 7.5 m off
         // the obstacle instead of 6.0 m, so the drone holds a wider margin from walls / buildings.
-        // The VERTICAL standoff (vSafeUp / vSafeDown above) deliberately KEEPS yopoAvoidStop = 6.0:
-        // a larger vertical standoff forbids descending entirely once the clearance below drops
-        // below it (vSafeDown = 0), so raising it would stop the drone from ever descending closer
-        // than that to a low goal / the ground.
+        // The VERTICAL UP standoff (vSafeUp above) deliberately KEEPS yopoAvoidStop = 6.0: raising it
+        // would over-restrict climbing / over-head clearance. The DESCENT (below) standoff is the
+        // separate yopoAvoidStopDown just below, which IS raised so "below" avoidance holds further off.
         // NOTE: the soft-brake zone (yopoAvoidBrakeRange) must stay comfortably above 2x this
         // value, otherwise the (brakeClear - standoff*2) normalisation degenerates and the
         // progressive soft brake stops shaping the approach at all (see BrakeRange below).
         this.yopoAvoidStopH = 7.5;
+        // VERTICAL DOWN standoff (m), SEPARATE from the shared yopoAvoidStop so that "keep further from
+        // obstacles below" raises only the DESCENT safety margin and does NOT also forbid climbing /
+        // over-head clearance (vSafeUp / vGo still use yopoAvoidStop = 6.0). RAISED 6.0 -> 7.5 to match
+        // the horizontal standoff: the descent now plans its stop 7.5 m above whatever is directly
+        // below, so while descending the drone holds a wider margin from rooftops / the ground.
+        // Trade-off: a goal whose clearance-below is under 7.5 m will intentionally not be descended
+        // onto (safety over reaching a hazardous low target); normal rooftop / altitude goals are
+        // unaffected because their clearance below is large.
+        this.yopoAvoidStopDown = 7.5;
         this.yopoAvoidVGoThresh = 7.0; // Underfoot / overhead blocking threshold for the horizontal vGo
                                       // detour (m). Deliberately DECOUPLED from yopoAvoidStop (it used to
                                       // be yopoAvoidStop + 3.0, i.e. 7.0 at stop = 4.0) and pinned to that
@@ -3201,7 +3211,7 @@ export class Drone {
         );
         if (Number.isFinite(downGap) && downGap < this.yopoAvoidRange) {
             const aD = aDecel;
-            const sd = this.yopoAvoidStop;
+            const sd = this.yopoAvoidStopDown;  // independent DOWN standoff (raised so descent holds further off below)
             if (downGap <= sd) {
                 vSafeDown = 0;          // Clearance already insufficient -> forbid descending entirely
             } else {
