@@ -19,7 +19,7 @@ git clone https://github.com/wuuwuu26/MindCloud_World_Fly_Private.git
 cd MindCloud_World_Fly_Private
 ```
 
-> 注意：DA360 的源码与权重均在 `.gitignore` 中（`third_party/DA360/`），克隆后需自行补齐 DA360 源码并运行下载脚本才能启用其深度服务。
+> 注意：DA360 的**源码**已随仓库纳入版本管理（`.gitignore` 仅忽略权重目录 `third_party/DA360/checkpoints/`），克隆后即可获得源码；但**权重**（`DA360_large.pth`，约 1.3GB，超 GitHub 100MB 限制）未入库，运行深度服务前需先下载权重。
 
 ## 快速开始（一键启动全部服务）
 
@@ -141,7 +141,7 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 ### DA360 深度服务（`Dockerfile.da360`）
 
 - Python 依赖：`numpy<2`、`flask`、`flask-cors`、`opencv-python-headless`、`pillow`、`timm`、`tqdm`、`xformers`。
-- `COPY third_party/DA360` 进镜像，但 DA360 源码在 `.gitignore` / `.dockerignore` 中，**构建前需先跑 `scripts/download_da360_model.sh`**（用 `gdown` 从 Google Drive 下载权重，并用 `git clone --depth 1` 拉取 DA360 源码）。
+- `COPY third_party/DA360` 进镜像：DA360 **源码**已随仓库提供（`.gitignore` 仅忽略 `third_party/DA360/checkpoints/`；`.dockerignore` 同样只排除 `third_party/DA360/checkpoints/`），构建时无需先拉源码；**权重** `checkpoints/DA360_large.pth` 不入镜像，由 `scripts/start_da360_api.sh` 在运行前下载（或挂载本地权重）后通过 `--model-path` 指定。
 - `scripts/start_da360_api.sh` 构建/运行要点：
   - 构建网络与代理转发同 YOPO（`DA360_BUILD_NETWORK`；额外从 `git config` 探测宿主机代理 `DA360_BUILD_PROXY`）。
   - 会给镜像打 `mindcloud.da360.server_sha` label：已有镜像且 server 脚本 SHA 一致时**自动跳过重建**；`DA360_FORCE_BUILD=1` 或脚本内容变化才重建。
@@ -156,11 +156,11 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 
 ### `.dockerignore`
 
-构建上下文排除了 `.git`、`node_modules`、`__pycache__`、`*.pyc`、`scene/*`、`asset/gate-paths/*.tmp`、`third_party/DA360`，避免把无关/大文件打进镜像。
+构建上下文排除了 `.git`、`node_modules`、`__pycache__`、`*.pyc`、`scene/*`、`asset/gate-paths/*.tmp`、`third_party/DA360/checkpoints`（DA360 权重），避免把无关/大文件打进镜像；DA360 源码仍随镜像提供。
 
 ## DA360 深度估计
 
-DA360 深度服务由 `restart_all.sh` 一键拉起（默认使用 `large` 模型）。但因 DA360 源码与权重未纳入仓库（`.gitignore` / `.dockerignore`），**首次运行前需先下载模型与源码**，否则 `restart_all.sh` 的 DA360 构建会失败：
+DA360 深度服务由 `restart_all.sh` 一键拉起（默认使用 `large` 模型）。DA360 **源码**已随仓库提供，但**权重**（`DA360_large.pth`，约 1.3GB，超 GitHub 100MB 限制）未入库，**首次运行深度服务前只需下载权重**（构建镜像无需先下载源码）：
 
 ```bash
 python3 -m pip install --user gdown
