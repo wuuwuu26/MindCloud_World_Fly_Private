@@ -228,6 +228,15 @@ export class Drone {
         // correcting entirely. Without it the PD keeps chasing a sub-decimetre residual error and
         // the drone never truly goes still -- it traces a small jitter around the goal point.
         this.yopoArriveDeadbandM = 0.35;
+        // Horizontal tolerance (m) for engaging the straight vertical (ascend / descend) mode:
+        // deliberately MORE generous than yopoArriveDeadbandM (0.35). The drone often approaches a
+        // goal that is mostly a height change via a WIDE spiral (the network's learned "orbit to
+        // change altitude" behaviour); a 0.35 m trigger would only catch the spiral at its very
+        // centre and the circle would keep going. With ~2.5 m the moment the spiral brings the
+        // drone roughly over the goal it brakes the horizontal circle and climbs/descends straight,
+        // then resolves any small remaining horizontal offset afterwards. Lower this toward 0.35 if
+        // the drone should finish horizontally first; raise it (e.g. 4) if it still spirals through.
+        this.yopoArriveVertH = 2.5;
         // Altitude trim used inside the arrival deadband (see _controlYOPO). X/Z are commanded to
         // zero there, but Y keeps a gentle P-only term so the drone still creeps onto the goal
         // altitude instead of freezing ~17 cm below it. Deliberately small and speed-capped:
@@ -238,6 +247,37 @@ export class Drone {
         // goal". This trim is a P-only first-order term (v = kp*err, capped) that converges
         // monotonically to zero error, so the larger cap does not reintroduce arrived bobbing.
         this.yopoArriveAltVMax = 2.0;   // m/s hard cap on that trim speed
+        // ── Cruise-phase "vertical first" (straight ascend / descend) ──
+        // Outside the 12 m takeover zone the height change is entirely the network's job, and the
+        // lattice only holds cruise-shaped arcs with a small vertical component -- so a goal that
+        // differs mostly in HEIGHT is traded for a wide spiral. The cruise speed floor
+        // (yopoCruiseMinSpd) makes it worse: it tops the horizontal speed up to 12 m/s ALONG THE
+        // HORIZONTAL GOAL BEARING, so while the drone is still 30 m below the goal it is pushed
+        // straight past the goal column and has to come back around -- the big circling seen during
+        // a climb / descent.
+        // When the height error clearly dominates the horizontal offset, the vertical channel is
+        // taken over by a direct P climb / descent and the horizontal command is dialled down, so
+        // the drone goes straight up / down onto the goal altitude.
+        this.yopoVertFirstEnabled = true;
+        this.yopoVertFirstHDist = 20.0;   // Max horizontal distance to the goal for this mode (m):
+                                          // wider = straight altitude changes start earlier (and the
+                                          // cruise floor stands down over a wider area), narrower =
+                                          // the network keeps cruising longer first
+        this.yopoVertFirstMinDY = 5.0;    // Min |height error| to engage (m); released below 0.6x of it
+        this.yopoVertFirstRatio = 1.2;    // The height error must also exceed this multiple of the
+                                          // horizontal offset, so a far-away goal keeps cruising
+        this.yopoVertFirstKp = 1.5;       // P gain on the height error -> climb / descent speed
+        this.yopoVertFirstVMax = 6.0;     // Hard cap on that speed (m/s), kept well under droneMaxVSpeed
+                                          // (raise it for a faster altitude change, lower it if the
+                                          // vertical motion feels abrupt)
+        this.yopoVertFirstDecel = 3.0;    // Assumed deceleration for the sqrt(2*a*d) arrival ramp (m/s^2)
+        this.yopoVertFirstHScale = 0.3;   // Fraction of the horizontal command kept: it still creeps
+                                          // onto the goal column instead of hovering in place
+        this.yopoVertFirstMinV = 1.0;     // If the clearance only allows less than this (m/s), stand
+                                          // down: something is straight above / below, so a straight
+                                          // climb / descent is not possible and freezing in place would
+                                          // be worse than letting the network spiral
+        this._vertFirstOn = false;        // Engage/release hysteresis latch
         this.yopoCmdPos = null;           // {x, y, z} current commanded position
         this.yopoCmdVel = null;           // {x, y, z} current commanded velocity
         this.yopoCmdAcc = null;           // {x, y, z} current commanded acceleration
@@ -343,9 +383,12 @@ export class Drone {
                                       // for a more decisive push/detour on contact
                                       // (together with the larger repRange it reacts sooner), instead
                                       // of just being "pushed back rather than steered around"
-        this.yopoAvoidTanGain = 40.0; // RAISED 34 -> 40. Tangential (detour) speed gain (m/s): (a notch above the
-                                      // previous 30) for a more decisive steer-around at speed while
-                                      // still well below the 36 that measured as detouring too fast.
+        this.yopoAvoidTanGain = 54.0; // RAISED 40 -> 54. Tangential (detour) speed gain (m/s): stronger
+                                      // lateral steer-around so the drone commits to sliding past the
+                                      // obstacle instead of grazing it. Still pairs with steerCap
+                                      // inside _controlYOPO (kept at/below 0.68 of maxSpd) so the
+                                      // detour stays physically smooth; drop back toward 40 if it
+                                      // feels wild.
                                       // Together with the "lateral speed budget reservation" inside
                                       // _controlYOPO (capped at 55%), the detour component is not
                                       // drowned by the forward component and the motion stays smooth.
@@ -1747,15 +1790,23 @@ export class Drone {
             // reported at the goal. Letting the PD settle avoids the discontinuity entirely.
             const vh = Math.sqrt(velTargetX*velTargetX + velTargetZ*velTargetZ);
             if (vh > holdMaxV) { const s = holdMaxV / vh; velTargetX *= s; velTargetZ *= s; }
-            // Arrival deadband: once latched AND the horizontal error is inside the deadband, stop
-            // correcting X/Z so the PD is not forever chasing a sub-decimetre residual (the "small
-            // jitter / sway at the goal" symptom), and the drone actually halts instead of an
-            // endless exponential creep. A gentle altitude trim still creeps it onto the goal height.
-            // Gated on the stable yopoArrived latch and on HORIZONTAL distance only (not 3D), so a
-            // small vertical residual cannot chatter the band in/out (that chatter was the X-axis
-            // jitter previously seen at the goal). Inside the deadband velTarget=0 makes the velocity
-            // loop actively brake, i.e. the drone stops promptly rather than drifting.
-            if (this.yopoArrived && gErrH < this.yopoArriveDeadbandM) {
+            // Straight vertical (ascend / descend) mode: when the drone is already horizontally
+            // aligned with the goal (gErrH inside the deadband) and still has a real height error,
+            // STOP correcting X/Z (the velocity loop brakes the horizontal circle) and trim ONLY
+            // along Y to the goal height. This makes altitude changes go straight up / down instead
+            // of the wide circling the network otherwise induces near the goal.
+            // NOTE: this is intentionally NOT gated on the yopoArrived latch. yopoArrived only
+            // latches when the speed drops below yopoArriveHoldV (1.0 m/s); while the drone is
+            // circling to climb its horizontal speed stays high, so the latch would never fire and
+            // the deadband would never engage -- a dead loop that kept it circling forever. Gating
+            // on horizontal alignment alone breaks that loop: the moment it is over the goal, X/Z
+            // are zeroed (killing the circle) and it climbs straight; once the height converges the
+            // speed falls and yopoArrived latches normally.
+            // Gated on HORIZONTAL distance only (not 3D), so a small vertical residual cannot
+            // chatter the band in/out (that chatter was the X-axis jitter previously seen at the
+            // goal). Math.abs(gErrY) > 0.2 keeps it focused on actual altitude correction, leaving
+            // pure horizontal settle to the PD.
+            if (gErrH < this.yopoArriveVertH && Math.abs(gErrY) > 0.2) {
                 velTargetX = 0;
                 velTargetZ = 0;
                 velTargetY = clamp(this.yopoArriveAltKp * gErrY,
@@ -1986,11 +2037,11 @@ export class Drone {
                     // 34 m/s and the repulsion at 15, the detour could alone command maxSpd even
                     // while the brake demanded a full stop. That is the direct cause of "it still
                     // plans full speed with an obstacle ahead / the brake does not hold".
-                    // Raised 0.55 -> 0.62: a larger share of the speed budget may go into the
-                    // lateral detour, so the drone slides past obstacles faster instead of
+                    // Raised 0.55 -> 0.62 -> 0.68: a larger share of the speed budget may go into
+                    // the lateral detour, so the drone slides past obstacles faster instead of
                     // crawling around them. 0.70 was measured as "detouring too fast", so this
-                    // deliberately stays clear of it; drop back to 0.55 if the detour feels wild.
-                    const steerCap = maxSpd * 0.62;
+                    // deliberately stays just under it; drop back to 0.62 if the detour feels wild.
+                    const steerCap = maxSpd * 0.68;
                     let steerMag = Math.hypot(steerX, steerZ);
                     if (steerMag > steerCap) {
                         const s = steerCap / steerMag;
@@ -2109,6 +2160,64 @@ export class Drone {
             }
         }
 
+        // ── Cruise-phase direct ascend / descend ("vertical first") ──
+        // See yopoVertFirst* in the constructor. Only on the CRUISE branch: inside the takeover
+        // zone the final-approach PD already converges straight onto the goal (and carries its own
+        // straight-vertical deadband), and under manual control the throttle is the pilot's.
+        const inCruise = !stickActive && !yopoNearGoalHold;
+        let vertFirst = false;
+        if (this.yopoVertFirstEnabled && inCruise && this.yopoNavTarget && !this.yopoArrived) {
+            const vfDx = this.yopoNavTarget.x - this.x;
+            const vfDz = this.yopoNavTarget.z - this.z;
+            const vfDy = this.yopoNavTarget.y - this.y;
+            const vfH = Math.hypot(vfDx, vfDz);
+            const vfAbsY = Math.abs(vfDy);
+            // Hysteresis: engage on the full thresholds, release only once clearly outside them, so
+            // the mode does not chatter on/off at the boundary (that chatter would show up as the
+            // drone alternating between climbing and circling).
+            const engage = vfH < this.yopoVertFirstHDist &&
+                           vfAbsY > this.yopoVertFirstMinDY &&
+                           vfAbsY > this.yopoVertFirstRatio * vfH;
+            const keep = vfH < this.yopoVertFirstHDist * 1.25 &&
+                         vfAbsY > this.yopoVertFirstMinDY * 0.6;
+            this._vertFirstOn = this._vertFirstOn ? keep : engage;
+
+            // Vertical clearance gate. The straight climb / descent may only run at a speed the
+            // airframe can still stop within the clearance measured straight above / below (the
+            // same kinematic limits the ray layer itself uses), and it stands down entirely when
+            // the ray layer is actively pushing sideways (vGo = an obstacle straight overhead /
+            // underfoot, where the only way out really is lateral) or when it wants to clear an
+            // obstacle vertically in the opposite direction (vRep).
+            const vGoActive = !!(avoid && Math.hypot(avoid.vGoX, avoid.vGoZ) > 1e-6);
+            const vRepAgainst = !!(avoid && avoid.vRep &&
+                                   Math.sign(avoid.vRep) !== Math.sign(vfDy));
+            if (this._vertFirstOn && !vGoActive && !vRepAgainst) {
+                // Arrival ramp sqrt(2*a*d): the climb eases off as the goal altitude is approached
+                // (no overshoot) and never starts with a velocity step.
+                let vAllow = Math.min(this.yopoVertFirstVMax,
+                                      Math.sqrt(2 * this.yopoVertFirstDecel * vfAbsY));
+                if (vfDy > 0) {
+                    if (avoid && avoid.vSafeUp !== null && Number.isFinite(avoid.vSafeUp)) {
+                        vAllow = Math.min(vAllow, avoid.vSafeUp);
+                    }
+                } else if (avoid && avoid.vSafeDown !== null && Number.isFinite(avoid.vSafeDown)) {
+                    vAllow = Math.min(vAllow, avoid.vSafeDown);
+                }
+                if (vAllow >= this.yopoVertFirstMinV) {
+                    vertFirst = true;
+                    const vCmd = Math.min(vAllow, this.yopoVertFirstKp * vfAbsY);
+                    velTargetY = vfDy > 0 ? vCmd : -vCmd;
+                    // Horizontal: keep only a fraction, so the drone creeps onto the goal column
+                    // instead of holding a wide circle (the network trajectory plus the ray detour
+                    // are what made the circle; the cruise floor below is switched off as well).
+                    velTargetX *= this.yopoVertFirstHScale;
+                    velTargetZ *= this.yopoVertFirstHScale;
+                }
+            }
+        } else {
+            this._vertFirstOn = false;
+        }
+
         // ── Passive ground safety net (not geometric avoidance) ──
         // The geometric reactive avoidance (potential field) was removed as requested; only the
         // passive safety net based on terrain height sampling remains:
@@ -2162,8 +2271,11 @@ export class Drone {
         // (b) the final-approach hold -- that PD is deliberately decelerating onto the goal, and
         // forcing a 12 m/s floor would overshoot straight past it (exactly the arrival sway that was
         // just fixed with the deadband).
-        const inCruise = !stickActive && !yopoNearGoalHold;
-        if (inCruise && (goalOpen || (!braking && !gated)) &&
+        // (inCruise is defined above, next to the vertical-first block.)
+        // vertFirst is excluded on purpose: while the drone is doing a straight climb / descent the
+        // floor would shove 12 m/s back along the horizontal goal bearing, which is exactly the
+        // overshoot-and-come-back that produced the wide circling.
+        if (inCruise && !vertFirst && (goalOpen || (!braking && !gated)) &&
             this.yopoNavTarget && !this.yopoArrived) {
             const ngx = this.yopoNavTarget.x - this.x;
             const ngz = this.yopoNavTarget.z - this.z;
@@ -2215,6 +2327,7 @@ export class Drone {
                 `vCloseMax=${avoid ? (Number.isFinite(avoid.vCloseMax) ? avoid.vCloseMax.toFixed(2) : 'inf') : 'n/a'} ` +
                 `goalClear=${avoid ? (avoid.goalClear ? 'Y' : 'N') : 'n/a'} ` +
                 `distGoal=${distGoal.toFixed(1)} nearGoal=${yopoNearGoalHold} ` +
+                `vertFirst=${vertFirst ? 'Y' : 'N'} ` +
                 `stickActive=${stickActive} thrust=${this.thrustOutput.toFixed(0)}`);
         }
         this.pilotGroundSpeedCommand = Math.sqrt(pilotCmdX * pilotCmdX + pilotCmdZ * pilotCmdZ);
@@ -2302,7 +2415,10 @@ export class Drone {
             // YOPO navigation plan. When not braking we only attenuate it by the brake scale.
             ffScale *= braking ? 0 : (this._avoidAccScale || 1.0);
             aDesX += this.yopoCmdAcc.x * ffScale;
-            aDesY += (this.yopoCmdAcc.y || 0) * ffScale;
+            // During a vertical-first climb / descent the network's vertical acceleration belongs
+            // to the spiral we just opted out of, so it is dropped: the straight altitude change is
+            // then driven by the velocity loop alone and stays predictable.
+            aDesY += vertFirst ? 0 : (this.yopoCmdAcc.y || 0) * ffScale;
             aDesZ += this.yopoCmdAcc.z * ffScale;
             // When the hard ground floor triggers, forbid a downward acceleration feed-forward
             // (it would cancel the climb) and force aDesY >= 0
@@ -3078,7 +3194,7 @@ export class Drone {
         // (outside the final phase) pushes it off the side walls to keep it centred, while in the
         // final phase the PD converges onto the centre line, so the drone flies straight into the
         // corridor.
-        if (dMin < R && dAhead < repRange * 0.8) {
+        if (dMin < R && dAhead < repRange) {
             // Find the nearest obstacle direction (the ray direction matching dMin)
             let mi = -1;
             for (let i = 0; i < dirs.length; i++) {
