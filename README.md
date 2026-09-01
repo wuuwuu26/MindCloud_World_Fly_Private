@@ -12,20 +12,9 @@
 
 浏览器中的 Google Photorealistic 3D Tiles 穿越机驾驶器，集成 YOPO 端到端神经网络自主导航（3D 避障）。进入页面后选择城市、放置出生点，然后用键盘、手柄或 RC 遥控器飞行，或设置目标点让 YOPO 自主导航。右下角可显示机头 360 ERP 全景 RGB 和 DA360 深度。
 
-## 克隆仓库
-
-```bash
-git clone https://github.com/wuuwuu26/MindCloud_World_Fly_Private.git
-cd MindCloud_World_Fly_Private
-```
-
-> 注意：DA360 的**源码**已随仓库纳入版本管理（对 DA360 而言 `.gitignore` 只忽略权重目录 `third_party/DA360/checkpoints/`，完整忽略清单见仓库根目录 `.gitignore`），克隆后即可获得源码；但**权重**（`DA360_large.pth`，约 1.3GB，超 GitHub 100MB 限制）未入库，运行深度服务前需先下载权重。
-
-> **新机器请看下一节「从零开始（首次部署）」**：它包含 Docker / NVIDIA Container Toolkit 安装、权重下载、Cesium Ion token 配置和首次镜像构建的完整步骤。已经部署过的机器直接看「日常启动 / 部分重启 / 停止」。
-
 ## 从零开始（首次部署）
 
-下面按「一台全新机器 → 能手动飞 + 能 YOPO 自主导航」的顺序走一遍。**首次部署完成后，日常只需 `./restart_all.sh`**（见下一节「日常启动 / 部分重启 / 停止」）。
+下面按「一台全新机器 → 能手动飞 + 能 YOPO 自主导航」的顺序走一遍，包含 Docker / NVIDIA Container Toolkit 安装、拉取代码、权重下载、Cesium Ion token 配置和首次镜像构建。**首次部署完成后，日常只需 `./restart_all.sh`**（见「日常启动 / 部分重启 / 停止」）。
 
 ### 第 0 步：安装前置软件
 
@@ -60,11 +49,12 @@ docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi
 
 ### 第 1 步：拉取代码
 
-若还没克隆，先执行上面「克隆仓库」的两行命令并进入仓库目录：
-
 ```bash
+git clone https://github.com/wuuwuu26/MindCloud_World_Fly_Private.git
 cd MindCloud_World_Fly_Private
 ```
+
+> 注意：DA360 的**源码**已随仓库纳入版本管理（对 DA360 而言 `.gitignore` 只忽略权重目录 `third_party/DA360/checkpoints/`，完整忽略清单见仓库根目录 `.gitignore`），克隆后即可获得源码；但**权重**（`DA360_large.pth`，约 1.3GB，超 GitHub 100MB 限制）未入库，需在第 2 步下载。
 
 ### 第 2 步：下载 DA360 深度权重
 
