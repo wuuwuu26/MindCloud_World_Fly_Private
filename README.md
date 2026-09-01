@@ -12,6 +12,37 @@
 
 浏览器中的 Google Photorealistic 3D Tiles 穿越机驾驶器，集成 YOPO 端到端神经网络自主导航（3D 避障）。进入页面后选择城市、放置出生点，然后用键盘、手柄或 RC 遥控器飞行，或设置目标点让 YOPO 自主导航。右下角可显示机头 360 ERP 全景 RGB 和 DA360 深度。
 
+## 环境要求
+
+必需：
+
+- Docker Engine（建议 24+），且当前用户有权限执行 `docker`（加入 `docker` 组）
+- NVIDIA GPU + 驱动（DA360 / YOPO 需要）+ NVIDIA Container Toolkit（容器用 GPU）
+- 磁盘 ≥80 GB：三个镜像实测共约 64 GB（YOPO ≈35 GB、DA360 ≈28 GB、主飞行 ≈1 GB），另加 1.3 GB DA360 权重
+- 一个支持 WebGL 的现代浏览器（用于打开 `http://127.0.0.1:8080` 使用模拟器）
+- 浏览器可访问 Cesium Ion、Google 3D Tiles 与 `cdn.jsdelivr.net`（PlayCanvas 前端库）
+
+可选 / 特定场景：
+
+- `curl`：`restart_all.sh` 用它等待服务就绪（一般系统自带）
+- 本地开发模式（`./launch.sh --local`）需要 Python 3
+- 下载 DA360 权重需要 Python 3 + pip（`gdown`）以及可访问 Google Drive 的网络
+
+> 首次部署的完整安装命令见「从零开始（首次部署）→ 第 0 步：安装前置软件」。
+
+### 已验证运行环境
+
+本项目已在以下设备完整验证可运行（DA360 深度 + YOPO 导航 + 主飞行三者同时拉起）：
+
+| 项目 | 配置 |
+|------|------|
+| GPU | NVIDIA GeForce RTX 4070 Laptop GPU（8 GB 显存） |
+| 驱动 / CUDA | 595.84 / 13.2 |
+| DA360 配置 | `DA360_large` + `DA360_INPUT_SCALE=0.65`（模型输入 672×336），单卡 8GB 下约 92% 占用 |
+| YOPO 配置 | TensorRT 加速，`YOPO_VELOCITY=15` |
+
+> 显存更小（如 6GB 及以下）的 GPU 可下调 `DA360_INPUT_SCALE` 或 `da360UploadScale` 降低占用；显存更充裕的卡可上调以提升深度精度。
+
 ## 从零开始（首次部署）
 
 下面按「一台全新机器 → 能手动飞 + 能 YOPO 自主导航」的顺序走一遍，包含 Docker / NVIDIA Container Toolkit 安装、拉取代码、权重下载和首次镜像构建。**首次部署完成后，日常只需 `./restart_all.sh`**（见「日常启动 / 部分重启 / 停止」）。
@@ -151,6 +182,61 @@ docker rm -fv google-tiles-flight mindcloud-da360-api mindcloud-yopo-api
 ./launch.sh
 ```
 
+## 使用流程说明
+
+1. 点击 **Start Google 3D Tiles Flight**。
+2. 等页面进入 **PLACEMENT MODE**。
+3. 用 Cesium 搜索框搜索城市或地点。
+4. 按住 `I` 并点击建筑、道路或地面设置出生点。
+5. 用 `W/A/S/D` 微调水平位置，`Shift` 加快微调。
+6. 设置 **SPAWN ALTITUDE (m)**。
+7. 按 `O` 确认出生点。
+8. 选择 **First Person** 或 **Third Person** 开始飞行。
+
+常用按键：
+
+```text
+↑ / ↓       前进 / 后退
+← / →       左右平移
+W / S       上升 / 下降
+A / D       左右偏航
+Shift       加速
+R           重置
+V           切换视角
+P           返回放置模式
+Tab         设置面板
+```
+
+键盘可直接使用，也支持手柄（但需要自己优化映射），手柄通常会被 Chrome 的 Gamepad API 自动识别。RC 遥控器或 WebHID 设备可在设置面板中连接；如需检查 Linux 输入权限：
+
+```bash
+./launch.sh --input-status
+./launch.sh --setup-input
+```
+
+## 目标点选择与导航
+
+1. 飞行模式下，按 **`T`**（或点击右侧 YOPO 面板 **"Pick Target"**）开始设置目标。
+2. 目标初始位置为无人机当前位置，用**数字键盘**移动（方向以**无人机当前机头朝向**为前方）：
+   - `Numpad 8 / 2`：沿机头方向前进 / 后退
+   - `Numpad 4 / 6`：垂直机头方向右移 / 左移（4 = 机身右侧、6 = 机身左侧，与小键盘的左右布局相反；见 `src/main.js` 的 `handleYOPOKeyDown`）
+   - `Numpad 9 / 3`：上升 / 下降
+3. **`Numpad 5`**：确认目标点并**自动开始导航**。
+4. **`Numpad 0`** 或 **`Esc`**：取消选择。
+
+导航期间：
+- 无人机使用 YOPO 轨迹指令 + 速度前馈跟踪路径
+- 推动摇杆临时切换人工控制（松杆恢复导航）
+- **避障（服务端学习式 + 客户端几何反应式，双层）**：服务端严格遵循 YOPO，按
+  `argmin(score)` 选轨迹（学习式避障）；客户端在跟踪指令的同时，叠加一层几何
+  反应式势场（360° 射线环：径向推离、切向绕行、近障刹车、竖直越障、竖直障碍
+  足迹绕行），用于兜住深度重规划间隙内的突发近障。去往目标的水平通道畅通时该
+  几何层自动归零、不干扰导航，详见「避障架构与调参」。
+- 到达判定分两层：服务端在距目标 2 m（`ARRIVE_THRESHOLD`）内标记到达；客户端另有 3.5 m + 速度 < 1 m/s 的兜底锁定，避免服务端异步回传导致"总差一步"
+- 按 **`X`**（或点击 **"Stop Nav"**）结束导航
+
+目标点标记在导航、到达后、停止后均保持可见，直到重新选取或取消目标，因此第二次导航时仍能看到目标位置。
+
 ## 模型权重
 
 | 模型 | 是否随仓库提供 | 获取方式 |
@@ -175,37 +261,6 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 ./scripts/download_da360_model.sh
 # 脚本会将权重放到 third_party/DA360/checkpoints/DA360_large.pth
 ```
-
-## 环境要求
-
-必需：
-
-- Docker Engine（建议 24+），且当前用户有权限执行 `docker`（加入 `docker` 组）
-- NVIDIA GPU + 驱动（DA360 / YOPO 需要）+ NVIDIA Container Toolkit（容器用 GPU）
-- 磁盘 ≥80 GB：三个镜像实测共约 64 GB（YOPO ≈35 GB、DA360 ≈28 GB、主飞行 ≈1 GB），另加 1.3 GB DA360 权重
-- 一个支持 WebGL 的现代浏览器（用于打开 `http://127.0.0.1:8080` 使用模拟器）
-- 浏览器可访问 Cesium Ion、Google 3D Tiles 与 `cdn.jsdelivr.net`（PlayCanvas 前端库）
-
-可选 / 特定场景：
-
-- `curl`：`restart_all.sh` 用它等待服务就绪（一般系统自带）
-- 本地开发模式（`./launch.sh --local`）需要 Python 3
-- 下载 DA360 权重需要 Python 3 + pip（`gdown`）以及可访问 Google Drive 的网络
-
-> 首次部署的完整安装命令见「从零开始（首次部署）→ 第 0 步：安装前置软件」。
-
-### 已验证运行环境
-
-本项目已在以下设备完整验证可运行（DA360 深度 + YOPO 导航 + 主飞行三者同时拉起）：
-
-| 项目 | 配置 |
-|------|------|
-| GPU | NVIDIA GeForce RTX 4070 Laptop GPU（8 GB 显存） |
-| 驱动 / CUDA | 595.84 / 13.2 |
-| DA360 配置 | `DA360_large` + `DA360_INPUT_SCALE=0.65`（模型输入 672×336），单卡 8GB 下约 92% 占用 |
-| YOPO 配置 | TensorRT 加速，`YOPO_VELOCITY=15` |
-
-> 显存更小（如 6GB 及以下）的 GPU 可下调 `DA360_INPUT_SCALE` 或 `da360UploadScale` 降低占用；显存更充裕的卡可上调以提升深度精度。
 
 ## Docker 构建说明
 
@@ -283,38 +338,6 @@ DA360_RESAMPLE=bilinear ./scripts/start_da360_api.sh
 
 ```text
 http://127.0.0.1:8080/?da360Url=http://<host>:5688/depth
-```
-
-## 使用流程说明
-
-1. 点击 **Start Google 3D Tiles Flight**。
-2. 等页面进入 **PLACEMENT MODE**。
-3. 用 Cesium 搜索框搜索城市或地点。
-4. 按住 `I` 并点击建筑、道路或地面设置出生点。
-5. 用 `W/A/S/D` 微调水平位置，`Shift` 加快微调。
-6. 设置 **SPAWN ALTITUDE (m)**。
-7. 按 `O` 确认出生点。
-8. 选择 **First Person** 或 **Third Person** 开始飞行。
-
-常用按键：
-
-```text
-↑ / ↓       前进 / 后退
-← / →       左右平移
-W / S       上升 / 下降
-A / D       左右偏航
-Shift       加速
-R           重置
-V           切换视角
-P           返回放置模式
-Tab         设置面板
-```
-
-键盘可直接使用，也支持手柄（但需要自己优化映射），手柄通常会被 Chrome 的 Gamepad API 自动识别。RC 遥控器或 WebHID 设备可在设置面板中连接；如需检查 Linux 输入权限：
-
-```bash
-./launch.sh --input-status
-./launch.sh --setup-input
 ```
 
 ## 全景相机实现原理
@@ -521,29 +544,6 @@ YOPO 推理默认走 TensorRT（TRT）加速。将 `epoch50.pth` 固化为 fp16 
   ```
 - **换 GPU / 架构**：TRT 引擎与 GPU 的 SM 计算能力绑定，当前引擎在 RTX 4070 上构建。部署到 Orin NX 或其它卡时，在目标机删除旧引擎并让 `start_yopo_api.sh` 自动重建（或重新跑上面命令）。
 - **环境约束**：容器内 TensorRT 固定为 `8.6.1`（匹配 CUDA 12.1 运行时与 `yopo_server` 的 TRT 8 加载 API）；TRT 8.6 pip 包不自带 cuDNN，转而复用镜像内 torch 捆绑的 cuDNN8 提供 `libcudnn.so.8`（见 `Dockerfile.yopo` 的 `LD_LIBRARY_PATH`）。
-
-### 目标点选择与导航
-
-1. 飞行模式下，按 **`T`**（或点击右侧 YOPO 面板 **"Pick Target"**）开始设置目标。
-2. 目标初始位置为无人机当前位置，用**数字键盘**移动（方向以**无人机当前机头朝向**为前方）：
-   - `Numpad 8 / 2`：沿机头方向前进 / 后退
-   - `Numpad 4 / 6`：垂直机头方向右移 / 左移（4 = 机身右侧、6 = 机身左侧，与小键盘的左右布局相反；见 `src/main.js` 的 `handleYOPOKeyDown`）
-   - `Numpad 9 / 3`：上升 / 下降
-3. **`Numpad 5`**：确认目标点并**自动开始导航**。
-4. **`Numpad 0`** 或 **`Esc`**：取消选择。
-
-导航期间：
-- 无人机使用 YOPO 轨迹指令 + 速度前馈跟踪路径
-- 推动摇杆临时切换人工控制（松杆恢复导航）
-- **避障（服务端学习式 + 客户端几何反应式，双层）**：服务端严格遵循 YOPO，按
-  `argmin(score)` 选轨迹（学习式避障）；客户端在跟踪指令的同时，叠加一层几何
-  反应式势场（360° 射线环：径向推离、切向绕行、近障刹车、竖直越障、竖直障碍
-  足迹绕行），用于兜住深度重规划间隙内的突发近障。去往目标的水平通道畅通时该
-  几何层自动归零、不干扰导航，详见「避障架构与调参」。
-- 到达判定分两层：服务端在距目标 2 m（`ARRIVE_THRESHOLD`）内标记到达；客户端另有 3.5 m + 速度 < 1 m/s 的兜底锁定，避免服务端异步回传导致"总差一步"
-- 按 **`X`**（或点击 **"Stop Nav"**）结束导航
-
-目标点标记在导航、到达后、停止后均保持可见，直到重新选取或取消目标，因此第二次导航时仍能看到目标位置。
 
 ### 俯视小地图（目标地图）
 
