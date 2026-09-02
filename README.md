@@ -454,7 +454,7 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 - **3D 导航**：不做水平面投影，垂直避障由网络预测的 z 终端状态决定。
 - **轨迹生成**：三轴五阶多项式（Poly5Solver），从上次指令状态出发（`plan_from_reference=True`），轨迹连续、无往复。
 - **控制输出**：50Hz 评估多项式 → 位置/速度/加速度 + 偏航 → 前端级联 PID 跟踪。
-- **到达处理（已重写，完全对齐 `MindCloud_World_Fly_With_Yopo`）**：全程跟随 YOPO 网络轨迹，只有**到达锁定后**才切到目标点位置悬停：
+- **到达处理**：全程跟随 YOPO 网络轨迹，只有**到达锁定后**才切到目标点位置悬停：
   ```
   const holdKp = 1.5, holdAltKp = 2.5, holdKd = 1.5, holdMaxV = 2.0;
   velTargetX = holdKp * gErrX - holdKd * this.vx;   // 位置 P + 速度阻尼 D
@@ -548,7 +548,6 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 | `droneMaxVSpeed` | 15.0 | 竖直速度硬上限 (m/s) |
 | `droneMaxAngle` | 60 | 最大倾转角 (°)：倾转物理上限 |
 
-> **调参建议**：绕行不够果断请调大 `yopoAvoidTanGain`（力度）；**不要**调 `yopoAvoidRepRange`——它同时是 `goalClear` 的畅通判定阈值，调大会让"路径其实畅通"时误判被挡。改前端参数后需浏览器 **Ctrl+F5 强刷**生效。
 
 #### 高速响应（射线预算与自适应作用距离）
 

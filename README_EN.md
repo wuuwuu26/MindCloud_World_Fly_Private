@@ -412,7 +412,7 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   commanded state (`plan_from_reference=True`), so trajectories are continuous and never backtrack.
 - **Control output**: the polynomial is evaluated at 50 Hz → position / velocity / acceleration +
   yaw → tracked by the frontend cascaded PID.
-- **Arrival handling (rewritten, now matching `MindCloud_World_Fly_With_Yopo`)**: the drone tracks the YOPO network trajectory all the way in; only **after arrival is latched** does it switch to a position hold on the goal:
+- **Arrival handling**: the drone tracks the YOPO network trajectory all the way in; only **after arrival is latched** does it switch to a position hold on the goal:
   ```
   const holdKp = 1.5, holdAltKp = 2.5, holdKd = 1.5, holdMaxV = 2.0;
   velTargetX = holdKp * gErrX - holdKd * this.vx;   // position P + velocity damping D
@@ -548,10 +548,6 @@ Key parameters (all in the `src/drone.js` constructor):
 | `droneMaxVSpeed` | 15.0 | Hard vertical speed ceiling (m/s) |
 | `droneMaxAngle` | 60 | Maximum tilt angle (°): the physical tilt ceiling |
 
-> **Tuning tips**: if the detour is not decisive enough, raise `yopoAvoidTanGain` (strength); do
-> **not** raise `yopoAvoidRepRange` — it is also `goalClear`'s clearance threshold, so a larger value
-> makes "the path is actually clear" cases get misjudged as blocked. After changing frontend
-> parameters, press **Ctrl+F5** in the browser for them to take effect.
 
 #### High-speed responsiveness (ray budget & adaptive action range)
 
