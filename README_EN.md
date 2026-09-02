@@ -412,62 +412,39 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   commanded state (`plan_from_reference=True`), so trajectories are continuous and never backtrack.
 - **Control output**: the polynomial is evaluated at 50 Hz → position / velocity / acceleration +
   yaw → tracked by the frontend cascaded PID.
-- **Final-approach takeover (< 12m)**: there is one layer on each side. Server-side, within
-  `FINAL_APPROACH_DIST=12.0` it stops network inference and directly plans a quintic polynomial with
-  **zero terminal velocity/acceleration** — near the goal `argmin(score)` repeatedly picks
-  overshoot/turn-back trajectories, which combined with `plan_from_reference` flips the goal-direction
-  observation and makes position/velocity oscillate forever. Client-side, within
-  `yopoFinalApproachDist=12.0` (judged by the **3D distance**, so a horizontally-close but
-  vertically-far goal does not switch) a PD loop takes over (position loop + velocity/acceleration
-  feed-forward, with a rate limit on the velocity change to avoid jitter).
-  - **Ray avoidance inside the takeover zone: brake only, no shoving (fixes "sways for ages after takeover")**:
-    across the whole zone (< 12 m, `yopoGoalRepSuppressDist = 12.0` aligned with `yopoFinalApproachDist`)
-    the ray layer keeps ONLY `brake` (speed-magnitude scaling) and the closing-speed gate (clips the
-    component closing on an obstacle) — the directional disturbances `rep` (repulsion) and `tan`
-    (tangential detour) are forced to zero. Reason: any residual rep/tan lateral force in the takeover
-    zone keeps the combined speed above the arrival threshold (`yopoArriveHoldV`), so `yopoArrived`
-    never latches and the drone is stuck oscillating inside the takeover PD fighting the avoidance layer
-    (= "sways for ages"). Once decoupled, the PD converges cleanly and the speed drops monotonically
-    below the threshold, so it locks `arrived` and switches to a pure hover (no swing).
-    **Full hand-over at the very end**: inside the last `yopoTakeoverSteerEndDist = 3.0` m, or when the
-    goal sits against a wall (`gateBeyondGoal` release puts `vCloseMax = ∞`, i.e. the threat IS the goal),
-    `brake` is forced to 1, the tangential steer is switched off and the braking feed-forward is dropped,
-    handing full control to the PD (whose `holdMaxV = √(2ad)` already guarantees a physically stoppable
-    run-in). **After arrival the side/rear protection still runs ("the ray avoidance always has priority")**:
-    the whole ray block is no longer skipped once `arrived` — it then keeps only a *sanitised* `rep`
-    (the component that would push the drone AWAY from the goal is stripped, keeping the side/rear push),
-    never steer, so a goal parked next to a wall/obstacle is pushed to a safe distance instead of pinned
-    on the hazard, and a wall-adjacent goal does not swing.
-  - **Velocity-loop D term restored inside the takeover zone (the real motion-loop root cause)**: the
-    takeover zone inherits `useAccFeedforward = true` from cruise, and the old test zeroed `velKd` along
-    with it, degrading the velocity loop to **pure P**. Combined with the inner-loop (attitude) lag and
-    the 60–150 ms ray-probe latency, the closed loop is **under-damped** — the actual source of "still
-    jittery inside the takeover range". Numerical simulation (entering at d=12 m, 10 m/s, `velKp=4.0`):
-    with a 0.20 s lag pure P overshoots 1.21 m, tail speed 1.16 m/s, 4 speed reversals; at 0.30 s it
-    overshoots 2.32 m with a 3.88 m/s tail and never settles on the goal. Restoring `velKd = 1.0` under
-    the same conditions gives 0.14 m overshoot, 0.05 m/s tail, 0 reversals, and stays robust across a
-    0.08–0.40 s lag range (overshoot ≤ 0.89 m, tail ≤ 0.21 m/s, parks exactly on the goal), with the
-    settle time unchanged-to-slightly-better (1.60 s → 1.53 s). The D term stays **off during cruise**
-    (there the network feed-forward jumps would be amplified); inside the takeover zone the velocity
-    target comes from the local PD + slew limit and the network feed-forward is stopped/stale, so D is safe.
-  - **Faster, calmer settle after takeover**: the velocity-target slew cap `yopoTakeoverSlew`
-    20 → 14 m/s² (still above the airframe's acceleration ceiling, so it only filters frame-to-frame
-    steps) and the slew now covers the **vertical axis** too (removes the vertical bobbing at the
-    goal); the damping `holdKd` is distance-scheduled — 1.5 across the zone, ramping linearly to 2.8
-    over the last 3 m — and `holdKp` is scheduled the same way (5 → 8) to compensate: the terminal
-    steady-state coefficient returns to ~2.1× the remaining distance and the settling time constant
-    drops from 0.76 s to 0.48 s. The vertical velocity target now gets a
-    `min(√(2a·|Δh|), 4 m/s)` cap as well (the vertical loop previously had no holdMaxV-style
-    ceiling, so a 2-3 m height error commanded a 9-13 m/s climb/descent that then took ages to undo).
-  - **A wall-adjacent goal no longer pins the drone metres short**: with the goal against a wall the
-    forward ray measures `dAhead ≈ distGoalH`, so the strict `dAhead > distGoalH` test missed the
-    beyond-goal exemption → `brakeClear ≤ standoff + reaction distance` gave `brake = 0` (the 0.40
-    floor sat inside the branch that never ran) AND the closing gate clipped the goalward component
-    to 0 — the drone stalled metres short and took forever to arrive. A new
-    `yopoAvoidGoalGateMargin = 1.0` treats a threat within 1 m of the goal's horizontal distance as
-    beyond-goal (the `yopoAvoidGoalBrakeFloor = 0.40` floor now applies after the branch, covering
-    the `brake = 0` case, and the gate gains a third release); the final deceleration stays with the
-    PD, whose `holdMaxV = √(2ad)` already guarantees a physically stoppable run-in.
+- **Arrival handling (rewritten, now matching `MindCloud_World_Fly_With_Yopo`)**: there is **no
+  distance-based takeover zone** any more. Previously the client switched into a bespoke "final-approach
+  takeover PD" within 12 m of the goal (distance-scheduled gains, a `√(2ad)` speed ceiling, a slew
+  limit, a boundary blend, a vertical deadband, an arrival lock), which fought the network trajectory,
+  the ray-avoidance layer and the velocity-measurement noise all at once — the root cause of "still
+  swaying at the goal". Following the reference implementation, the drone tracks the YOPO network
+  trajectory all the way in; only **after arrival is latched** does it switch to a position hold on the
+  goal:
+  ```
+  const holdKp = 1.5, holdAltKp = 2.5, holdKd = 1.5, holdMaxV = 2.0;
+  velTargetX = holdKp * gErrX - holdKd * this.vx;   // position P + velocity damping D
+  ... (same on Z; Y uses holdAltKp) ...
+  if (vh > holdMaxV) velTarget *= holdMaxV / vh;      // 2 m/s horizontal speed cap
+  ```
+  The D term is kept on purpose: a pure P term would still be carrying speed at the goal → overshoot →
+  pull back → sway.
+  - **Ray avoidance is now consistent for the whole flight**: the whole family of takeover-zone
+    exceptions (`repScale`, `steerFade`, the steering hysteresis, the end-game stand-down) is gone.
+    While still navigating (not arrived) the ray layer behaves exactly as in cruise — repulsion,
+    tangential detour, braking and vertical clearing all active. **After arrival** only the safety
+    floor remains: `brake` speed scaling + vertical clearance (`vSafeDown`/`vSafeUp`) + `crashFloor`
+    + collision handling; no directional thrust is added, so it cannot fight the position hold.
+  - **Velocity-loop D term** returns to the reference form: `velKd = useAccFeedforward ? 0 : sfVelKd`
+    (off during cruise to avoid amplifying network feed-forward jumps; on after arrival where
+    `useAccFeedforward = false` and `velKd = sfVelKd = 1.0` provides damping).
+  - **Removed parameters**: `yopoFinalApproachDist`, `yopoFinalApproachVMax`, `yopoGoalRepSuppressDist`,
+    `yopoTakeoverSlew`, `yopoTakeoverSteerEndDist`, `yopoArriveDeadbandM`, `yopoArriveVertH`,
+    `yopoArriveAltKp`/`AltVMax` (commented in the constructor).
+  - **A wall-adjacent goal no longer pins the drone metres short** (still kept): with the goal against
+    a wall the forward ray measures `dAhead ≈ distGoalH`; `yopoAvoidGoalGateMargin = 1.0` treats a
+    threat within 1 m of the goal's horizontal distance as beyond-goal (the `yopoAvoidGoalBrakeFloor
+    = 0.40` floor now covers the `brake = 0` case and the closing gate gains a third release), so the
+    drone is not stalled metres short.
 - **Depth availability**: when DA360 depth fails or times out it does **not** fall back to raycasting;
   the drone hovers in place and keeps retrying until a valid depth map arrives (see "Depth Map").
   Note: an earlier version had an "abnormal depth" check that hovered when the whole frame was
@@ -483,18 +460,11 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   vertical channel with a P-converging climb/descent and keeps only 30% of the horizontal command,
   removing large circling; it yields back to the network when the clearance straight above / below is
   insufficient.
-- **Lock straight onto the goal once arrived**: arrival latches when within 4.0 m of the goal and below
-  1.3 m/s; after that the goal is **locked** — with a horizontal error < 0.35 m and vertical < 0.3 m the
-  velocity target is **forced to zero** (parked), and while still outside the deadband it only pulls back
-  with a low-gain P term (2.0, capped at 2 m/s). **No directional avoidance thrust is added after arrival**
-  (`rep`/`tan` are both off). Previously the full takeover PD kept running after arrival, whose velocity
-  feedback term (`-holdKd*v`, gain 2.8) multiplied velocity-measurement noise into the velocity target and
-  the inner D term amplified it a second time — the "still swaying after reaching the goal" symptom,
-  which is a pure motion-loop noise/gain issue, unrelated to obstacles. The velocity-loop **D term is
-  therefore also switched off after arrival** (with the error near zero it only amplifies noise); damping
-  comes from `velTarget = 0` plus the inner P loop's velocity feedback toward zero. Safety nets are
-  unchanged: vertical clearance (`vSafeDown`/`vSafeUp`), `crashFloor` and collision handling stay active;
-  the vertical trim also keeps converging the altitude (stopping below 0.35 m) to avoid jitter around the goal.
+- **Arrival latching**: the server-side 2 m arrival verdict latches in `main.js` (`cmd.arrived` →
+  `yopoArrived`, released only when the goal is more than `YOPO_ARRIVE_RELEASE_M` away); the client
+  additionally has a backstop — within `yopoArriveHoldM = 4.0` m and below `yopoArriveHoldV = 1.3` m/s it
+  also treats the goal as arrived, avoiding "always one step short" before the asynchronous server verdict
+  returns. Once arrived it enters the goal-point position hold described in the arrival-handling section.
 
 ### Avoidance Architecture and Tuning
 
@@ -576,8 +546,7 @@ Key parameters (all in the `src/drone.js` constructor):
 | `yopoAvoidVClear` | 0.38 | Fraction above which an upper layer counts as clear; lower = stronger clearing willingness |
 | `yopoCorridorGuardDist` | 12.0 | Near-goal corridor guard (m): within this distance, a blocked goal-bearing corridor forces braking even if the velocity-direction corridor is clear |
 | `yopoCruiseMinSpd` | 12.0 | Cruise speed floor (m/s): tops up forward speed along the goal bearing when the path is clear and the goal is far; yields while braking |
-| `yopoCruiseMinDist` | 5.0 | Distance to the goal below which the cruise floor is switched off, respecting the takeover / arrival deceleration |
-| `yopoFinalApproachDist` | 12.0 | Final-approach takeover radius (m): inside it a PD loop converges onto the goal |
+| `yopoCruiseMinDist` | 5.0 | Distance to the goal below which the cruise floor is switched off, respecting the arrival deceleration |
 | `yopoVertFirstEnabled` | `true` | Master switch of the cruise-phase "vertical-first" direct climb/descent |
 | `droneMaxVSpeed` | 15.0 | Hard vertical speed ceiling (m/s) |
 | `droneMaxAngle` | 60 | Maximum tilt angle (°): the physical tilt ceiling |

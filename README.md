@@ -452,15 +452,22 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 - **3D 导航**：不做水平面投影，垂直避障由网络预测的 z 终端状态决定。
 - **轨迹生成**：三轴五阶多项式（Poly5Solver），从上次指令状态出发（`plan_from_reference=True`），轨迹连续、无往复。
 - **控制输出**：50Hz 评估多项式 → 位置/速度/加速度 + 偏航 → 前端级联 PID 跟踪。
-- **终点接管（< 12m）**：两端各有一层。服务端 `FINAL_APPROACH_DIST=12.0` 内停止网络推理，直接规划一条"末端速度/加速度为零"的五阶多项式——近目标处 `argmin(score)` 会反复挑出过冲/折返轨迹，叠加 `plan_from_reference` 会让目标方向观测翻转、位置速度持续振荡而永远到不了。客户端同样在 `yopoFinalApproachDist=12.0`（按**3D 距离**判定，水平近但垂直远时不切换）内由 PD 接管收敛（位置环 + 速度/加速度前馈，带速度变化率上限避免抖动）。
-  - **接管区内射线避障：只刹车、不推搡（根治"接管后晃很久"）**：接管区（< 12 m，`yopoGoalRepSuppressDist = 12.0` 与 `yopoFinalApproachDist` 对齐）内，射线层**只保留 `brake`（速度大小缩放）与 closing-speed gate（抑制朝障碍的速度分量），彻底关闭方向性扰动**——`rep`（排斥）与 `tan`（切向绕行）在接管区一律为 0。原因：接管区若残留 rep/tan 的横向力，合速度就始终降不到到达阈值（`yopoArriveHoldV`）以下，`yopoArrived` 永远判不出，无人机一直卡在接管 PD 里与避障拉扯 = 持续振荡（"晃很久"）。解耦后 PD 干净收敛、速度单调降到阈值内，才能 lock `arrived` 切入纯 hover（无 swing）。**接管末段彻底交接**：进入最后 `yopoTakeoverSteerEndDist = 3.0` m，或目标贴墙（`gateBeyondGoal` 放行、`vCloseMax = ∞`，即威胁就在目标处）时，`brake` 强制置 1、转向 steer 关闭、减速前馈撤掉，把控制权彻底交还 PD（PD 的 `holdMaxV = √(2ad)` 已保证物理可停）。**到达后仍做侧/后方保护（射线避障时刻优先）**：整个射线块在 `arrived` 之后不再被跳过，此时只保留"剔除推离目标分量"后的 `rep`（贴墙目标不会被推出去 swing，而侧/后方障碍仍把无人机推离到安全距离），且始终不做转向 steer——停在障碍旁的目标点时也不会钉在危险点。
-  - **接管区速度环恢复 D 项阻尼（运动环根因修复）**：接管区沿用巡航期的 `useAccFeedforward = true`，原判定把 `velKd` 一并置 0，速度环退化为**纯 P**；与内环（姿态）滞后、射线探测延迟（60–150 ms）串成的相位滞后使闭环**欠阻尼**，这就是"到目标点接管范围持续抖动"的真正来源。数值仿真（d=12 m、v=10 m/s 进入，`velKp=4.0`）实测：滞后 0.20 s 时纯 P 过冲 1.21 m、尾部速度 1.16 m/s、速度反向 4 次；滞后 0.30 s 时过冲 2.32 m、尾部 3.88 m/s，根本停不到目标点。恢复 `velKd = 1.0` 后同样条件过冲降到 0.14 m、尾部 0.05 m/s、反向 0 次，并在滞后 0.08–0.40 s 全区间稳健（过冲 ≤ 0.89 m、尾部 ≤ 0.21 m/s、精确停在目标点），收敛时间还略快（1.60 s → 1.53 s）。巡航段仍**关闭** D 项（那里有网络前馈跳变会被 D 放大），接管区速度目标由本地 PD + 斜率限幅生成、网络前馈已停止且陈旧，故 D 项安全。
-  - **接管后更快稳定、不晃动**：速度目标变化率上限 `yopoTakeoverSlew` 20 → 14 m/s²（仍高于机体加速度上限，只滤帧间跳变），且斜率限制扩展到**垂直轴**（消除目标附近的垂直抖动）；阻尼 `holdKd` 按距离调度——区内保持 1.5，最后 3 m 线性升到 2.8；末端 `holdKp` 同步按距离调度 5 → 8（抵消 `holdKd` 升高拉长的收敛时间：末端速度系数回到 ~2.1×剩余距离、时间常数 0.76 s → 0.48 s），并给垂直速度目标加 `min(√(2a·|Δh|), 4 m/s)` 限幅（此前垂直环无 holdMaxV 式上限，2-3 m 高度差会指令 9-13 m/s 垂直速度，到点后要花很久抵消）。
-  - **贴墙目标不再被钉在半路**：目标贴墙时前向射线测得 `dAhead ≈ distGoalH`，原严格的 `dAhead > distGoalH` 判定使 beyond-goal 豁免失效 → `brakeClear ≤ standoff + 反应距` 时 `brake = 0`（0.40 保底写在了不生效的分支里），且 closing gate 把朝目标分量钳到 0——无人机被钉在数米外，"接管后迟迟停不下来/到不了位"。现新增 `yopoAvoidGoalGateMargin = 1.0`：威胁在目标水平距离 1 m 容差内即按 beyond-goal 处理（`yopoAvoidGoalBrakeFloor = 0.40` 下限移出分支、覆盖 `brake = 0` 情形，closing gate 第三条放行），末段减速交由 PD 的 `holdMaxV = √(2ad)` 保证物理可停。
+- **到达处理（已重写，完全对齐 `MindCloud_World_Fly_With_Yopo`）**：**不再有基于距离的接管区**。此前客户端在距目标 12 m 内切到一套自研的"终点接管 PD"（距离调度增益、`√(2ad)` 速度上限、变化率限幅、边界混合、垂直死区、到达锁定等），它同时与网络轨迹、射线避障层和速度测量噪声对抗，是"到终点持续晃动"的根源。现按参考实现：全程跟随 YOPO 网络轨迹，只有**到达锁定后**才切到目标点位置悬停：
+  ```
+  const holdKp = 1.5, holdAltKp = 2.5, holdKd = 1.5, holdMaxV = 2.0;
+  velTargetX = holdKp * gErrX - holdKd * this.vx;   // 位置 P + 速度阻尼 D
+  ...（Z 同，Y 用 holdAltKp）...
+  if (vh > holdMaxV) velTarget *= holdMaxV / vh;      // 水平速度上限 2 m/s
+  ```
+  保留 `D` 项是因为纯 P 会在到达时仍带速度 → 过冲 → 拉回 → 晃动。
+  - **射线避障全程一致生效**：取消了原来"接管区内抑制 `rep`/`tan`"的一整套特例（含 `repScale`、`steerFade`、转向迟滞、末段 stand-down）。导航阶段（未到达）射线层与巡航完全相同——排斥、切向绕行、刹车、垂直越障全开；**到达后**只保留安全底线：`brake` 速度缩放 + 垂直净空（`vSafeDown`/`vSafeUp`）+ `crashFloor` + 碰撞处理，不再施加任何方向性推力，以免与"悬停锁定"相互拉扯。
+  - **速度环 D 项**回到参考实现：`velKd = useAccFeedforward ? 0 : sfVelKd`（巡航关 D 以避免放大网络前馈跳变；到达后走位置环、`useAccFeedforward=false`，`velKd = sfVelKd = 1.0` 提供阻尼）。
+  - **已删除的旧接管参数**：`yopoFinalApproachDist`、`yopoFinalApproachVMax`、`yopoGoalRepSuppressDist`、`yopoTakeoverSlew`、`yopoTakeoverSteerEndDist`、`yopoArriveDeadbandM`、`yopoArriveVertH`、`yopoArriveAltKp`/`AltVMax`（注释中留有说明）。
+  - **贴墙目标不再被钉在半路**（仍保留）：目标贴墙时前向射线测得 `dAhead ≈ distGoalH`，`yopoAvoidGoalGateMargin = 1.0` 让目标 1 m 容差内的威胁按 beyond-goal 处理（`yopoAvoidGoalBrakeFloor = 0.40` 下限覆盖 `brake = 0` 情形，closing gate 第三条放行），避免被钉在数米外。
 - **深度可用性**：DA360 深度失败/超时时**不回退射线检测**，无人机原地悬停并持续重试，直到拿到有效深度图才恢复导航（详见「DA360 深度估计」）。注：早期版本曾有"整帧被 2 m 内包围即判定深度异常并悬停"的检测，因在城市楼群中会把"近处像素多"误判为深度失效而频繁悬停，已按上游实现移除；深度有效性现交由 mask 通道与网络自身判断。
 - **巡航速度地板（`yopoCruiseMinSpd=12`）**：路径畅通且目标较远时，沿目标方位补齐前进速度，避免网络把速度压到爬行；避障刹车时自动让位，距目标 < `yopoCruiseMinDist=5` m 时关闭，尊重接管/到达减速。
 - **垂直优先直升降（`yopoVertFirst*`）**：当高度差占主导（水平距离 < 20 m 且 |Δh| > 5 m 且 > 1.2× 水平偏移）时，直接接管垂直通道做 P 收敛升降、水平只留 30%，消除大幅盘旋；正上/正下净空不足时让位回网络。
-- **到达后直接锁定目标点**：距目标 < 4.0 m 且速度 < 1.3 m/s 判定到达；到达后**锁定目标点**——水平误差 < 0.35 m 且垂直 < 0.3 m 时速度目标**直接归零**（完全停住），仍在死区外则只用低增益 P 项（2.0、限幅 2 m/s）缓慢拉回，并且**不再叠加任何方向性避障推力**（`rep`/`tan` 在到达后全关）。此前到达后仍跑完整接管 PD，其速度反馈项（`-holdKd*v`，系数 2.8）会把速度测量噪声成倍放大进速度目标、内环 D 项再二次微分放大，表现为"到达目标点后持续晃动"——这与障碍物无关，是纯运动环的噪声/增益问题。因此到达后同时**关闭速度环 D 项**（误差已近零，D 只会放大噪声），阻尼由 `velTarget=0` + 内环 P 跟踪 0 的速度负反馈提供。安全底线不变：垂直净空（`vSafeDown`/`vSafeUp`）、`crashFloor`、碰撞处理照常生效；垂直仍保留轻微高度收敛（< 0.35 m 时停止校正），避免围绕目标抖动。
+- **到达判定**：服务端 2 m 到达判据在 `main.js` 中锁存（`cmd.arrived` → `yopoArrived`，离目标超过 `YOPO_ARRIVE_RELEASE_M` 才释放）；客户端另有兜底：距目标 < `yopoArriveHoldM = 4.0` m 且速度 < `yopoArriveHoldV = 1.3` m/s 也判定到达，避免服务端异步判据回来前"总差一步"。到达后即进入上面的目标点位置悬停。
 
 ### 避障架构与调参
 
