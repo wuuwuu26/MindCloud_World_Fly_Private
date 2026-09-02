@@ -424,7 +424,7 @@ export class Drone {
         // the drone holds ~yopoAvoidSideStandoff off building faces (keep-larger-side-distance
         // request) and is pushed off from further out (push-early request), without making the
         // "way ahead is clear" verdict stricter.
-        this.yopoAvoidSideStandoff = 13.0;  // Desired side clearance from walls / building faces (m). RAISED 10.0 -> 13.0 (keep-further-away request): the keep-out repulsion now runs at FULL strength out to 13 m instead of 10 m, so the drone is pushed off building faces from further out and holds a wider lateral margin
+        this.yopoAvoidSideStandoff = 10.0;  // Desired side clearance from walls / building faces (m). REVERTED 13.0 -> 10.0: widening the full-strength keep-out band to 13 m made the lateral repulsion strong enough to push a detour BACK once it came abreast of the obstacle ("there is an exit but it turns around and goes back"), and it did nothing for the remaining collisions -- those are missed detections, where no distance is measured at all and a standoff cannot help.
         this.yopoAvoidPushRange = 36.0;     // Side-push detection range (m) at low speed
         this.yopoAvoidPushRangeHi = 70.0;   // Side-push detection range (m) at yopoAvoidRefSpeed: RAISED 56 -> 70
         this.yopoAvoidGain = 13.0;    // RAISED 10 -> 13. Generic avoidance gain base: now used mainly for vertical
@@ -3618,6 +3618,13 @@ export class Drone {
             tanX = 0; tanZ = 0;          // Tangential removed entirely (avoids detouring back to the start)
             brake = 1.0;                 // Clear exit means full speed, not slowed by vertical threats
             vRep = 0;                    // Vertical clearing released too: a clear corridor means no climbing / diving
+            // Drop the tangential direction memory as soon as the corridor is open. While it is
+            // kept, the NEXT obstacle re-uses the OLD tangent -- which pointed around the far side
+            // of the obstacle that has just been cleared -- so the drone turned back into the detour
+            // it had just escaped ("there is an exit but it goes back around"). With the corridor
+            // open there is nothing to steer around, so the memory has served its purpose and the
+            // next detour has to be chosen from the current geometry.
+            this._avoidLastTan = null;
         }
 
         // ---- Horizontal detour around vertical obstacles (B) ----
