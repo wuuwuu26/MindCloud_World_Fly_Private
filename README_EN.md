@@ -458,7 +458,7 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
 - **Cruise speed floor (`yopoCruiseMinSpd=12`)**: when the path is clear and the goal is far, it tops
   up the forward speed along the goal bearing so the network cannot squeeze the speed down to a
   crawl; it yields while the avoidance brake is active and switches off within
-  `yopoCruiseMinDist=5` m of the goal, respecting the takeover / arrival deceleration.
+  `yopoCruiseMinDist=5` m of the goal, respecting the arrival deceleration.
 - **Vertical-first direct climb/descent (`yopoVertFirst*`)**: when the height error dominates
   (horizontal distance < 20 m and |Δh| > 5 m and > 1.2× the horizontal offset) it takes over the
   vertical channel with a P-converging climb/descent and keeps only 30% of the horizontal command,
@@ -466,7 +466,7 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   insufficient.
 - **Arrival latching**: the server-side 2 m arrival verdict latches in `main.js` (`cmd.arrived` →
   `yopoArrived`, released only when the goal is more than `YOPO_ARRIVE_RELEASE_M` away); the client
-  additionally has a backstop — within `yopoArriveHoldM = 4.0` m and below `yopoArriveHoldV = 1.3` m/s it
+  additionally has a backstop — within `yopoArriveHoldM = 4.0` m (distance-only, no speed gate — `yopoArriveHoldV` was removed) it
   also treats the goal as arrived, avoiding "always one step short" before the asynchronous server verdict
   returns. Once arrived it enters the goal-point position hold described in the arrival-handling section.
 
@@ -563,25 +563,47 @@ Key parameters (all in the `src/drone.js` constructor):
 #### High-speed responsiveness (ray budget & adaptive action range)
 
 The root cause of "avoidance is too late + depth/command updates are too slow when flying fast" is a
-single choke point: a full ring probe casts 35 `forceFresh` `pickLocalRay` calls (24 horizontal +
-9 across the 3 vertical layers + 2 straight up/down; each is a full GPU render plus a read-back
-stall) and runs synchronously inside the render frame loop — so a single probe can take tens to over
-a hundred ms. That both stales the avoidance data and collapses the frame rate, which in turn slows
-panorama capture, DA360 depth and command replanning. Instead of throttling the whole probe (which
-would only stale the forward direction that decides braking), the high-speed profile bounds the
-number of GPU picks per cycle:
+single choke point: every `pickLocalRay` is a full GPU scene render plus a read-back stall and runs
+synchronously inside the render frame loop. In the old implementation **every direction was picked
+fresh every cycle**, casting 24 horizontal + 9 vertical-layer + 2 straight up/down = 35 `pickLocalRay`
+calls per probe; a single probe could take tens to over a hundred ms. That both staled the avoidance
+data and collapsed the frame rate, which in turn slowed panorama capture, DA360 depth and command
+replanning. The fix splits the rays into **freshness tiers** (see the freshness-tier comment in
+`_computeAvoidProbe`):
 
-- **Core cone `yopoAvoidCoreDeg` (±25°)**: keeps the full 15° resolution (24 rays → 360/24) and is
-  re-probed every cycle at every speed — this is the sector that decides the braking distance;
-  dropping resolution there would open ~30° gaps (a ~15 m hole at 30 m) right where a miss is least
-  affordable.
-- **Outer cone `yopoAvoidConeDeg` (±55°, narrows to ±45° at speed)**: re-probed every cycle but
-  downsampled at speed by `yopoAvoidStrideHi`.
-- **Periphery `yopoAvoidSliceMax`**: 6 rays polled per cycle, rotating round-robin (~3 cycles ≈ 60 ms
-  to refresh the full ring); directions not re-probed this cycle carry their last measured distance,
-  so the repulsion/detour sums always see a complete 360° ring.
+- **fresh (`forceFresh=true`, skips the `pickLocalRay` direction-bucket cache, a real GPU pick every
+  time)**:
+  - The core forward sector (`yopoAvoidCoreDeg` ±25°): braking-critical. At speed the drone moves
+    several metres within the cache TTL, so a cached distance here would compute the braking distance
+    wrong and hit the wall.
+  - The straight up / down safety rays: ceiling / floor safety cannot tolerate a stale value.
+  - A fixed **5 rays per cycle** (core 3 + up/down 2).
+- **cached (`forceFresh=false`, served from the `pickLocalRay` cache)**: the wider forward cone, the
+  round-robin periphery slices (`yopoAvoidSliceMax` per cycle) and the vertical over/under layers.
+  The cache key is a 0.5 m origin quantisation + direction bucket + 150 ms TTL; a **hit costs zero
+  GPU picks**, and only a miss falls through to a real pick. These feed repulsion / tangential detour
+  / vertical clearing, which all work at metre-scale standoffs, so one probe cycle of lag is fine; and
+  staleness is bounded by the 0.5 m bucket size (a miss always falls through fresh), so braking never
+  triggers later than the all-fresh baseline.
+
+Throttling still lives in `_updateAvoidProbe`: a cycle every **60 ms** at speed (≈16.7 Hz) and every
+**≤400 ms** at rest (≈2.5 Hz). So total GPU picks are far below "rays per cycle × cycle rate": at speed
+typically only 5 fresh picks per cycle (the rest are cache hits); while hovering / creeping the buckets
+persist across cycles and the cone / periphery are served almost entirely from cache, so GPU picks
+nearly vanish.
+
+- **Core cone `yopoAvoidCoreDeg` (±25°)**: keeps the full 15° resolution and is freshly re-probed
+  every cycle at every speed — this is the sector that decides the braking distance; dropping
+  resolution there would open ~30° gaps (a ~15 m hole at 30 m) right where a miss is least affordable.
+- **Outer cone `yopoAvoidConeDeg` (±55°, still ±55° at speed)**: re-probed every cycle; downsampled
+  at speed by `yopoAvoidStrideHi` (30° spacing), but the cone angle was widened to compensate for the
+  angular gaps.
+- **Periphery `yopoAvoidSliceMax`**: 12 rays polled per cycle, rotating round-robin, refreshing the
+  full ring **within a single cycle** (side buildings seen in time at speed); directions not re-probed
+  this cycle carry their last measured distance, so the repulsion/detour sums always see a complete
+  360° ring.
 - **Vertical layers (high/high2/low)**: only emitted when the previous cycle found the goal corridor
-  blocked, saving 9 rays in the normal case.
+  blocked (cached), saving 9 rays in the normal case.
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
@@ -590,17 +612,19 @@ number of GPU picks per cycle:
 | `yopoAvoidRefSpeed` | 15.0 | Speed (m/s) at which the high-speed profile is fully applied |
 | `yopoAvoidStrideHi` | 2 | Ring ray stride at speed (2 → 30° spacing) |
 | `yopoAvoidCoreDeg` | 25 | Core cone half-angle (°), always full 15° resolution |
-| `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 45 | Outer cone half-angle (°), low / high speed |
-| `yopoAvoidSliceMax` | 6 | Peripheral rays polled per cycle |
+| `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 55 | Outer cone half-angle (°), low / high speed (widened to 55° at speed to compensate stride sampling) |
+| `yopoAvoidSliceMax` | 12 | Peripheral rays polled per cycle |
 | `yopoAvoidRepRangeHi` | 50.0 | Repulsion/detour/brake action range at speed (m) |
 | `yopoAvoidTanGain` | 54.0 | Tangential detour gain (m/s), more decisive than 30 |
 | `yopoAvoidRepGain` | 20.0 | Maximum radial push-away speed (m/s), more decisive than 12 |
 | `yopoAvoidBrakeRangeHi` | 40.0 | Soft-brake start distance at speed (m) |
 | `yopoAvoidBrakeReaction` | 0.48 | Brake reaction time at speed (s): the lag (attitude build-up + control loop) is converted to a reaction distance `spd × reaction` subtracted from the stopping room, so at 15 m/s braking starts ~3 m earlier and still stops inside the standoff |
 
-Measured picks per cycle: about 35 at low speed (24 horizontal + 9 vertical layers + 2 straight
-up/down), reduced by the budget to about 12 horizontal + vertical layers at high speed (more when
-blocked). `yopoAvoidRepRange` (= `goalClear`'s clear threshold) does **not** scale with speed, so
+Measured rays emitted per cycle (GPU-pick peak): about 19 horizontal + 2 straight up/down at low
+speed (5 of them fresh, +9 cached vertical layers when blocked); about 14 horizontal + 2 straight
+up/down at high speed (again 5 fresh); **a cache hit costs no GPU pick**. Only ~5 rays per cycle
+(core 3 + up/down 2) are real GPU picks; the rest are served from the `pickLocalRay` cache.
+`yopoAvoidRepRange` (= `goalClear`'s clear threshold) does **not** scale with speed, so
 widening the high-speed action range does not make "the path is actually clear" get misjudged as
 blocked. Run `__yopoPerf()` in the browser console to read live metrics (`fps` / `probeMsAvg` /
 `probeHz` / `depthHz` / `cmdHz` / `ringAgeMaxMs`).
@@ -709,7 +733,7 @@ During navigation:
   this geometric layer goes to zero and does not interfere with navigation — see "Avoidance
   Architecture and Tuning".
 - Arrival has two layers: the server flags arrival within 2 m of the goal (`ARRIVE_THRESHOLD`); the
-  client additionally latches arrival within 4.0 m and below 1.3 m/s, so the asynchronous server reply
+  client additionally latches arrival within 4.0 m (distance-only, no speed gate), so the asynchronous server reply
   cannot leave it "always one step short"
 - Press **`X`** (or click **"Stop Nav"**) to end navigation
 
@@ -722,6 +746,17 @@ A **Target Map (Top-Down)** minimap is permanently docked in the bottom-left cor
 interface and refreshes live in flight, giving an intuitive view of the drone's position relative to
 the goal:
 
+- **Rendering**: the minimap is drawn by a **separate, second Cesium 3D Tiles viewer** (a top-down
+  orthographic camera looking straight down from above the drone), sharing the same Google Tiles scene
+  as the main view and the panorama. It is not a screenshot or an external map tile — it genuinely
+  loads a second copy of the 3D Tiles world.
+- **Performance (so it does not fight the main view for the GPU)**: the main flight view keeps a
+  continuous 60 fps loop (`requestRenderMode: false`); the minimap viewer instead renders on demand —
+  it uses `requestRenderMode: true` (it only issues one `requestRender()` per frame after an entity
+  position or camera change, instead of redrawing every frame), sets `resolutionScale` to `0.5`
+  (half resolution, plenty for a top-down dot map), and is throttled on the frontend to **~15 Hz
+  (~every 66 ms)**. Together these cut the second 3D Tiles world's per-second GPU share to roughly a
+  quarter.
 - Centred on the drone, it shows the drone's current heading, the goal position and the line between
   them, projected onto the horizontal plane.
 - The two text rows below the map give the **target altitude y** (the goal's `y` in the **local
