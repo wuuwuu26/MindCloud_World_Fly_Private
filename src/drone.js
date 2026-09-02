@@ -526,21 +526,22 @@ export class Drone {
         // (removed) yopoTakeoverSteerEndDist belonged to the old 12 m final-approach takeover:
         // the distance under which the ray steering stood down near the goal. There is no
         // takeover zone any more (see _controlYOPO), so the parameter is gone.
-        this.yopoAvoidStrideHi = 2;      // Use every 2nd ray (30 deg spacing) at high speed: 12 rays instead of 24
-        this.yopoAvoidCoreDeg = 25;      // Half-angle (deg) of the core cone: keeps the full 10 deg
-                                         // resolution at every speed, because it is the sector that
-                                         // decides the braking distance. Halving the resolution
-                                         // there would open 20 deg gaps (a ~10 m hole at 30 m) right
-                                         // where a miss is least affordable.
-        this.yopoAvoidConeDeg = 55;      // Half-angle (deg) of the outer forward cone re-probed every cycle
-        this.yopoAvoidConeDegHi = 55;    // Forward cone at high speed: WIDENED 45 -> 55 so the braking-critical sector is refreshed with fewer angular gaps at speed
-        this.yopoAvoidSliceMax = 12;     // Max peripheral rays re-probed per cycle (round-robin): RAISED 6 -> 12 so the whole side/periphery refreshes every cycle at speed (side buildings seen in time)
-        this.yopoAvoidVertEvery = 1;     // Probe the straight up/down rays every N cycles (1 = every cycle, safety-critical)
-        this._avoidRing = null;          // Persistent ring distances carried across cycles (m)
-        this._avoidRingAge = null;       // ms since each ring direction was last really probed
-        this._avoidSliceCursor = 0;      // Round-robin cursor over the peripheral directions
+        // Probe TIERING REMOVED: every one of the yopoAvoidRayCount ring directions is now
+        // re-probed EVERY cycle with forceFresh=true -- no pickLocalRay cache, no downsampling,
+        // no mirrored neighbours and no round-robin slices. The parameters below used to drive
+        // that tiering and are therefore no longer read by _computeAvoidProbe; they are kept so
+        // any external / UI override of them stays harmless.
+        this.yopoAvoidStrideHi = 2;      // (unused) high-speed ray stride: was every 2nd ray at speed
+        this.yopoAvoidCoreDeg = 25;      // (unused) half-angle (deg) of the always-fresh core cone
+        this.yopoAvoidConeDeg = 55;      // (unused) half-angle (deg) of the forward cone re-probed every cycle
+        this.yopoAvoidConeDegHi = 55;    // (unused) forward cone half-angle at high speed
+        this.yopoAvoidSliceMax = 12;     // (unused) max peripheral rays re-probed per cycle (round-robin)
+        this.yopoAvoidVertEvery = 1;     // (unused) straight up/down rays are now probed EVERY cycle
+        this._avoidRing = null;          // Ring distances from the last cycle (fully overwritten every cycle now)
+        this._avoidRingAge = null;       // ms since each ring direction was probed (always 0 now)
+        this._avoidSliceCursor = 0;      // (unused) round-robin cursor over the peripheral directions
         this._avoidCycle = 0;            // Probe cycle counter
-        this._avoidPrevBlocked = false;  // Whether the previous cycle saw the forward corridor blocked (gates the extra vertical layers)
+        this._avoidPrevBlocked = false;  // (diagnostic only) previous cycle saw the forward corridor blocked
         this._avoidPerf = { probeMs: 0, rays: 0, rayTotal: 0, cycles: 0, ringAgeMax: 0 };
         this.yopoMinAlt = 8.0;        // Minimum ground/roof clearance (m) -- threshold that triggers soft avoidance (upward push)
                                       // RAISED 2.5 -> 3.0 -> 4.0 -> 8.0: the push-up now engages 5.5 m earlier. The binding
@@ -2771,7 +2772,6 @@ export class Drone {
         const R = this.yopoAvoidRange;
         const N = dirs.length;
         const prevProbe = this._avoidProbe;
-        const dtProbe = prevProbe ? Math.max(0, tStart - prevProbe.time) : 0;
 
         // Compute the ground clearance first: used to clamp the start of the down-probe layer
         // and avoid false detections when hugging the ground
@@ -2786,31 +2786,22 @@ export class Drone {
         // distance. The old "fan bundle against recess misses" was removed:
         // only 1 centre ray per direction, simplifying the probe (at the cost of missing
         // recessed windows / recess inner walls).
-        // Ray freshness tiers -- every pickFromRay is a full GPU scene render plus a read-back
-        // stall executed inside the render loop, so freshness is granted only where a stale
-        // distance actually hurts:
-        //   fresh (forceFresh=true, skips the pickLocalRay cache):
-        //     - the core forward sector: braking-critical. At high speed the drone moves several
-        //       metres within the cache TTL, so a cached distance here computes the braking
-        //       distance wrong -> wall impact.
-        //     - the straight up / down rays: ceiling / floor safety.
-        //   cached (forceFresh=false: 0.5 m origin quantisation + direction bucket + 150 ms TTL):
-        //     - the wider forward cone, the round-robin periphery slices and the vertical
-        //       over/under layers. They feed repulsion / tangential detour / vertical clearing,
-        //       which all work with metre-scale standoffs, and over/under clearing explicitly
-        //       tolerates one probe cycle of lag (see the altitude-probing comment below).
-        //     - the staleness of a served distance is bounded by the 0.5 m bucket size (a miss
-        //       falls through to a real pick and is fresh by definition), so the brake never
-        //       reacts later than before.
-        //     - while hovering / creeping the buckets persist across cycles and the cone /
-        //       periphery picks are served entirely from the cache (most of the cycle's GPU
-        //       picks eliminated); at speed the buckets turn over and those rays fall through
-        //       to real picks, which is the correct freshness trade-off.
-        // Throttling happens in _updateAvoidProbe.
+        // NO CACHING, NO TIERING (explicit requirement): every direction of the 360 deg ring is
+        // re-probed EVERY cycle with forceFresh=true, so no distance is ever served from the
+        // pickLocalRay cache and no direction is downsampled, mirrored or rotated out.
+        // Rationale: the pick cache (0.5 m origin quantisation + direction bucket + 150 ms TTL)
+        // and the tiering (core / cone / periphery + high-speed stride + round-robin slices) both
+        // let a direction keep a distance measured from a different position or an older cycle.
+        // At cruise speed the drone covers several metres per cycle, so a stale / interpolated
+        // distance computes the braking distance wrong and the ray layer under-reacts -- which is
+        // the "still plans a big speed toward the obstacle" symptom.
+        // Cost: N fresh GPU picks per cycle (N = yopoAvoidRayCount = 24) instead of ~20. The ring
+        // is small enough that this stays affordable, and correctness beats frame rate here.
+        // Throttling (how often a probe cycle runs) still happens in _updateAvoidProbe.
         let rayCount = 0;
-        const rayDist = (dir, yLevel, fresh) => {
+        const rayDist = (dir, yLevel) => {
             rayCount++;
-            const hit = w.pickLocalRay({ x: this.x, y: yLevel, z: this.z }, dir, R, fresh === true);
+            const hit = w.pickLocalRay({ x: this.x, y: yLevel, z: this.z }, dir, R, true);
             return (hit && Number.isFinite(hit.distance) && hit.distance > 0.04) ? hit.distance : R;
         };
         // Forward direction (horizontal): velocity takes priority, otherwise the body forward -Z
@@ -2818,22 +2809,9 @@ export class Drone {
         const spdHv = Math.hypot(this.vx, this.vz);
         if (spdHv > 0.3) { fwdHx = this.vx / spdHv; fwdHz = this.vz / spdHv; }
 
-        // ── Speed profile ──
-        // Every GPU pick below is a full scene render plus a read-back stall, executed
-        // synchronously in the render frame loop, so the number of picks per cycle -- not the
-        // throttle interval -- is what decides whether avoidance keeps up at speed.
-        const tFast = Math.max(0, Math.min(1,
-            (spdHv - this.yopoAvoidFastSpeed) /
-            Math.max(1e-3, this.yopoAvoidRefSpeed - this.yopoAvoidFastSpeed)));
-        const stride = tFast >= 0.5 ? Math.max(1, Math.round(this.yopoAvoidStrideHi)) : 1;
-        const coneDeg = this.yopoAvoidConeDeg +
-            (this.yopoAvoidConeDegHi - this.yopoAvoidConeDeg) * tFast;
-        const coneCos = Math.cos(coneDeg * Math.PI / 180);
-        const coreCos = Math.cos(this.yopoAvoidCoreDeg * Math.PI / 180);
-
-        // Persistent ring state: a direction that is not re-probed this cycle keeps its last
-        // measured distance, so the repulsion / detour sums always see a complete 360 deg ring
-        // instead of a partially filled one.
+        // Ring state: kept so the returned arrays always describe a complete 360 deg ring, but
+        // with the tiering gone every direction is overwritten by a fresh measurement every
+        // cycle, so a carried-over distance or ringAge staleness can no longer reach the field.
         if (!this._avoidRing || this._avoidRing.length !== N) {
             this._avoidRing = new Float64Array(N).fill(R);
             this._avoidRingAge = new Float64Array(N).fill(1e9);
@@ -2841,43 +2819,12 @@ export class Drone {
         }
         const ring = this._avoidRing;
         const ringAge = this._avoidRingAge;
-        for (let i = 0; i < N; i += stride) ringAge[i] = Math.min(1e9, ringAge[i] + dtProbe);
 
-        // Split the directions into three tiers:
-        //   core  — the braking-critical sector straight ahead, always full resolution and always
-        //           re-probed (a miss here is what actually causes a crash);
-        //   cone  — the wider forward sector, re-probed every cycle but downsampled at speed;
-        //   periphery — everything else, rotated through round-robin slices across cycles.
-        const coreIdx = [];
-        const coneIdx = [];
-        const periIdx = [];
-        for (let i = 0; i < N; i++) {
-            const dot = dirs[i].x * fwdHx + dirs[i].z * fwdHz;
-            if (dot >= coreCos) {
-                coreIdx.push(i);
-            } else if ((i % stride) !== 0) {
-                continue;               // dropped by the high-speed stride, mirrored from a neighbour
-            } else if (dot >= coneCos) {
-                coneIdx.push(i);
-            } else {
-                periIdx.push(i);
-            }
-        }
-        const coreSet = new Set(coreIdx);
-        const coneAll = coreIdx.concat(coneIdx);
-        const sliceMax = Math.max(1, Math.round(this.yopoAvoidSliceMax));
-        const slice = [];
-        for (let k = 0; k < sliceMax && periIdx.length > 0; k++) {
-            this._avoidSliceCursor = (this._avoidSliceCursor + 1) % periIdx.length;
-            slice.push(periIdx[this._avoidSliceCursor]);
-        }
-
-        // Altitude probing: mid (current altitude) for the probed directions; high/high2/low are
-        // only probed along the 3 rays best aligned with the forward direction, and only while the
-        // forward corridor is actually blocked -- vertical obstacle clearing only cares whether the
-        // forward direction can be flown over / dived under, so fewer rays means a better frame
-        // rate. The blocking verdict comes from the previous cycle (one cycle of lag is irrelevant
-        // for a manoeuvre that takes seconds).
+        // Altitude probing: mid (current altitude) for every ring direction; the extra
+        // high/high2/low layers go along the 3 rays best aligned with the forward direction,
+        // because vertical obstacle clearing only cares whether the surface straight ahead can be
+        // flown over / dived under. Those 3 rays are now probed EVERY cycle (no gating on the
+        // previous cycle's blocked verdict) and always fresh.
         const dists = new Array(N);
         const distsHigh = new Array(N);
         const distsHigh2 = new Array(N);
@@ -2886,54 +2833,31 @@ export class Drone {
         const yHigh2 = this.y + this.yopoAvoidVStep * 2;
         const yLow = Math.max(this.y - this.yopoAvoidVStep, groundY + 1.0);
         const lowOk = (yLow - groundY) > 1.5; // The down-probe layer counts as a valid dive only if clearly above the ground
-        const probeAux = this._avoidPrevBlocked;
 
-        // Pick the 3 rays best aligned with the forward direction for the high-layer probe
-        // (more coverage -> more directions available for vertical clearing)
-        const vProbeIdx = (coneAll.length > 0 ? coneAll : periIdx)
-            .slice()
+        // The 3 forward-most rays carry the vertical over/under layers. Chosen from the whole ring
+        // now that the core/cone/periphery tiering is gone.
+        const vProbeIdx = Array.from({ length: N }, (_, i) => i)
             .sort((a, b) => (dirs[b].x * fwdHx + dirs[b].z * fwdHz) -
                             (dirs[a].x * fwdHx + dirs[a].z * fwdHz))
             .slice(0, 3);
 
-        const probeSet = new Set(coneAll);
-        for (const i of slice) probeSet.add(i);
-        if (probeAux) for (const i of vProbeIdx) probeSet.add(i);
-
+        // Main ring: EVERY direction, EVERY cycle, forceFresh -- no cache, no stride downsampling,
+        // no round-robin slices and no mirrored neighbours, so the potential field never sees a
+        // distance measured from another position or from an older cycle.
         for (let i = 0; i < N; i++) {
-            if (!coreSet.has(i) && (i % stride) !== 0) {
-                // Direction skipped by the high-speed stride: mirror the neighbouring probed
-                // direction so the ring stays gap-free (angular resolution drops, coverage does not).
-                const nb = i - (i % stride);
-                dists[i] = dists[nb];
-                distsHigh[i] = distsHigh[nb];
-                distsHigh2[i] = distsHigh2[nb];
-                distsLow[i] = distsLow[nb];
-                continue;
-            }
-            if (probeSet.has(i)) {
-                // Core sector rays are braking-critical -> fresh pick; cone / periphery rays feed
-                // the repulsion / detour layer -> the quantised pick cache is accurate enough and
-                // keeps them off the GPU pick path (see the freshness-tier comment above).
-                ring[i] = dists[i] = rayDist(dirs[i], this.y, coreSet.has(i));
-                ringAge[i] = 0;
-                if (probeAux && vProbeIdx.indexOf(i) >= 0) {
-                    // Vertical over/under layers: one cycle of lag is fine for a manoeuvre that
-                    // takes seconds -> cached picks.
-                    distsHigh[i] = rayDist(dirs[i], yHigh, false);
-                    distsHigh2[i] = rayDist(dirs[i], yHigh2, false);
-                    distsLow[i] = lowOk ? rayDist(dirs[i], yLow, false) : dists[i];
-                } else {
-                    distsHigh[i] = dists[i];
-                    distsHigh2[i] = dists[i];
-                    distsLow[i] = dists[i];
-                }
-            } else {
-                dists[i] = ring[i];
-                distsHigh[i] = dists[i];
-                distsHigh2[i] = dists[i];
-                distsLow[i] = dists[i];
-            }
+            ring[i] = dists[i] = rayDist(dirs[i], this.y);
+            ringAge[i] = 0;
+            distsHigh[i] = dists[i];
+            distsHigh2[i] = dists[i];
+            distsLow[i] = dists[i];
+        }
+        // Vertical over/under layers along the forward-most rays: every cycle, fresh.
+        // Gating these on the PREVIOUS cycle's "forward corridor blocked" verdict made vertical
+        // clearing depend on a one-cycle-old decision, so it could miss the gap and never trigger.
+        for (const i of vProbeIdx) {
+            distsHigh[i] = rayDist(dirs[i], yHigh);
+            distsHigh2[i] = rayDist(dirs[i], yHigh2);
+            distsLow[i] = lowOk ? rayDist(dirs[i], yLow) : dists[i];
         }
 
 
@@ -2943,8 +2867,9 @@ export class Drone {
         // overhead or a square rooftop underfoot). Prevents climbing into the ceiling and
         // descending into an obstacle straight below.
         let vUpDist = R, vDownDist = R;
-        const vertEvery = Math.max(1, Math.round(this.yopoAvoidVertEvery));
-        if (this.yopoAvoidVertRay && (this._avoidCycle % vertEvery === 0)) {
+        // Straight up / down: probed EVERY cycle (no "every N cycles" tiering) and always fresh --
+        // a stale ceiling / floor distance is a real hazard.
+        if (this.yopoAvoidVertRay) {
             rayCount += 2;
             // Ceiling / floor safety rays stay fresh (a stale ceiling distance is a real hazard).
             const hUp = w.pickLocalRay({ x: this.x, y: this.y + 0.5, z: this.z }, { x: 0, y: 1, z: 0 }, this.yopoAvoidVertRange, true);
@@ -2966,16 +2891,12 @@ export class Drone {
             const tl = Math.hypot(tdx, tdz);
             if (tl > 0.5) { gx = tdx / tl; gz = tdz / tl; }
         }
-        // Scan the WHOLE ring here, not just the forward cone.
-        // This verdict gates the extra vertical (high/high2/low) probe layers: when it is false,
-        // distsHigh is filled with the mid-layer distance instead of a real high-layer ray, so
-        // vertical clearing can never see a gap above the obstacle and never triggers.
-        // The cone (coneAll) narrows to yopoAvoidConeDegHi at speed and its sampling is halved by
-        // the stride, so at the higher cruise speeds we reached, obstacles to the side of the
-        // narrowed cone were missed here -> _avoidPrevBlocked stayed false -> the vertical layers
-        // were never really probed -> "vertical clearing stopped triggering".
-        // Scanning the whole ring makes this verdict identical in coverage to dAheadH (which is
-        // what the clearing decision itself tests), so the probe and the decision agree.
+        // State record / diagnostic only now. With the tiering removed the vertical (high/high2/
+        // low) layers are probed EVERY cycle along the forward-most rays, so this verdict no
+        // longer gates them. It used to decide whether those rays were spent at all, which made
+        // vertical clearing depend on a one-cycle-old decision -- a side obstacle inside the old
+        // narrowed / halved cone kept it false and "vertical clearing stopped triggering".
+        // Scanning the whole ring still keeps it identical in coverage to dAheadH.
         let fwdCorridor = R;
         for (let i = 0; i < dirs.length; i++) {
             const d = dists[i];
@@ -2989,7 +2910,7 @@ export class Drone {
         this._avoidCycle++;
 
         let ringAgeMax = 0;
-        for (let i = 0; i < N; i += stride) {
+        for (let i = 0; i < N; i++) {
             if (ringAge[i] > ringAgeMax) ringAgeMax = ringAge[i];
         }
         const probeMs = performance.now() - tStart;

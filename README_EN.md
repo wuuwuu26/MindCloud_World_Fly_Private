@@ -518,6 +518,12 @@ Key parameters (all in the `src/drone.js` constructor):
 |-----------|---------|---------|
 | `yopoAvoidEnabled` | `true` | Master switch of the geometric layer |
 | `yopoAvoidRayCount` | 24 | Number of 360° rays (15° spacing) |
+| `yopoAvoidFastSpeed` | 6.0 | Speed (m/s) at which the high-speed profile starts (wider repulsion / detour / brake action ranges, denser probe throttle) |
+| `yopoAvoidRefSpeed` | 15.0 | Speed (m/s) at which the high-speed profile is fully applied; interpolates the action ranges (rays are **not** downsampled with speed) |
+| `yopoAvoidStrideHi` | 2 | **Retired** (ray tiering removed): was the high-speed stride; all 24 directions are now probed every cycle |
+| `yopoAvoidCoreDeg` | 25 | **Retired** (ray tiering removed): no core / outer cone split any more |
+| `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 55 | **Retired** (ray tiering removed): the whole ring is probed every cycle |
+| `yopoAvoidSliceMax` | 12 | **Retired** (ray tiering removed): no "not probed this cycle" direction any more |
 | `yopoAvoidRange` | 65.0 | Obstacle detection radius (m); ray length is free, lengthening only helps |
 | `yopoAvoidRepRange` | 28.0 | Repulsion / tangential / braking range (m); also `goalClear`'s clear threshold — do **not** raise |
 | `yopoAvoidRepRangeHi` | 60.0 | The same range at `yopoAvoidRefSpeed` (m) |
@@ -553,70 +559,57 @@ Key parameters (all in the `src/drone.js` constructor):
 
 The root cause of "avoidance is too late + depth/command updates are too slow when flying fast" is a
 single choke point: every `pickLocalRay` is a full GPU scene render plus a read-back stall and runs
-synchronously inside the render frame loop. In the old implementation **every direction was picked
-fresh every cycle**, casting 24 horizontal + 9 vertical-layer + 2 straight up/down = 35 `pickLocalRay`
-calls per probe; a single probe could take tens to over a hundred ms. That both staled the avoidance
-data and collapsed the frame rate, which in turn slowed panorama capture, DA360 depth and command
-replanning. The fix splits the rays into **freshness tiers** (see the freshness-tier comment in
-`_computeAvoidProbe`):
+synchronously inside the render frame loop. To cut the pick count the rays used to be split into
+**freshness tiers** (the core cone picked with `forceFresh`, everything else served from the
+`pickLocalRay` cache: 0.5 m origin quantisation + direction bucket + 150 ms TTL) and into
+core / cone / periphery groups with high-speed stride downsampling and round-robin periphery slices.
 
-- **fresh (`forceFresh=true`, skips the `pickLocalRay` direction-bucket cache, a real GPU pick every
-  time)**:
-  - The core forward sector (`yopoAvoidCoreDeg` ±25°): braking-critical. At speed the drone moves
-    several metres within the cache TTL, so a cached distance here would compute the braking distance
-    wrong and hit the wall.
-  - The straight up / down safety rays: ceiling / floor safety cannot tolerate a stale value.
-  - A fixed **5 rays per cycle** (core 3 + up/down 2).
-- **cached (`forceFresh=false`, served from the `pickLocalRay` cache)**: the wider forward cone, the
-  round-robin periphery slices (`yopoAvoidSliceMax` per cycle) and the vertical over/under layers.
-  The cache key is a 0.5 m origin quantisation + direction bucket + 150 ms TTL; a **hit costs zero
-  GPU picks**, and only a miss falls through to a real pick. These feed repulsion / tangential detour
-  / vertical clearing, which all work at metre-scale standoffs, so one probe cycle of lag is fine; and
-  staleness is bounded by the 0.5 m bucket size (a miss always falls through fresh), so braking never
-  triggers later than the all-fresh baseline.
+**Those optimisations are now removed — probe determinism beats frame rate.** Both the cache and the
+tiering let a direction keep a distance measured from a *different position or an older cycle*: at
+cruise speed the drone covers several metres per cycle, so a stale or interpolated distance computes
+the braking distance wrong and shows up as "an obstacle is right there, yet it still plans a big speed
+straight into it" (the avoidance layer is bypassed). Therefore:
+
+- **All directions, every cycle, all fresh**: the 24 horizontal rays (`yopoAvoidRayCount`) are each
+  picked for real **every cycle** (`forceFresh=true`, no cache), with no stride downsampling, no
+  round-robin rotation and no mirrored neighbour filling.
+- **Vertical layers (high/high2/low) emitted every cycle**: 3 layers along each of the 3 forward-most
+  rays (+9 rays), and no longer gated by the previous cycle's "corridor blocked" verdict — that
+  one-cycle-old gate used to stop vertical clearing from ever triggering.
+- **Straight up / down**: 1 fresh ray each per cycle (ceiling / floor safety cannot tolerate a stale
+  value), no longer skipped "every N cycles".
 
 Throttling still lives in `_updateAvoidProbe`: a cycle every **60 ms** at speed (≈16.7 Hz) and every
-**≤400 ms** at rest (≈2.5 Hz). So total GPU picks are far below "rays per cycle × cycle rate": at speed
-typically only 5 fresh picks per cycle (the rest are cache hits); while hovering / creeping the buckets
-persist across cycles and the cone / periphery are served almost entirely from cache, so GPU picks
-nearly vanish.
+**≤400 ms** at rest (≈2.5 Hz); the previous result is reused while the drone has barely moved
+(`moved < 0.4 m` and `|Δy| < 2 m`). That is **cycle-level throttling**, not a ray cache.
 
-- **Core cone `yopoAvoidCoreDeg` (±25°)**: keeps the full 15° resolution and is freshly re-probed
-  every cycle at every speed — this is the sector that decides the braking distance; dropping
-  resolution there would open ~30° gaps (a ~15 m hole at 30 m) right where a miss is least affordable.
-- **Outer cone `yopoAvoidConeDeg` (±55°, still ±55° at speed)**: re-probed every cycle; downsampled
-  at speed by `yopoAvoidStrideHi` (30° spacing), but the cone angle was widened to compensate for the
-  angular gaps.
-- **Periphery `yopoAvoidSliceMax`**: 12 rays polled per cycle, rotating round-robin, refreshing the
-  full ring **within a single cycle** (side buildings seen in time at speed); directions not re-probed
-  this cycle carry their last measured distance, so the repulsion/detour sums always see a complete
-  360° ring.
-- **Vertical layers (high/high2/low)**: only emitted when the previous cycle found the goal corridor
-  blocked (cached), saving 9 rays in the normal case.
+`yopoAvoidStrideHi` / `yopoAvoidCoreDeg` / `yopoAvoidConeDeg` / `ConeDegHi` / `yopoAvoidSliceMax` /
+`yopoAvoidVertEvery` are **all retired** (their assignments are kept only so external / UI overrides
+stay harmless); `_computeAvoidProbe` no longer reads them. `yopoAvoidFastSpeed` / `yopoAvoidRefSpeed`
+are still live and now only interpolate the **action ranges** (`repRange` / `brakeRange` /
+`pushRange`) and the probe throttle — they no longer affect ray sampling.
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
 | `yopoAvoidRange` | 65.0 | Obstacle detection radius (m); ray length is free, so lengthening only helps |
 | `yopoAvoidFastSpeed` | 6.0 | Speed (m/s) at which the high-speed profile starts |
 | `yopoAvoidRefSpeed` | 15.0 | Speed (m/s) at which the high-speed profile is fully applied |
-| `yopoAvoidStrideHi` | 2 | Ring ray stride at speed (2 → 30° spacing) |
-| `yopoAvoidCoreDeg` | 25 | Core cone half-angle (°), always full 15° resolution |
-| `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 55 | Outer cone half-angle (°), low / high speed (widened to 55° at speed to compensate stride sampling) |
-| `yopoAvoidSliceMax` | 12 | Peripheral rays polled per cycle |
+| `yopoAvoidStrideHi` | 2 | **Retired** (ray tiering removed): no stride downsampling any more |
+| `yopoAvoidCoreDeg` | 25 | **Retired** (ray tiering removed): no core cone concept |
+| `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 55 | **Retired** (ray tiering removed): no outer cone concept |
+| `yopoAvoidSliceMax` | 12 | **Retired** (ray tiering removed): no round-robin slices any more |
 | `yopoAvoidRepRangeHi` | 60.0 | Repulsion/detour/brake action range at speed (m) |
 | `yopoAvoidTanGain` | 78.0 | Tangential detour gain (m/s), more decisive than 30 |
 | `yopoAvoidRepGain` | 24.0 | Maximum radial push-away speed (m/s), more decisive than 12 |
 | `yopoAvoidBrakeRangeHi` | 54.0 | Soft-brake start distance at speed (m) |
 | `yopoAvoidBrakeReaction` | 0.80 | Brake reaction time at speed (s): the lag (attitude build-up + control loop) is converted to a reaction distance `spd × reaction` subtracted from the stopping room, so at 15 m/s braking starts ~3 m earlier and still stops inside the standoff |
 
-Measured rays emitted per cycle (GPU-pick peak): about 19 horizontal + 2 straight up/down at low
-speed (5 of them fresh, +9 cached vertical layers when blocked); about 14 horizontal + 2 straight
-up/down at high speed (again 5 fresh); **a cache hit costs no GPU pick**. Only ~5 rays per cycle
-(core 3 + up/down 2) are real GPU picks; the rest are served from the `pickLocalRay` cache.
-`yopoAvoidRepRange` (= `goalClear`'s clear threshold) does **not** scale with speed, so
-widening the high-speed action range does not make "the path is actually clear" get misjudged as
-blocked. Run `__yopoPerf()` in the browser console to read live metrics (`fps` / `probeMsAvg` /
-`probeHz` / `depthHz` / `cmdHz` / `ringAgeMaxMs`).
+Measured rays emitted per cycle: **24 horizontal + 9 vertical-layer + 2 straight up/down = 35 rays,
+all of them fresh GPU picks** (there is no longer a "cache hit costs no pick" part).
+`yopoAvoidRepRange` (= `goalClear`'s clear threshold) does **not** scale with speed, so widening the
+high-speed action range does not make "the path is actually clear" get misjudged as blocked. Run
+`__yopoPerf()` in the browser console to read live metrics (`fps` / `probeMsAvg` / `probeHz` /
+`depthHz` / `cmdHz` / `ringAgeMaxMs`).
 
 ### Start the YOPO Backend
 

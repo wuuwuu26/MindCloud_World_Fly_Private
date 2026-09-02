@@ -512,12 +512,12 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 |------|--------|------|
 | `yopoAvoidEnabled` | `true` | 几何层总开关 |
 | `yopoAvoidRayCount` | 24 | 360° 射线数（15° 间隔） |
-| `yopoAvoidFastSpeed` | 6.0 | 高速档起始速度 (m/s)：低于此用全分辨率射线剖面，高于此进入高速自适应 |
-| `yopoAvoidRefSpeed` | 15.0 | 高速档完全生效速度 (m/s)：排斥/切向/刹车作用距离、锥角、采样 stride 均按此线性插值到上限 |
-| `yopoAvoidStrideHi` | 2 | 高速时环形射线隔几条采样（2 → 30° 间隔，12 条代替 24 条），前向锥仍每周期全刷新 |
-| `yopoAvoidCoreDeg` | 25 | 核心锥半角 (°)：始终保持全分辨率，该扇区决定刹车距离，降分辨率会在最不该漏处开洞 |
-| `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 55 | 外锥半角 (°)：低速 / 高速相同（高速已把 45° 放宽到 55°，以补偿跨步采样留下的角间隙），每周期重探测的前向锥张角 |
-| `yopoAvoidSliceMax` | 12 | 每周期 round-robin 探测的外围射线数，整圈**一个周期内**刷新（高速侧方建筑及时可见）；未在本周期探测的方向沿用上次测得值 |
+| `yopoAvoidFastSpeed` | 6.0 | 高速档起始速度 (m/s)：高于此进入高速自适应（排斥/切向/刹车作用距离加大、探测节流加密） |
+| `yopoAvoidRefSpeed` | 15.0 | 高速档完全生效速度 (m/s)：排斥/切向/刹车的作用距离按此线性插值到上限（射线本身**不**随速度降采样） |
+| `yopoAvoidStrideHi` | 2 | **已停用**（射线分级已移除）：原高速跨步采样，现 24 条方向每周期全探测 |
+| `yopoAvoidCoreDeg` | 25 | **已停用**（射线分级已移除）：原核心锥半角，现无核心/外锥之分 |
+| `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 55 | **已停用**（射线分级已移除）：原外锥半角，整圈每周期全探测 |
+| `yopoAvoidSliceMax` | 12 | **已停用**（射线分级已移除）：原外围 round-robin 切片数，现无"本周期未探测"的方向 |
 | `yopoAvoidRange` | 65.0 | 障碍探测半径 (m)，射线长度免费，加长只增不改 GPU 成本 |
 | `yopoAvoidRepRange` | 28.0 | 排斥/切向/刹车作用距离 (m)；同时是 `goalClear` 的畅通判定阈值，**不要**调大 |
 | `yopoAvoidRepRangeHi` | 60.0 | 高速档（≥ `yopoAvoidRefSpeed`）下上述作用距离 (m) |
@@ -552,43 +552,46 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 #### 高速响应（射线预算与自适应作用距离）
 
 飞得快时"避障来不及 + 深度/指令更新慢"的根因是同一次阻塞：每条 `pickLocalRay` 都是一次完整
-GPU 场景渲染 + 回读同步，且**同步跑在渲染帧循环里**。若**每个方向每轮都真实 pick**（旧实现），单次探测会发 24 条
-水平 + 9 条竖直层 + 2 条正上下共 35 条，耗时可达数十至上百毫秒——既让避障数据一出炉就过期，又把帧率
-拖垮，连带拖慢全景采集、DA360 深度与指令重规划。为此把射线按"新鲜度"分两档（见 `_computeAvoidProbe`
-的 freshness-tier 注释）：
+GPU 场景渲染 + 回读同步，且**同步跑在渲染帧循环里**。为压缩 pick 数量，射线曾按"新鲜度"分两档
+（核心锥 `forceFresh` 真实 pick，其余走 `pickLocalRay` 的 0.5 m 原点量化 + 方向分桶 + 150 ms TTL
+缓存），并按 core / cone / periphery 分级、高速跨步降采样、外围 round-robin 轮换。
 
-- **fresh（`forceFresh=true`，跳过 `pickLocalRay` 的方向分桶缓存，每次真实 GPU pick）**：
-  - 核心前向扇区（`yopoAvoidCoreDeg` ±25°）：制动关键。高速时无人机在缓存 TTL 内移动数米，此处若用缓存会得到过期距离 → 刹车距离算错 → 撞墙。
-  - 正上 / 正下竖直安全射线：天花板 / 地面安全不允许用过期值。
-  - 每轮固定 **5 条**（核心 3 + 上下 2）。
-- **cached（`forceFresh=false`，走 `pickLocalRay` 缓存）**：更宽的前向锥、外圈 round-robin 切片（每轮 `yopoAvoidSliceMax` 条）、竖直 over/under 层。缓存键为 0.5 m 原点量化 + 方向分桶 + 150 ms TTL；**命中则零 GPU pick**，仅在缓存未命中时回落真实 pick。这些分量喂给排斥 / 切向绕行 / 竖直越障，工作尺度是米级 standoff，一个探测周期的延迟是可容忍的；且 staleness 受 0.5 m 桶大小约束（miss 必回落 fresh），刹车不会比"全 fresh"更晚触发。
+**现已移除这些优化——探测确定性优先于帧率**。缓存与分级都会让某个方向保留"另一个位置或更早周期"
+测得的距离：巡航速度下无人机一个周期就移动数米，过期或插值出来的距离会把刹车距离算错，表现为
+"前方明明有障碍，却仍规划出大速度直冲过去"（避障层被绕过）。因此：
 
-节流仍在 `_updateAvoidProbe`：高速每 **60 ms** 一轮（≈16.7 Hz），低速每 **≤400 ms** 一轮（≈2.5 Hz）。
-因此"总 GPU pick"远低于"每轮射线数 × 轮率"：高速典型每轮仅 5 条 fresh pick（其余 cached 命中），
-悬停 / 爬行时桶跨周期持久、锥 / 外圈几乎全走缓存，几乎不再有 GPU pick。
+- **全量、每周期、全 fresh**：24 条水平射线（`yopoAvoidRayCount`）**逐条每周期**真实 GPU pick
+  （`forceFresh=true`，不走缓存），无跨步降采样、无 round-robin 轮换、也不用邻居方向镜像填充。
+- **竖直层（high/high2/low）每周期发射**：沿最朝前的 3 条射线各探 3 层（+9 条），且不再由上一
+  周期"走廊被挡"的判定来门控——那层滞后一拍的门控曾让竖直越障始终不触发。
+- **正上 / 正下**：每周期各 1 条 fresh（天花板 / 地面安全不接受过期值），不再"每 N 周期"跳过。
 
-- **核心锥 `yopoAvoidCoreDeg`（±25°）**：任何速度下都保持 15° 全分辨率、每周期 fresh 必探——刹车距离由这一段决定，降采样会留下 30° 空隙（30 m 处约 15 m 盲区），是撞墙的直接原因。
-- **外锥 `yopoAvoidConeDeg`（±55°，高速仍为 55°）**：每周期重探测；高速时按 `yopoAvoidStrideHi` 隔一条采样（30° 间隔），但锥角已放宽以补偿角间隙。
-- **外围 `yopoAvoidSliceMax`**：每周期 round-robin 探测 12 条，整圈一个周期内刷新（高速侧方建筑及时可见）；未在本周期探测的方向沿用上次测得值，保证排斥 / 绕行求和始终拿到完整 360° 环。
-- **竖直层（high/high2/low）**：仅当上一周期判定"去往目标的走廊被挡"时才发射（cached），省掉常态下 9 条射线。
+节流仍在 `_updateAvoidProbe`：高速每 **60 ms** 一轮（≈16.7 Hz），低速每 **≤400 ms** 一轮（≈2.5 Hz）；
+位置几乎未变（`moved < 0.4 m` 且 `|Δy| < 2 m`）时复用上一轮结果。这是**周期级节流**，不是射线缓存。
+
+`yopoAvoidStrideHi` / `yopoAvoidCoreDeg` / `yopoAvoidConeDeg` / `ConeDegHi` / `yopoAvoidSliceMax` /
+`yopoAvoidVertEvery` **均已停用**（保留赋值只为兼容外部 / UI 覆盖），`_computeAvoidProbe` 不再读取。
+`yopoAvoidFastSpeed` / `yopoAvoidRefSpeed` 仍然生效，仅用于插值**作用距离**（`repRange` /
+`brakeRange` / `pushRange`）与探测节流，不再影响射线采样。
 
 | 参数 | 默认值 | 含义 |
 |------|--------|------|
 | `yopoAvoidRange` | 65.0 | 障碍物探测半径 (m)，射线长度免费，加长只增不改 GPU 成本 |
 | `yopoAvoidFastSpeed` | 6.0 | 高速档起始速度 (m/s) |
 | `yopoAvoidRefSpeed` | 15.0 | 高速档完全生效的速度 (m/s) |
-| `yopoAvoidStrideHi` | 2 | 高速时环形射线隔几条采样（2 → 30° 间隔） |
-| `yopoAvoidCoreDeg` | 25 | 核心锥半角 (°)，始终保持 15° 全分辨率 |
-| `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 55 | 外锥半角 (°)，低速 / 高速（高速已放宽到 55° 补偿跨步采样） |
-| `yopoAvoidSliceMax` | 12 | 每周期 round-robin 探测的外围射线数 |
+| `yopoAvoidStrideHi` | 2 | **已停用**（射线分级已移除）：不再跨步降采样 |
+| `yopoAvoidCoreDeg` | 25 | **已停用**（射线分级已移除）：无核心锥概念 |
+| `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 55 | **已停用**（射线分级已移除）：无外锥概念 |
+| `yopoAvoidSliceMax` | 12 | **已停用**（射线分级已移除）：不再有 round-robin 切片 |
 | `yopoAvoidRepRangeHi` | 60.0 | 高速时排斥/绕行/刹车的作用距离 (m) |
 | `yopoAvoidTanGain` | 78.0 | 切向绕行增益 (m/s)，比 30 更果断 |
 | `yopoAvoidRepGain` | 24.0 | 径向推离最大速度 (m/s)，比 12 更果断 |
 | `yopoAvoidBrakeRangeHi` | 54.0 | 高速时软刹车起始距离 (m) |
 | `yopoAvoidBrakeReaction` | 0.80 | 高速档刹车反应时间 (s)：姿态建立+控制环延迟，折算成反应距离 `spd×反应时间` 从可刹车距离中扣除，使 15 m/s 下提前约 3 m 开始减速、并在 standoff 内稳稳停住 |
 
-实测每轮发射射线数（GPU pick 峰值）：低速约 19 水平 + 2 正上下（其中 fresh 5 条，被挡时竖直层 +9 条 cached）；高速档约 14 水平 + 2 正上下（fresh 同样 5 条）；**cached 命中时不计 GPU pick**。每轮 GPU 实时 pick 仅 ~5 条（核心 3 + 上下 2），其余走 `pickLocalRay` 缓存。`yopoAvoidRepRange`（= `goalClear`
-的畅通阈值）**不随速度变化**，因此加大高速作用距离不会让"路径其实畅通"被误判为被挡。
+实测每轮发射射线数：**24 水平 + 9 竖直层 + 2 正上下 = 35 条，全部为 fresh GPU pick**（不再存在
+"cached 命中不计 pick"的部分）。`yopoAvoidRepRange`（= `goalClear` 的畅通阈值）**不随速度变化**，
+因此加大高速作用距离不会让"路径其实畅通"被误判为被挡。
 
 浏览器控制台执行 `__yopoPerf()` 可查看实测指标（`fps` / `probeMsAvg` / `probeHz` / `depthHz` /
 `cmdHz` / `ringAgeMaxMs`），用于判断瓶颈是否已解除。
