@@ -453,7 +453,7 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   crawl; it yields while the avoidance brake is active and switches off within
   `yopoCruiseMinDist=5` m of the goal, respecting the arrival deceleration.
 - **Vertical-first direct climb/descent (`yopoVertFirst*`)**: when the height error dominates
-  (horizontal distance < 20 m and |Δh| > 5 m and > 1.2× the horizontal offset) it takes over the
+  (horizontal distance < 35 m and |Δh| > 4 m and > 0.9× the horizontal offset) it takes over the
   vertical channel with a P-converging climb/descent and keeps only 30% of the horizontal command,
   removing large circling; it yields back to the network when the clearance straight above / below is
   insufficient.
@@ -474,7 +474,7 @@ Avoidance has two layers with non-overlapping responsibilities:
 
 How the client-side geometric layer works (see `_avoidanceVelocity`):
 
-- **Probing**: 24 horizontal rays are cast from the body (radius 55 m, 15° spacing); the 3 rays best
+- **Probing**: 24 horizontal rays are cast from the body (radius 65 m, 15° spacing); the 3 rays best
   aligned with the forward direction additionally probe **two layers up and one layer down**
   (`high`/`high2`/`low`, 3 layers in total) for the vertical clearing decision; plus straight
   up/straight down vertical rays.
@@ -483,7 +483,7 @@ How the client-side geometric layer works (see `_avoidanceVelocity`):
   obstacle footprint) / `upPush` + `vSafeDown` (ground and descent safety).
 - **Braking (the ray layer takes priority over the network)**: the hard kinematic brake
   `v_safe = √(2·a·(d − standoff))` plans a safe speed (`a` uses the conservative
-  `yopoAvoidBrakeDecel≈7.5 m/s²` to leave margin). When braking fires it (1) **suppresses the YOPO
+  `yopoAvoidBrakeDecel≈6.5 m/s²` to leave margin). When braking fires it (1) **suppresses the YOPO
   network's acceleration feed-forward** (otherwise the network trajectory's acceleration pushes
   straight into the obstacle and cancels the braking deceleration), and (2) injects the strongest
   deceleration feed-forward directly opposite the current velocity (up to
@@ -493,7 +493,7 @@ How the client-side geometric layer works (see `_avoidanceVelocity`):
   "network-commanded direction" and the "drone's actual heading", so the network cannot turn the
   command aside and thereby exclude an obstacle straight ahead and skip braking.
 - **Lateral speed budget**: while detouring, "forward" and "lateral detour" are budgeted separately —
-  lateral takes at most 68% of the budget base and forward keeps at least 10%, so the velocity
+  lateral takes at most 72% of the budget base and forward keeps at least 10%, so the velocity
   vector really tilts tangentially and slides along the obstacle instead of "charging at full speed
   while grazing it". The budget base is `max(yopoCruiseMinSpd, actual commanded speed)`: the network
   itself slows its commands when the depth shows obstacles, so keying the budget to the commanded
@@ -518,28 +518,28 @@ Key parameters (all in the `src/drone.js` constructor):
 |-----------|---------|---------|
 | `yopoAvoidEnabled` | `true` | Master switch of the geometric layer |
 | `yopoAvoidRayCount` | 24 | Number of 360° rays (15° spacing) |
-| `yopoAvoidRange` | 55.0 | Obstacle detection radius (m); ray length is free, lengthening only helps |
+| `yopoAvoidRange` | 65.0 | Obstacle detection radius (m); ray length is free, lengthening only helps |
 | `yopoAvoidRepRange` | 28.0 | Repulsion / tangential / braking range (m); also `goalClear`'s clear threshold — do **not** raise |
-| `yopoAvoidRepRangeHi` | 50.0 | The same range at `yopoAvoidRefSpeed` (m) |
-| `yopoAvoidRepGain` | 20.0 | Maximum radial push-away speed (m/s) |
-| `yopoAvoidTanGain` | 54.0 | Tangential detour gain (m/s); higher = more decisive detour |
-| `yopoTanConeCos` | 0.34 | Only use obstacles within a ±70° cone around the goal bearing as the detour reference, so buildings behind/beside cannot steer it off |
+| `yopoAvoidRepRangeHi` | 60.0 | The same range at `yopoAvoidRefSpeed` (m) |
+| `yopoAvoidRepGain` | 24.0 | Maximum radial push-away speed (m/s) |
+| `yopoAvoidTanGain` | 78.0 | Tangential detour gain (m/s); higher = more decisive detour |
+| `yopoTanConeCos` | 0.17 | Only use obstacles within a ±80° cone around the goal bearing as the detour reference, so buildings behind/beside cannot steer it off |
 | `yopoTanAwayCos` | -0.2 | Drop the remembered tangent when it points >100° away from the goal, allowing a turn back |
-| `yopoTanAwayScale` | 0.5 | Scale applied to a tangent pointing >90° away from the goal, avoiding being pushed off the goal |
+| `yopoTanAwayScale` | 0.65 | Scale applied to a tangent pointing >90° away from the goal, avoiding being pushed off the goal |
 | `yopoAvoidDecel` | 8.5 | Assumed deceleration used by the *vertical* brake threshold (m/s²) |
-| `yopoAvoidBrakeDecel` | 7.5 | *Horizontal* brake planning deceleration (m/s²): deliberately below the reachable value to leave ~2× margin |
+| `yopoAvoidBrakeDecel` | 6.5 | *Horizontal* brake planning deceleration (m/s²): deliberately below the reachable value to leave ~2× margin |
 | `yopoAvoidBrakeAccel` | 17.0 | Max *actual* deceleration the ray layer may command while braking (m/s²): matches the 60° tilt ceiling (`droneMaxAngle=60`). It injects a deceleration feed-forward opposing velocity and **suppresses the network's acceleration feed-forward** |
 | `yopoAvoidBrakeMinFrac` | 0.85 | Deliver at least 0.85×`BrakeAccel` (≈14.5 m/s²) as soon as braking starts |
-| `yopoAvoidBrakeReaction` | 0.32 / 0.48 | Brake reaction time (s): base / high-speed (≥ `yopoAvoidRefSpeed`) |
-| `yopoAvoidBrakeRange` / `BrakeRangeHi` | 24.0 / 40.0 | Progressive soft-brake zone (m): low / high speed (raised together with `yopoAvoidStopH` 6→7.5 so the `(brakeClear − standoff×2)` normalisation does not degenerate) |
+| `yopoAvoidBrakeReaction` | 0.46 / 0.80 | Brake reaction time (s): base / high-speed (≥ `yopoAvoidRefSpeed`) |
+| `yopoAvoidBrakeRange` / `BrakeRangeHi` | 24.0 / 54.0 | Progressive soft-brake zone (m): low / high speed (raised together with `yopoAvoidStopH` 6→7.5 so the `(brakeClear − standoff×2)` normalisation does not degenerate) |
 | `yopoAvoidBrakeFloor` | 0.85 | Soft-brake speed floor ratio (still decelerates when close, without over-compressing the cruise) |
 | `yopoAvoidStopH` | 7.5 | **Horizontal** brake safety standoff (m): drives the forward brake standoff and the repulsion decay — keeps further off walls / buildings (raised from 6.0 per request) |
 | `yopoAvoidStop` | 6.0 | **Vertical UP** safety clearance (m): drives the up-clearance brake (vSafeUp) and the vertical-clearing block distance; deliberately NOT raised with StopH, because a clearance below it would over-restrict climbing / over-head clearance |
-| `yopoAvoidStopDown` | 8.0 | **Down (descent)** safety clearance (m), SEPARATE from `yopoAvoidStop`: drives only `vSafeDown` (the descent kinematic brake against an obstacle straight below). Raised 6.0 → 8.0 so the descent keeps a wider margin above rooftops, ALIGNED with `yopoMinAlt`: when flying over a rooftop with under 8.0 m of clearance below, the drone is both pushed up AND forbidden from descending, holding ~8 m of vertical margin. Being a separate parameter, it does NOT affect the up / over-head clearance nor the horizontal avoidance. |
+| `yopoAvoidStopDown` | 7.0 | **Down (descent)** safety clearance (m), SEPARATE from `yopoAvoidStop`: drives only `vSafeDown` (the descent kinematic brake against an obstacle straight below). Decoupled from `yopoAvoidStop` (lowered 8.0 → 5.0 then raised to 7.0), keeps margin above an obstacle below while descending; does NOT affect the up / over-head clearance nor the horizontal avoidance. |
 | `yopoMinAlt` | 8.0 | Minimum ground/roof clearance (m): below it the upward push engages (2.5 → 3.0 → 4.0 → 8.0). When flying OVER a rooftop the binding clearance is the straight-down ray `vDownDist`: with under 8.0 m to the rooftop below the drone is pushed up, holding ~8 m of vertical margin instead of skimming the rooftop. |
 | `yopoAvoidVClimbScale` | 2.2 | Vertical clearing climb strength |
 | `yopoAvoidVBlock` | 20.0 | Forward clearance below which vertical clearing triggers (m) |
-| `yopoAvoidVGoBase` / `VGoSpan` | 0.60 / 0.42 | Near / far strength of the "leave the footprint" speed (vGo) for an obstacle underfoot |
+| `yopoAvoidVGoBase` / `VGoSpan` | 0.85 / 0.60 | Near / far strength of the "leave the footprint" speed (vGo) for an obstacle underfoot |
 | `yopoAvoidVClear` | 0.38 | Fraction above which an upper layer counts as clear; lower = stronger clearing willingness |
 | `yopoCorridorGuardDist` | 12.0 | Near-goal corridor guard (m): within this distance, a blocked goal-bearing corridor forces braking even if the velocity-direction corridor is clear |
 | `yopoCruiseMinSpd` | 12.0 | Cruise speed floor (m/s): tops up forward speed along the goal bearing when the path is clear and the goal is far; yields while braking |
@@ -596,18 +596,18 @@ nearly vanish.
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
-| `yopoAvoidRange` | 55.0 | Obstacle detection radius (m); ray length is free, so lengthening only helps |
+| `yopoAvoidRange` | 65.0 | Obstacle detection radius (m); ray length is free, so lengthening only helps |
 | `yopoAvoidFastSpeed` | 6.0 | Speed (m/s) at which the high-speed profile starts |
 | `yopoAvoidRefSpeed` | 15.0 | Speed (m/s) at which the high-speed profile is fully applied |
 | `yopoAvoidStrideHi` | 2 | Ring ray stride at speed (2 → 30° spacing) |
 | `yopoAvoidCoreDeg` | 25 | Core cone half-angle (°), always full 15° resolution |
 | `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 55 | Outer cone half-angle (°), low / high speed (widened to 55° at speed to compensate stride sampling) |
 | `yopoAvoidSliceMax` | 12 | Peripheral rays polled per cycle |
-| `yopoAvoidRepRangeHi` | 50.0 | Repulsion/detour/brake action range at speed (m) |
-| `yopoAvoidTanGain` | 54.0 | Tangential detour gain (m/s), more decisive than 30 |
-| `yopoAvoidRepGain` | 20.0 | Maximum radial push-away speed (m/s), more decisive than 12 |
-| `yopoAvoidBrakeRangeHi` | 40.0 | Soft-brake start distance at speed (m) |
-| `yopoAvoidBrakeReaction` | 0.48 | Brake reaction time at speed (s): the lag (attitude build-up + control loop) is converted to a reaction distance `spd × reaction` subtracted from the stopping room, so at 15 m/s braking starts ~3 m earlier and still stops inside the standoff |
+| `yopoAvoidRepRangeHi` | 60.0 | Repulsion/detour/brake action range at speed (m) |
+| `yopoAvoidTanGain` | 78.0 | Tangential detour gain (m/s), more decisive than 30 |
+| `yopoAvoidRepGain` | 24.0 | Maximum radial push-away speed (m/s), more decisive than 12 |
+| `yopoAvoidBrakeRangeHi` | 54.0 | Soft-brake start distance at speed (m) |
+| `yopoAvoidBrakeReaction` | 0.80 | Brake reaction time at speed (s): the lag (attitude build-up + control loop) is converted to a reaction distance `spd × reaction` subtracted from the stopping room, so at 15 m/s braking starts ~3 m earlier and still stops inside the standoff |
 
 Measured rays emitted per cycle (GPU-pick peak): about 19 horizontal + 2 straight up/down at low
 speed (5 of them fresh, +9 cached vertical layers when blocked); about 14 horizontal + 2 straight
