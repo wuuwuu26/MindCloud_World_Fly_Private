@@ -424,7 +424,7 @@ export class Drone {
         // the drone holds ~yopoAvoidSideStandoff off building faces (keep-larger-side-distance
         // request) and is pushed off from further out (push-early request), without making the
         // "way ahead is clear" verdict stricter.
-        this.yopoAvoidSideStandoff = 10.0;  // Desired side clearance from walls / building faces (m)
+        this.yopoAvoidSideStandoff = 13.0;  // Desired side clearance from walls / building faces (m). RAISED 10.0 -> 13.0 (keep-further-away request): the keep-out repulsion now runs at FULL strength out to 13 m instead of 10 m, so the drone is pushed off building faces from further out and holds a wider lateral margin
         this.yopoAvoidPushRange = 36.0;     // Side-push detection range (m) at low speed
         this.yopoAvoidPushRangeHi = 70.0;   // Side-push detection range (m) at yopoAvoidRefSpeed: RAISED 56 -> 70
         this.yopoAvoidGain = 13.0;    // RAISED 10 -> 13. Generic avoidance gain base: now used mainly for vertical
@@ -614,16 +614,17 @@ export class Drone {
                                       // (safety over cruise speed). Do NOT widen yopoAvoidRepRange to
                                       // compensate: it doubles as goalClear's clearThresh, so raising it
                                       // makes "corridor is clear" too strict and detours on open paths.
-        // HORIZONTAL brake standoff (m), split from yopoAvoidStop. RAISED 6.0 -> 7.5
-        // (keep-further-away request): the horizontal kinematic brake now plans its stop 7.5 m off
-        // the obstacle instead of 6.0 m, so the drone holds a wider margin from walls / buildings.
+        // HORIZONTAL brake standoff (m), split from yopoAvoidStop. RAISED 6.0 -> 7.5 -> 9.0
+        // (keep-further-away request): the horizontal kinematic brake now plans its stop 9.0 m off
+        // the obstacle instead of 7.5 m, so the drone holds a wider margin from walls / buildings.
         // The VERTICAL UP standoff (vSafeUp above) deliberately KEEPS yopoAvoidStop = 6.0: raising it
         // would over-restrict climbing / over-head clearance. The DESCENT (below) standoff is the
         // separate yopoAvoidStopDown just below, which IS raised so "below" avoidance holds further off.
         // NOTE: the soft-brake zone (yopoAvoidBrakeRange) must stay comfortably above 2x this
         // value, otherwise the (brakeClear - standoff*2) normalisation degenerates and the
-        // progressive soft brake stops shaping the approach at all (see BrakeRange below).
-        this.yopoAvoidStopH = 7.5;
+        // progressive soft brake stops shaping the approach at all -- BrakeRange was raised to
+        // 30.0 in the same step for exactly this reason (see BrakeRange below).
+        this.yopoAvoidStopH = 9.0;
         // VERTICAL DOWN standoff (m), SEPARATE from the shared yopoAvoidStop so that "keep further from
         // obstacles below" raises only the DESCENT safety margin and does NOT also forbid climbing /
         // over-head clearance (vSafeUp / vGo still use yopoAvoidStop = 6.0).
@@ -689,11 +690,11 @@ export class Drone {
         // permanently squeezed to 30%-70% of the commanded speed (the main cause of the 1-4 m/s the
         // user measured). After decoupling, it only engages within 12 m and never drops below 0.55;
         // close range is handled by the kinematic brake, which guarantees a real stop.
-        this.yopoAvoidBrakeRange = 24.0;  // Soft-brake deceleration zone (m). RAISED 18 -> 24 together
-                                          // with yopoAvoidStopH 6 -> 7.5: the soft zone is normalised as
+        this.yopoAvoidBrakeRange = 30.0;  // Soft-brake deceleration zone (m). RAISED 18 -> 24 -> 30 together
+                                          // with yopoAvoidStopH 6 -> 7.5 -> 9.0: the soft zone is normalised as
                                           // (brakeClear - standoff*2) / (range - standoff*2), so with the
-                                          // wider standoff the old 18 m left only a 6 m band and the
-                                          // "ease off as you get closer" shaping nearly vanished.
+                                          // wider standoff the old 18 m, and then 24 m, left too narrow a
+                                          // band and the "ease off as you get closer" shaping nearly vanished.
         this.yopoAvoidBrakeRangeHi = 54.0; // Soft-brake zone at yopoAvoidRefSpeed (m): RAISED 40 -> 54 so the drone starts easing off earlier at speed
                                           // needs to start easing off much earlier. Safe to widen because
                                           // the floor (0.85) caps how much it can ever slow down on its

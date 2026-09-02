@@ -531,9 +531,10 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 | `yopoAvoidBrakeAccel` | 17.0 | **刹车时允许的最大实际减速度 (m/s²)**：对应 60° 倾转上限（`droneMaxAngle=60`），直接注入反方向减速前馈并**压制网络加速度前馈** |
 | `yopoAvoidBrakeMinFrac` | 0.85 | 进入刹车即至少交付 0.85×`BrakeAccel`（≈14.5 m/s²），一踩就猛 |
 | `yopoAvoidBrakeReaction` | 0.46 / 0.80 | 刹车反应时间 (s)：基础 / 高速档（≥ `yopoAvoidRefSpeed`） |
-| `yopoAvoidBrakeRange` / `BrakeRangeHi` | 24.0 / 54.0 | 渐进软刹车区间 (m)：低速 / 高速（随 `yopoAvoidStopH` 6→7.5 同步放大，保证 `(brakeClear − standoff×2)` 归一化不退化） |
+| `yopoAvoidBrakeRange` / `BrakeRangeHi` | 30.0 / 54.0 | 渐进软刹车区间 (m)：低速 / 高速（随 `yopoAvoidStopH` 6→7.5→9.0 同步放大到 30.0，保证 `(brakeClear − standoff×2)` 归一化不退化） |
 | `yopoAvoidBrakeFloor` | 0.85 | 软刹车速度下限比例（接近时仍减速但不过度压缩巡航） |
-| `yopoAvoidStopH` | 7.5 | **水平**刹车安全净距 (m)：驱动前进方向刹车 standoff 与 rep 衰减，**离墙/楼更远**（按要求从 6.0 上调） |
+| `yopoAvoidSideStandoff` | 13.0 | **侧向**期望净距 (m)：与建筑面/墙体保持的距离，keep-out 排斥在 13 m 内满力推离（按要求从 10.0 上调） |
+| `yopoAvoidStopH` | 9.0 | **水平**刹车安全净距 (m)：驱动前进方向刹车 standoff 与 rep 衰减，**离墙/楼更远**（按要求 6.0 → 7.5 → 9.0） |
 | `yopoAvoidStop` | 6.0 | 安全净距 (m)：驱动**上/下**净空刹车（vSafeUp / vSafeDown）与竖直越障封锁距离；刻意不随 StopH 上调，否则净空小于它时完全禁止上升/下降，低目标/近地无法到达 |
 | `yopoAvoidStopDown` | 7.0 | **下方（下降）**独立安全净距 (m)：仅驱动 `vSafeDown`（下降时对脚下障碍的运动学刹车）。与 `yopoAvoidStop` 解耦（曾由 8.0 下调到 5.0 再回调到 7.0），下降时在脚下障碍上方保持余量，不影响上升/头顶净空 |
 | `yopoMinAlt` | 8.0 | 最小离地/离顶净空 (m)：低于它触发向上推离（2.5 → 3.0 → 4.0 → 8.0）。飞过楼顶时绑定净空是**正下射线 `vDownDist`**：脚下楼顶净空 < 8 m 即被推升，保持 ~8 m 垂直余量、不再贴着楼顶飞；下方余量更大 |
