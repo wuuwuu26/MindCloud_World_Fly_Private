@@ -2786,15 +2786,31 @@ export class Drone {
         // distance. The old "fan bundle against recess misses" was removed:
         // only 1 centre ray per direction, simplifying the probe (at the cost of missing
         // recessed windows / recess inner walls).
-        // forceFresh=true: skips the pickLocalRay cache and does a real pick every time. At high
-        // speed the drone moves several metres within the cache TTL, so a cached hit returns a
-        // stale distance -> the braking distance is computed wrong -> wall impact; avoidance
-        // must use the current true distance. Throttling happens in _updateAvoidProbe.
+        // Ray freshness tiers -- every pickFromRay is a full GPU scene render plus a read-back
+        // stall executed inside the render loop, so freshness is granted only where a stale
+        // distance actually hurts:
+        //   fresh (forceFresh=true, skips the pickLocalRay cache):
+        //     - the core forward sector: braking-critical. At high speed the drone moves several
+        //       metres within the cache TTL, so a cached distance here computes the braking
+        //       distance wrong -> wall impact.
+        //     - the straight up / down rays: ceiling / floor safety.
+        //   cached (forceFresh=false: 0.5 m origin quantisation + direction bucket + 150 ms TTL):
+        //     - the wider forward cone, the round-robin periphery slices and the vertical
+        //       over/under layers. They feed repulsion / tangential detour / vertical clearing,
+        //       which all work with metre-scale standoffs, and over/under clearing explicitly
+        //       tolerates one probe cycle of lag (see the altitude-probing comment below).
+        //     - the staleness of a served distance is bounded by the 0.5 m bucket size (a miss
+        //       falls through to a real pick and is fresh by definition), so the brake never
+        //       reacts later than before.
+        //     - while hovering / creeping the buckets persist across cycles and the cone /
+        //       periphery picks are served entirely from the cache (most of the cycle's GPU
+        //       picks eliminated); at speed the buckets turn over and those rays fall through
+        //       to real picks, which is the correct freshness trade-off.
+        // Throttling happens in _updateAvoidProbe.
         let rayCount = 0;
-        const pickF = (o, d, dist) => w.pickLocalRay(o, d, dist, true);
-        const rayDist = (dir, yLevel) => {
+        const rayDist = (dir, yLevel, fresh) => {
             rayCount++;
-            const hit = pickF({ x: this.x, y: yLevel, z: this.z }, dir, R);
+            const hit = w.pickLocalRay({ x: this.x, y: yLevel, z: this.z }, dir, R, fresh === true);
             return (hit && Number.isFinite(hit.distance) && hit.distance > 0.04) ? hit.distance : R;
         };
         // Forward direction (horizontal): velocity takes priority, otherwise the body forward -Z
@@ -2896,12 +2912,17 @@ export class Drone {
                 continue;
             }
             if (probeSet.has(i)) {
-                ring[i] = dists[i] = rayDist(dirs[i], this.y);
+                // Core sector rays are braking-critical -> fresh pick; cone / periphery rays feed
+                // the repulsion / detour layer -> the quantised pick cache is accurate enough and
+                // keeps them off the GPU pick path (see the freshness-tier comment above).
+                ring[i] = dists[i] = rayDist(dirs[i], this.y, coreSet.has(i));
                 ringAge[i] = 0;
                 if (probeAux && vProbeIdx.indexOf(i) >= 0) {
-                    distsHigh[i] = rayDist(dirs[i], yHigh);
-                    distsHigh2[i] = rayDist(dirs[i], yHigh2);
-                    distsLow[i] = lowOk ? rayDist(dirs[i], yLow) : dists[i];
+                    // Vertical over/under layers: one cycle of lag is fine for a manoeuvre that
+                    // takes seconds -> cached picks.
+                    distsHigh[i] = rayDist(dirs[i], yHigh, false);
+                    distsHigh2[i] = rayDist(dirs[i], yHigh2, false);
+                    distsLow[i] = lowOk ? rayDist(dirs[i], yLow, false) : dists[i];
                 } else {
                     distsHigh[i] = dists[i];
                     distsHigh2[i] = dists[i];
@@ -2925,9 +2946,10 @@ export class Drone {
         const vertEvery = Math.max(1, Math.round(this.yopoAvoidVertEvery));
         if (this.yopoAvoidVertRay && (this._avoidCycle % vertEvery === 0)) {
             rayCount += 2;
-            const hUp = pickF({ x: this.x, y: this.y + 0.5, z: this.z }, { x: 0, y: 1, z: 0 }, this.yopoAvoidVertRange);
+            // Ceiling / floor safety rays stay fresh (a stale ceiling distance is a real hazard).
+            const hUp = w.pickLocalRay({ x: this.x, y: this.y + 0.5, z: this.z }, { x: 0, y: 1, z: 0 }, this.yopoAvoidVertRange, true);
             vUpDist = (hUp && Number.isFinite(hUp.distance) && hUp.distance > 0.04) ? hUp.distance : R;
-            const hDn = pickF({ x: this.x, y: this.y - 0.5, z: this.z }, { x: 0, y: -1, z: 0 }, this.yopoAvoidVertRange);
+            const hDn = w.pickLocalRay({ x: this.x, y: this.y - 0.5, z: this.z }, { x: 0, y: -1, z: 0 }, this.yopoAvoidVertRange, true);
             vDownDist = (hDn && Number.isFinite(hDn.distance) && hDn.distance > 0.04) ? hDn.distance : R;
         } else if (prevProbe && Number.isFinite(prevProbe.vUpDist)) {
             vUpDist = prevProbe.vUpDist;

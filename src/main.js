@@ -717,6 +717,7 @@ let _yopoMiniInitPromise = null;
 let _yopoMiniRange = null; // Smoothed lookAt distance (zoom)
 let _yopoMiniHeading = null; // Smoothed minimap orientation (rad): heading-up map, the drone's forward direction always points up
 let _yopoMiniStop = false; // Disabled after a minimap update error, so it does not throw every frame and drag down the main loop
+let _yopoMiniLastDraw = 0; // Last minimap redraw timestamp (ms): throttles the second 3D Tiles world to ~15 Hz
 
 async function initYOPOMinimapViewer() {
     // Skip while window.world is not ready / already created (root cause: !window.world used to
@@ -733,13 +734,26 @@ async function initYOPOMinimapViewer() {
     // identical to the main view (placement mode), with the globe hidden, Google 3D Tiles
     // loaded, setOrigin / camera etc. handled correctly internally, so the default globe never
     // shows up.
+    // The minimap is a SECOND full 3D Tiles world. Without the two render options below it
+    // renders continuously at 60 fps at the browser device pixel ratio and competes with the
+    // main view for the GPU -- the single biggest frame-rate sink in the app:
+    //   requestRenderMode: true -> renders only on explicit requestRender() (the update loop
+    //     throttles itself to ~15 Hz and asks for one frame per update);
+    //   useBrowserRecommendedResolution: false -> drop the DPR multiplier (on a 2x display that
+    //     alone renders 4x fewer pixels; a top-down dot map does not benefit from DPR).
     const mini = new CesiumWorld('yopo-minimap', {
         token: window.world.token,
         assetId: window.world.assetId,
+        requestRenderMode: true,
+        useBrowserRecommendedResolution: false,
     });
     await mini.init();
     yopoMinimapWorld = mini;
     yopoMinimapViewer = mini.viewer;
+    // Half-resolution is plenty for a top-down dot map; the main view keeps its own scale
+    // (flightResolutionScale) managed by setFlightPerformanceMode, which is never called on
+    // this instance.
+    if ('resolutionScale' in yopoMinimapViewer) yopoMinimapViewer.resolutionScale = 0.5;
     const scene = yopoMinimapViewer.scene;
     scene.screenSpaceCameraController.enableInputs = false; // Minimap is read-only, no user interaction
     // Hide the main-view widgets (the minimap does not need them): geocoder / home button /
@@ -828,6 +842,12 @@ function updateYOPOMinimap() {
         }
         return;
     }
+    // Throttle: a top-down dot map does not need 60 fps. ~15 Hz keeps it perfectly readable
+    // while cutting this second 3D Tiles world's GPU share (and the DOM text churn below) to
+    // roughly a quarter of the per-frame cost.
+    const nowMs = performance.now();
+    if (nowMs - _yopoMiniLastDraw < 66) return;
+    _yopoMiniLastDraw = nowMs;
     const Cesium = window.world.Cesium;
     const W = window.world;
     const target = _getYOPOMinimapTarget();
@@ -917,6 +937,10 @@ function updateYOPOMinimap() {
                 roll: 0,
             },
         });
+        // requestRenderMode: the minimap scene does not render itself. Entity positions and the
+        // camera were just updated -> push exactly one frame now (throttled by the 15 Hz gate
+        // above, so this is at most one render per ~66 ms instead of one per rAF).
+        yopoMinimapViewer.scene.requestRender();
     } catch (e) {
         // An error in any minimap step (a Cesium call) must not drag down the main loop /
         // flight; disable the minimap and log the real error to the console

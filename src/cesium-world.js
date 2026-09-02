@@ -444,6 +444,14 @@ export class CesiumWorld {
         this.containerId = containerId;
         this.token = options.token || urlString('ionToken', DEFAULT_ION_TOKEN);
         this.assetId = Number(options.assetId || urlNumber('assetId', DEFAULT_ASSET_ID));
+        // Per-instance render-loop options. The main flight view keeps Cesium's continuous
+        // 60 fps loop (requestRenderMode: false). Auxiliary viewers (the top-down minimap) opt
+        // into requestRenderMode: true + CSS-pixel resolution so a second full 3D Tiles world
+        // does not compete with the main view for the GPU every frame -- see
+        // initYOPOMinimapViewer in main.js. The panorama capture viewer hardcodes the same
+        // combination in its own Viewer options.
+        this.viewerRequestRenderMode = options.requestRenderMode === true;
+        this.viewerUseBrowserResolution = options.useBrowserRecommendedResolution !== false;
         this.initialView = {
             longitude: urlNumber('lon', options.longitude ?? DEFAULT_VIEW.longitude),
             latitude: urlNumber('lat', options.latitude ?? DEFAULT_VIEW.latitude),
@@ -555,9 +563,9 @@ export class CesiumWorld {
             creditContainer: document.createElement('div'),
             globe: false,
             skyAtmosphere: new Cesium.SkyAtmosphere(),
-            requestRenderMode: false,
+            requestRenderMode: this.viewerRequestRenderMode,
             targetFrameRate: 60,
-            useBrowserRecommendedResolution: true,
+            useBrowserRecommendedResolution: this.viewerUseBrowserResolution,
             orderIndependentTranslucency: false,
             contextOptions: {
                 webgl: {
