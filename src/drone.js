@@ -1726,6 +1726,11 @@ export class Drone {
             velTargetY = holdAltKp * gErrY - holdKd * this.vy;
             const vh = Math.sqrt(velTargetX*velTargetX + velTargetZ*velTargetZ);
             if (vh > holdMaxV) { const s = holdMaxV / vh; velTargetX *= s; velTargetZ *= s; }
+            // Vertical (descent) speed cap: prevents a fast dive that overshoots the goal or passes
+            // through a side building while descending onto the goal. The ray layer's vSafeDown below
+            // tightens this further to the measured clearance below.
+            const av = Math.abs(velTargetY);
+            if (av > holdMaxV) velTargetY *= holdMaxV / av;
         } else if (stickActive) {
             // Stick override: use manual control.
             // Smooth hand-over on release: ramp the velocity target from the speed AT THE MOMENT
@@ -1904,14 +1909,14 @@ export class Drone {
                 // handling (repulsion suppressed, tangential steer gated by a hysteresis, an
                 // end-game stand-down) existed only to protect the old 12 m takeover PD from
                 // being fought by the ray layer, and that PD is gone now.
-                if (this.yopoArrived) {
-                    // Arrived: keep only the safety floor -- brake (speed scaling) and the
-                    // vertical clearance limits. No directional thrust (no rep, no tangential
-                    // detour), because any of those would fight the position hold on the goal
-                    // and turn into sway.
-                    velTargetX = velTargetX * avoid.brake;
-                    velTargetZ = velTargetZ * avoid.brake;
-                } else {
+                // Arrived: still apply the FULL horizontal avoidance (rep + tan + vGo + brake), not
+                // just the brake scaling. A takeover that relies on the brake alone lets the PD slide
+                // the drone straight through a side building while converging / holding on the goal
+                // (the "passes through a side building on descent" report). The directional thrust now
+                // keeps it off the wall. Use the already speed-capped PD velocity as the forward
+                // budget so the detour stays gentle and the drone does not overshoot the goal.
+                const arrivedGentle = this.yopoArrived;
+                {
                     // Core of horizontal obstacle avoidance: budget "forward progress" and
                     // "lateral detour (rep+tan)" separately.
                     // Previously velTarget = forward*brake + rep + tan was then clamped to maxSpd
@@ -1944,8 +1949,9 @@ export class Drone {
                     // obstacles, so during a real detour the budget collapsed exactly when it was
                     // needed (commanded 8 m/s -> only ~5.4 m/s of steering authority, i.e. the
                     // "detour is not decisive" report). The cruise floor keeps the detour strong.
-                    const budgetBase = Math.max(this.yopoCruiseMinSpd,
-                                                Math.hypot(velTargetX, velTargetZ));
+                    const budgetBase = arrivedGentle
+                        ? Math.max(0.1, Math.hypot(velTargetX, velTargetZ))
+                        : Math.max(this.yopoCruiseMinSpd, Math.hypot(velTargetX, velTargetZ));
                     const steerCap = budgetBase * 0.72;
                     let steerMag = Math.hypot(steerX, steerZ);
                     if (steerMag > steerCap) {

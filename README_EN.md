@@ -431,9 +431,13 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   - **Ray avoidance is now consistent for the whole flight**: the whole family of takeover-zone
     exceptions (`repScale`, `steerFade`, the steering hysteresis, the end-game stand-down) is gone.
     While still navigating (not arrived) the ray layer behaves exactly as in cruise — repulsion,
-    tangential detour, braking and vertical clearing all active. **After arrival** only the safety
-    floor remains: `brake` speed scaling + vertical clearance (`vSafeDown`/`vSafeUp`) + `crashFloor`
-    + collision handling; no directional thrust is added, so it cannot fight the position hold.
+    tangential detour, braking and vertical clearing all active. **After arrival** the FULL horizontal
+    avoidance (repulsion + tangential detour + vGo + braking) is still applied, but its lateral budget
+    is tied to the already speed-capped PD velocity (`budgetBase = |velTarget|`, not the cruise floor)
+    so it neither over-pushes when clear nor overshoots the goal. Vertical safety is kept as a floor:
+    `vSafeDown`/`vSafeUp` clearance limits + `crashFloor` + collision handling, and the PD's own
+    vertical speed is also capped at `holdMaxV = 2.0` to stop a fast dive from passing through a side
+    building while descending onto the goal.
   - **Velocity-loop D term** returns to the reference form: `velKd = useAccFeedforward ? 0 : sfVelKd`
     (off during cruise to avoid amplifying network feed-forward jumps; on after arrival where
     `useAccFeedforward = false` and `velKd = sfVelKd = 1.0` provides damping).

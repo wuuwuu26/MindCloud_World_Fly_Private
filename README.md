@@ -460,7 +460,7 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
   if (vh > holdMaxV) velTarget *= holdMaxV / vh;      // 水平速度上限 2 m/s
   ```
   保留 `D` 项是因为纯 P 会在到达时仍带速度 → 过冲 → 拉回 → 晃动。
-  - **射线避障全程一致生效**：取消了原来"接管区内抑制 `rep`/`tan`"的一整套特例（含 `repScale`、`steerFade`、转向迟滞、末段 stand-down）。导航阶段（未到达）射线层与巡航完全相同——排斥、切向绕行、刹车、垂直越障全开；**到达后**只保留安全底线：`brake` 速度缩放 + 垂直净空（`vSafeDown`/`vSafeUp`）+ `crashFloor` + 碰撞处理，不再施加任何方向性推力，以免与"悬停锁定"相互拉扯。
+  - **射线避障全程一致生效**：取消了原来"接管区内抑制 `rep`/`tan`"的一整套特例（含 `repScale`、`steerFade`、转向迟滞、末段 stand-down）。导航阶段（未到达）射线层与巡航完全相同——排斥、切向绕行、刹车、垂直越障全开；**到达后**同样施加完整的水平避障（排斥 + 切向绕行 + vGo + 刹车），只是把横向预算压到已限速的 PD 速度上（`budgetBase = |velTarget|`，不取巡航地板），避免干净时多余推离、也避免飞过头；垂直方向仍保留安全底线：`vSafeDown`/`vSafeUp` 净空限制 + `crashFloor` + 碰撞处理，且 PD 自身垂直速度也被限到 `holdMaxV = 2.0`，防止下降冲太快穿过侧边建筑。
   - **速度环 D 项**回到参考实现：`velKd = useAccFeedforward ? 0 : sfVelKd`（巡航关 D 以避免放大网络前馈跳变；到达后走位置环、`useAccFeedforward=false`，`velKd = sfVelKd = 1.0` 提供阻尼）。
   - **已删除的旧接管参数**：`yopoFinalApproachDist`、`yopoFinalApproachVMax`、`yopoGoalRepSuppressDist`、`yopoTakeoverSlew`、`yopoTakeoverSteerEndDist`、`yopoArriveDeadbandM`、`yopoArriveVertH`、`yopoArriveAltKp`/`AltVMax`（注释中留有说明）。
   - **贴墙目标不再被钉在半路**（仍保留）：目标贴墙时前向射线测得 `dAhead ≈ distGoalH`，`yopoAvoidGoalGateMargin = 1.0` 让目标 1 m 容差内的威胁按 beyond-goal 处理（`yopoAvoidGoalBrakeFloor = 0.40` 下限覆盖 `brake = 0` 情形，closing gate 第三条放行），避免被钉在数米外。
