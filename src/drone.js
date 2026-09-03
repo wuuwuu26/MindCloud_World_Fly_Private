@@ -245,16 +245,15 @@ export class Drone {
         // overshoot in attitude and sway at the goal. A tighter cap = fewer steps get through =
         // a calmer, quicker settle.
         // (removed) yopoTakeoverSlew was the velocity-target slew cap of the old takeover zone.
-        this.yopoArriveHoldM = 2.0;        // Client-side arrival lock distance threshold (m). DISTANCE-ONLY
-                                          // LOWERED 4.0 -> 2.0 per request: the drone should keep CRUISING
-                                          // (same behaviour as inside 12 m) through the 2-4 m band instead of
-                                          // snapping to the hover-hold the moment it crosses 4 m; only inside
-                                          // < 2 m does it hand over to the position hold (matching the server's
-                                          // ARRIVE_THRESHOLD = 2 m). Trade-off: the old 4 m backstop masked the
-                                          // "always one step short" network-degeneration wobble (goal_length =
-                                          // 2*radio_range = 10 m, its goal observation is squeezed); at 2 m the
-                                          // server's 2 m arrival verdict (cmd.arrived) is the real lock, so the
-                                          // client only pre-locks in the last 2 m now.
+        this.yopoArriveHoldM = 6.0;        // Client-side arrival lock distance threshold (m). DISTANCE-ONLY
+                                          // RAISED 2.0 -> 6.0 per request ("接管"): switch to the position-hold
+                                          // takeover earlier, at 6 m, so the drone stops cruising / driving
+                                          // straight at the goal before it closes in enough to graze a building
+                                          // with its wing during the final descent. The server's cmd.arrived
+                                          // verdict is still the real lock that ends the mission; 6 m is only an
+                                          // earlier client-side pre-lock. The internal arrival-hold PD still
+                                          // converges onto the exact goal point, so the drone keeps approaching
+                                          // even after the pre-lock latches.
         // (removed) yopoArriveHoldV was the speed gate of the arrival lock.
         // (removed) yopoArriveTakeoverM / yopoArriveStallSec / yopoArriveProgressEps / _arriveStallT /
         // _arriveBestD were the stall-based takeover backstop, dropped per request -- the
@@ -633,6 +632,14 @@ export class Drone {
         // progressive soft brake stops shaping the approach at all -- BrakeRange was raised to
         // 30.0 in the same step for exactly this reason (see BrakeRange below).
         this.yopoAvoidStopH = 9.0;
+        // WINGSPAN ENVELOPE (m): extra lateral margin stacked on top of yopoAvoidStopH
+        // WHILE DESCENDING. goalClear only certifies the narrow ±pathHalfWidth goal corridor, so a
+        // building sitting just outside that band would still be clipped by the wing as the drone
+        // drops straight down through a "clear" release. While descending we therefore keep the
+        // lateral repulsion on for any obstacle inside (yopoAvoidStopH + yopoWingMargin) that is NOT
+        // the goal's own wall (beyond the goal, so it cannot block arrival) -- the wing never grazes
+        // a side building during the descent. 0 would fall back to the bare standoff.
+        this.yopoWingMargin = 3.0;
         // VERTICAL DOWN standoff (m), SEPARATE from the shared yopoAvoidStop so that "keep further from
         // obstacles below" raises only the DESCENT safety margin and does NOT also forbid climbing /
         // over-head clearance (vSafeUp / vGo still use yopoAvoidStop = 6.0).
@@ -3760,8 +3767,20 @@ export class Drone {
         // (cone ~+-80 deg) captures it, so when dAhead is short we KEEP the distance-based brake /
         // rep / tan instead of charging in at full speed. (Fixes "obstacle ahead but it still plans
         // that direction's speed".)
+        // Wingspan guard: while the drone is DESCENDING, do not fully release the lateral
+        // repulsion even if the narrow goal corridor is "clear". goalClear only looks at the
+        // ±pathHalfWidth band along the goal bearing, so a building just outside it would be struck
+        // by the wing as the drone drops straight down. We keep the repulsion unless the only near
+        // obstacle is the goal's own wall (beyond the goal, so it is not blocking arrival). This
+        // only affects descent; level / climbing flight keeps the original release.
+        const descendingNow = velTargetY < -0.2 && vRep === 0;
+        let wingClear = true;
+        if (descendingNow && dMin < this.yopoAvoidStopH + this.yopoWingMargin && distGoalH > 0.5) {
+            const projN = dMinDirX * gx + dMinDirZ * gz;   // >0: nearest obstacle lies toward the goal
+            if (projN > 0 && dMin * projN <= distGoalH) wingClear = false;
+        }
         if (goalClear && (des > 0.3 || this.yopoNavTarget) &&
-            dAhead > standoff + reactionDist + 2.0) {
+            dAhead > standoff + reactionDist + 2.0 && wingClear) {
             repX = 0; repZ = 0;          // Horizontal repulsion fully zeroed (no 15% residual push left)
             tanX = 0; tanZ = 0;          // Tangential removed entirely (avoids detouring back to the start)
             brake = 1.0;                 // Clear exit means full speed, not slowed by vertical threats
