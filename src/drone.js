@@ -240,13 +240,16 @@ export class Drone {
         // overshoot in attitude and sway at the goal. A tighter cap = fewer steps get through =
         // a calmer, quicker settle.
         // (removed) yopoTakeoverSlew was the velocity-target slew cap of the old takeover zone.
-        this.yopoArriveHoldM = 4.0;        // Client-side arrival lock distance threshold (m). DISTANCE-ONLY
-                                          // per request: the speed gate (yopoArriveHoldV) was removed, because
-                                          // inside the region where the network degenerates (goal_length =
-                                          // 2*radio_range = 10 m) the drone can dither a few metres short and
-                                          // never slow below it -- so it never handed over to the hold PD and
-                                          // never arrived. Latching on distance alone makes the handover
-                                          // unconditional: < 4 m -> arrived -> the hold PD converges the rest.
+        this.yopoArriveHoldM = 2.0;        // Client-side arrival lock distance threshold (m). DISTANCE-ONLY
+                                          // LOWERED 4.0 -> 2.0 per request: the drone should keep CRUISING
+                                          // (same behaviour as inside 12 m) through the 2-4 m band instead of
+                                          // snapping to the hover-hold the moment it crosses 4 m; only inside
+                                          // < 2 m does it hand over to the position hold (matching the server's
+                                          // ARRIVE_THRESHOLD = 2 m). Trade-off: the old 4 m backstop masked the
+                                          // "always one step short" network-degeneration wobble (goal_length =
+                                          // 2*radio_range = 10 m, its goal observation is squeezed); at 2 m the
+                                          // server's 2 m arrival verdict (cmd.arrived) is the real lock, so the
+                                          // client only pre-locks in the last 2 m now.
         // (removed) yopoArriveHoldV was the speed gate of the arrival lock.
         // (removed) yopoArriveTakeoverM / yopoArriveStallSec / yopoArriveProgressEps / _arriveStallT /
         // _arriveBestD were the stall-based takeover backstop, dropped per request -- the

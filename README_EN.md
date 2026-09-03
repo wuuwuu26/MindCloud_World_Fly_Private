@@ -459,7 +459,7 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   insufficient.
 - **Arrival latching**: the server-side 2 m arrival verdict latches in `main.js` (`cmd.arrived` →
   `yopoArrived`, released only when the goal is more than `YOPO_ARRIVE_RELEASE_M` away); the client
-  additionally has a backstop — within `yopoArriveHoldM = 4.0` m (distance-only, no speed gate — `yopoArriveHoldV` was removed) it
+  additionally has a backstop — within `yopoArriveHoldM = 2.0` m (distance-only, no speed gate — `yopoArriveHoldV` was removed; lowered 4.0 -> 2.0 so the 2-4 m band keeps cruising instead of hovering) it
   also treats the goal as arrived, avoiding "always one step short" before the asynchronous server verdict
   returns. Once arrived it enters the goal-point position hold described in the arrival-handling section.
 
@@ -716,7 +716,7 @@ During navigation:
   this geometric layer goes to zero and does not interfere with navigation — see "Avoidance
   Architecture and Tuning".
 - Arrival has two layers: the server flags arrival within 2 m of the goal (`ARRIVE_THRESHOLD`); the
-  client additionally latches arrival within 4.0 m (distance-only, no speed gate), so the asynchronous server reply
+  client additionally latches arrival within 2.0 m (distance-only, no speed gate; lowered 4.0 -> 2.0 so the 2-4 m band keeps cruising instead of hovering), so the asynchronous server reply
   cannot leave it "always one step short"
 - Press **`X`** (or click **"Stop Nav"**) to end navigation
 
