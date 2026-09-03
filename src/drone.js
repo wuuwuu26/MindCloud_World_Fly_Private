@@ -543,11 +543,11 @@ export class Drone {
         this._avoidCycle = 0;            // Probe cycle counter
         this._avoidPrevBlocked = false;  // (diagnostic only) previous cycle saw the forward corridor blocked
         this._avoidPerf = { probeMs: 0, rays: 0, rayTotal: 0, cycles: 0, ringAgeMax: 0 };
-        this.yopoMinAlt = 8.0;        // Minimum ground/roof clearance (m) -- threshold that triggers soft avoidance (upward push)
-                                      // RAISED 2.5 -> 3.0 -> 4.0 -> 8.0: the push-up now engages 5.5 m earlier. The binding
+        this.yopoMinAlt = 10.0;        // Minimum ground/roof clearance (m) -- threshold that triggers soft avoidance (upward push)
+                                      // RAISED 2.5 -> 3.0 -> 4.0 -> 8.0 -> 10.0: the push-up now engages earlier so the drone holds a wider vertical margin while overflying. The binding
                                       // clearance when flying OVER a rooftop is vDownDist (the straight-down ray): once the gap
-                                      // to the rooftop below drops under 8.0 m the drone is pushed up, so it keeps ~8 m of
-                                      // vertical margin above rooftops instead of skimming them. (yopoAvoidStopDown = 8.0 then
+                                      // to the rooftop below drops under 10.0 m the drone is pushed up, so it keeps ~10 m of
+                                      // vertical margin above rooftops instead of skimming them. (yopoAvoidStopDown = 10.0 then
                                       // forbids descending back into that same band.)
 
         this.yopoAvoidVertRay = true;     // Straight up/down vertical rays (prevents hitting the ceiling / an obstacle straight below)
@@ -638,15 +638,20 @@ export class Drone {
         // (vSafeDown = 0 below that), and the vertical look-ahead repulsion covers side obstacles, so
         // a fast descent is still stoppable within the clearance. Raise it back toward 8 if fast
         // descents feel too close to the ground / rooftops.
-        // RAISED 5.0 -> 7.0 (crash fix): the vertical safety envelope had been eroded by stacking --
+        // RAISED 5.0 -> 7.0 -> 10.0 (crash fix): the vertical safety envelope had been eroded by stacking --
         // planned vertical decel 7.65 -> 9.9, descent speed 6 -> 10 AND this standoff 8 -> 5 -- which
         // left the descent at 10 m/s with only ~5 m of margin and a plan that assumes the velocity
         // loop delivers 9.9 m/s^2 of vertical braking on demand. Any lag there and the drone descends
         // into the obstacle below. 7.0 restores a real margin while still allowing the full 10 m/s
         // whenever the clearance below is >= ~13 m (sqrt(2*9.9*(13-7)) = 10.9), easing to ~9 m/s at
-        // 11 m of clearance. This standoff IS the crash margin for the fast descent -- do not lower
+        // 11 m of clearance. Now RAISED to 10.0 to track yopoMinAlt: it also defines the overfly
+        // clearance. When flying OVER a rooftop, the "hold altitude while overflying" branch
+        // (velTargetY = 0) only releases the push-up once vSafeDown pins to 0 (downGap <= this
+        // standoff), so widening it to 10 m makes the drone hold a full 10 m of vertical margin
+        // above the structure instead of grazing the rooftop at ~7 m. This standoff IS the crash
+        // margin for the fast descent -- do not lower
         // it again without lowering the descent speed to match.
-        this.yopoAvoidStopDown = 7.0;
+        this.yopoAvoidStopDown = 10.0;
         // Proximity speed governor standoff (m): a SECOND, independent speed limiter that caps the
         // drone's TOTAL horizontal speed by the nearest obstacle in ANY direction, not just the
         // forward one the brake watches. The brake above only throttles the dAhead (forward)
