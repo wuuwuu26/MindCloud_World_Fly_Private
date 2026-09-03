@@ -223,6 +223,10 @@ export class Drone {
         // Below this distance to the nav target the cruise floor is disabled, so the final-approach
         // PD convergence and the network's own slow-down near the goal are respected.
         this.yopoCruiseMinDist = 5.0;
+        // Final-approach deceleration for the overshoot guard (m/s^2). Used by the approach-speed
+        // governor below: the goalward speed is capped to sqrt(2*a*(distGoal - arriveR)) so the drone
+        // can always stop by the arrival radius. Conservative vs the real ~10 m/s^2 (gives margin).
+        this.yopoApproachDecel = 6.0;
         // Distance within which the potential field drops its normal-direction REPULSION (m).
         // Pinned at 12 m: within the last 12 m to the goal the normal repulsion stays off so the
         // drone can converge onto a goal that sits against a building. Obstacle protection inside
@@ -2502,6 +2506,32 @@ export class Drone {
                         velTargetX += need * gdx;
                         velTargetZ += need * gdz;
                     }
+                }
+            }
+        }
+
+        // ── Final-approach speed governor (overshoot guard) ──
+        // On a clear path the cruise floor keeps the drone at yopoCruiseMinSpd right up to the goal, but
+        // the arrival hold (yopoArriveHoldM) only engages at ~6 m and caps the velocity *target* to
+        // holdMaxV (2 m/s) -- a fast cruise cannot stop in that distance, so the drone flies PAST the
+        // goal. Add a distance-proportional limit on the goalward component (the horizontal analogue of
+        // the vertical arrival ramp sqrt(2*a*d)): it brings the goalward speed to ~0 by the arrival
+        // radius, so the handoff to the hold PD is at a controllable speed and there is no overshoot.
+        // Only on the cruise branch, while not doing a straight vertical (vertFirst) approach, and only
+        // when the path is clear / not actively avoiding (matches the cruise-floor condition).
+        if (inCruise && !vertFirst && this.yopoNavTarget && !this.yopoArrived &&
+            (goalOpen || (!braking && !gated))) {
+            const ngx = this.yopoNavTarget.x - this.x;
+            const ngz = this.yopoNavTarget.z - this.z;
+            const ngd = Math.hypot(ngx, ngz);
+            if (ngd > 0.1) {
+                const dStop = Math.max(ngd - this.yopoArriveHoldM, 0);
+                const vApp = Math.sqrt(2 * this.yopoApproachDecel * dStop);
+                const gdx = ngx / ngd, gdz = ngz / ngd;
+                const proj = velTargetX * gdx + velTargetZ * gdz;
+                if (proj > vApp) {
+                    velTargetX -= (proj - vApp) * gdx;
+                    velTargetZ -= (proj - vApp) * gdz;
                 }
             }
         }
