@@ -564,7 +564,7 @@ export class Drone {
         this.yopoAvoidVertRange = 30.0;
         // ── Vertical obstacle clearing (plan A+B) ──
         this.yopoAvoidVStep = 9.0;        // Vertical probe step up/down (m); *2 high layers can clear taller buildings (8 -> 9: probes slightly higher, clearing taller obstacles)
-        this.yopoAvoidVClimbScale = 2.6;  // Vertical clearing speed = gain*scale = 13*2.6 = 33.8 m/s, a
+        this.yopoAvoidVClimbScale = 2.2;  // Vertical clearing speed = gain*scale = 13*2.2 = 28.6 m/s, a
                                           // fiercer, faster climb / dive over obstacle tops; clamped to 15 by
                                           // droneMaxVSpeed but full climb is commanded earlier, and with
                                           // yopoAccMax raised the vertical acceleration ceiling grows too, so the
@@ -601,10 +601,10 @@ export class Drone {
                                           // the easier it is to climb spuriously when "the way ahead is
                                           // actually clear". To strengthen clearing tune VClimbScale
                                           // (climb strength), not this (trigger threshold).
-        this.yopoAvoidVClear = 0.45;      // Fraction of the range above which a layer counts as
+        this.yopoAvoidVClear = 0.38;      // Fraction of the range above which a layer counts as
                                           // "clear" (> R*value ~= 13.3 m means clear): raising it makes
                                           // the drone more willing to judge the upper layer flyable,
-                                          // increasing clearing willingness (0.32 -> 0.38 -> 0.45; vUpDist
+                                          // increasing clearing willingness (0.32 -> 0.38; vUpDist
                                           // still prevents ceiling hits)
         this.yopoAvoidStop = 6.0;     // Safety clearance (m): the distance the drone keeps off obstacles.
                                       // RAISED 2.5 -> 4.0 -> 6.0: holds further off walls / buildings per
@@ -2218,7 +2218,7 @@ export class Drone {
                 // component ALONG the threat direction is removed, so the tangential part
                 // survives untouched -- "charging at the wall" becomes "sliding along the wall",
                 // the detour we actually want, rather than stalling in place.
-                if (avoid.threatHasDir && !avoid.clearing) {
+                if (avoid.threatHasDir) {
                     const vClose = velTargetX * avoid.threatDirX +
                                    velTargetZ * avoid.threatDirZ;
                     if (vClose > avoid.vCloseMax) {
@@ -3386,13 +3386,6 @@ export class Drone {
                     const lm = Math.hypot(lt.x, lt.z), nm = Math.hypot(fx, fz);
                     if (lm > 1e-3 && nm > 1e-3) {
                         const cos = (fx * lt.x + fz * lt.z) / (nm * lm);
-                    // Cosine of the NEW tangent with the goal bearing. Used to decide whether to
-                    // keep the remembered direction: only keep the memory when the NEW tangent is
-                    // NO MORE goal-directed than the remembered one (it flipped to the FAR side of
-                    // the obstacle, i.e. we are still rounding it). At an EXIT the new tangent
-                    // already points back toward the goal (newTanToGoal > ltToGoal), so we DROP the
-                    // memory and let the goal-directed tangent win instead of sailing back around.
-                    const newTanToGoal = (fx * gx + fz * gz) / nm;
                         let lastOk = false;
                         for (let i = 0; i < dirs.length; i++) {
                             const lnx = lt.x / lm, lnz = lt.z / lm; // Previous-frame direction (normalised)
@@ -3413,8 +3406,7 @@ export class Drone {
                         // goal; once the remembered tangent points more than ~100 deg away from the
                         // goal bearing it is dropped and the flip back is allowed.
                         const ltToGoal = (lt.x / lm) * gx + (lt.z / lm) * gz;
-                        if (cos < -0.5 && lastOk && ltToGoal > this.yopoTanAwayCos &&
-                            newTanToGoal < ltToGoal) {
+                        if (cos < -0.5 && lastOk && ltToGoal > this.yopoTanAwayCos) {
                             fx = lt.x * nm / lm; fz = lt.z * nm / lm;
                         }
                     }
@@ -3645,21 +3637,19 @@ export class Drone {
         // (cone ~+-80 deg) captures it, so when dAhead is short we KEEP the distance-based brake /
         // rep / tan instead of charging in at full speed. (Fixes "obstacle ahead but it still plans
         // that direction's speed".)
-        // Drop the tangential direction memory as soon as the corridor toward the goal is open:
-        // while it is kept, the NEXT obstacle re-uses the OLD tangent -- which pointed around the
-        // far side of the obstacle just cleared -- so the drone turns back into the detour it had
-        // escaped ("there is an exit but it goes back around"). Clearing on goalClear alone (NOT
-        // gated by dAhead) stops the stale detour direction being inherited at the exit, while the
-        // full release below still waits for a genuinely clear forward cone before zeroing rep/tan.
-        if (goalClear && (des > 0.3 || this.yopoNavTarget)) {
-            this._avoidLastTan = null;
-        }
         if (goalClear && (des > 0.3 || this.yopoNavTarget) &&
             dAhead > standoff + reactionDist + 2.0) {
             repX = 0; repZ = 0;          // Horizontal repulsion fully zeroed (no 15% residual push left)
             tanX = 0; tanZ = 0;          // Tangential removed entirely (avoids detouring back to the start)
             brake = 1.0;                 // Clear exit means full speed, not slowed by vertical threats
             vRep = 0;                    // Vertical clearing released too: a clear corridor means no climbing / diving
+            // Drop the tangential direction memory as soon as the corridor is open. While it is
+            // kept, the NEXT obstacle re-uses the OLD tangent -- which pointed around the far side
+            // of the obstacle that has just been cleared -- so the drone turned back into the detour
+            // it had just escaped ("there is an exit but it goes back around"). With the corridor
+            // open there is nothing to steer around, so the memory has served its purpose and the
+            // next detour has to be chosen from the current geometry.
+            this._avoidLastTan = null;
         }
 
         // ---- Horizontal detour around vertical obstacles (B) ----
@@ -3808,7 +3798,7 @@ export class Drone {
                 `vDown=${Number.isFinite(p.vDownDist) ? p.vDownDist.toFixed(1) : 'n/a'}`);
         }
 
-        return { repX, repZ, tanX, tanZ, brake, upPush, vRep, vSafeDown, vSafeUp, vGoX, vGoZ, clearing,
+        return { repX, repZ, tanX, tanZ, brake, upPush, vRep, vSafeDown, vSafeUp, vGoX, vGoZ,
                  threatDirX: dAheadDirX, threatDirZ: dAheadDirZ,
                  threatHasDir: dAheadHasDir, vCloseMax, nearSpeedCap,
                  nearDirX: dMinDirX, nearDirZ: dMinDirZ, nearHasDir,
