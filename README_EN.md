@@ -13,6 +13,8 @@
 > drone's position relative to the goal), and the panel on the right picks the goal, starts/stops
 > navigation, and displays navigation status, distance to the goal and the inference count.
 
+[🎬 Watch the full demo (303MB HD)](https://wuuwuu26.github.io/MindCloud_World_Fly_Private/video.html)
+
 A browser-based FPV drone flying through Google Photorealistic 3D Tiles, with YOPO end-to-end
 neural-network autonomous navigation (3D obstacle avoidance). Pick a city, place a spawn point,
 then fly with the keyboard, a gamepad or an RC transmitter — or set a goal and let YOPO fly there
