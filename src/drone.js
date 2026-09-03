@@ -3890,7 +3890,13 @@ export class Drone {
         let wingKeepNow = false;
         if (!nearGoal && descendingNow && goalBelow && dMin < this.yopoAvoidStopH + this.yopoWingMargin && distGoalH > 0.5) {
             const projN = dMinDirX * gx + dMinDirZ * gz;   // >0: nearest obstacle lies toward the goal
-            if (projN > 0 && dMin * projN <= distGoalH) wingKeepNow = true;
+            const latOff = dMin * Math.sqrt(Math.max(0, 1 - projN * projN)); // perpendicular offset from the goal bearing
+            // Gate on the wing envelope (latOff < yopoWingMargin), mirroring the horizontal side guard
+            // below: a building FAR to the side -- well outside the actual wingspan -- must NOT keep the
+            // repulsion armed, otherwise a descent toward an otherwise clear goal gets shoved sideways
+            // off its approach ("the way is clearly open yet it is pushed away"). Only an obstacle that
+            // could actually clip the wing (inside the envelope) holds the guard on.
+            if (projN > 0 && dMin * projN <= distGoalH && latOff < this.yopoWingMargin) wingKeepNow = true;
         }
         if (wingKeepNow) { this._avoidWingKeepN = (this._avoidWingKeepN || 0) + 1; this._avoidWingBlockN = 0; }
         else { this._avoidWingBlockN = (this._avoidWingBlockN || 0) + 1; this._avoidWingKeepN = 0; }
@@ -3920,16 +3926,23 @@ export class Drone {
         else { this._avoidSideBlockN = (this._avoidSideBlockN || 0) + 1; this._avoidSideKeepN = 0; }
         if (!this._avoidSideKeepOn && this._avoidSideKeepN >= 2) this._avoidSideKeepOn = true;
         if (this._avoidSideKeepOn && this._avoidSideBlockN >= 3) this._avoidSideKeepOn = false;
-        // Inside the 12 m convergence zone the forward-cone gate is dropped. At that range dAhead is
+        // Inside the 12 m convergence zone the forward-cone gate is dropped. At that range dAheadH is
         // always < standoff + reactionDist + 2.0 (~16 m), so the clean release (brake = 1, rep = 0) could
         // never fire and the drone stayed in avoidance braking -- the "jittery / very slow approach to
         // 6 m" symptom. Within the zone goalClear (the ±pathHalfWidth corridor) is the authoritative
         // clearance test, so release on it alone; a wide wall the narrow corridor misses is still held off
-        // because the convergence PD keeps the drone on the goal column. Outside the zone the original
-        // forward-cone gate is retained unchanged.
+        // because the convergence PD keeps the drone on the goal column.
+        // Outside the zone the release gate uses the CORRIDOR-ahead distance dAheadH (lateral offset <
+        // surmountHalfW = 3.0 m), NOT the wide ±60 deg dAhead cone. dAhead's cone catches buildings
+        // 8-15 m to the SIDE (plenty of clearance) and wrongly blocks the release, so the side-standoff
+        // repulsion kept shoving the drone off a path that is in fact clear ("moving straight at the
+        // goal yet pushed away, though it's open"). dAheadH matches goalClear's own corridor criterion,
+        // so only a genuine in-corridor obstacle blocks the release; a far-side wall no longer does.
+        // Vertical threats (groundGap) are intentionally excluded here -- vSafeDown / vSafeUp still
+        // hard-limit the descent / climb, so releasing rep/tan/brake over terrain cannot cause a strike.
         const releaseDAhead = nearGoal ? 0.0 : standoff + reactionDist + 2.0;
         if (releaseAllowed && (des > 0.3 || this.yopoNavTarget) &&
-            dAhead > releaseDAhead && wingClear && !this._avoidSideKeepOn) {
+            dAheadH > releaseDAhead && wingClear && !this._avoidSideKeepOn) {
             repX = 0; repZ = 0;          // Horizontal repulsion fully zeroed (no 15% residual push left)
             tanX = 0; tanZ = 0;          // Tangential removed entirely (avoids detouring back to the start)
             brake = 1.0;                 // Clear exit means full speed, not slowed by vertical threats
