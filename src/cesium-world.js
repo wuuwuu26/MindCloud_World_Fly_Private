@@ -458,10 +458,10 @@ export class CesiumWorld {
             height: urlNumber('height', options.height ?? DEFAULT_VIEW.height),
         };
         this.flightResolutionScale = clampNumber(
-            urlNumber('resolutionScale', options.resolutionScale ?? 0.9),
+            urlNumber('resolutionScale', options.resolutionScale ?? 1.0),
             0.45,
             1,
-            0.9
+            1.0
         );
         this.placementResolutionScale = clampNumber(
             urlNumber('placementResolutionScale', options.placementResolutionScale ?? 1.0),
@@ -470,20 +470,20 @@ export class CesiumWorld {
             1.0
         );
         this.flightTileSSE = clampNumber(
-            // Balancing SSE against frame rate: 12 fills 8 GB of VRAM with extremely fine
-            // tiles (measured 7.6/8.2 GB), rendering a huge number of triangles per frame
-            // plus VRAM thrashing -> single-digit frame rate. Fall back to 20 (still finer
-            // than the original 24). Tunable with ?flightTileSse=12 (finest/slowest) or
-            // ?flightTileSse=24 (smoothest).
-            urlNumber('flightTileSse', options.flightTileSSE ?? 20),
+            // RAISED fineness per request: default dropped 20 -> 12 (the finest/slowest
+            // preset). 12 loads extremely fine tiles (measured ~7.6/8.2 GB VRAM on an 8 GB
+            // card) and renders many more triangles per frame, so expect a LOWER frame rate
+            // than at 20 -- revert with ?flightTileSse=16/20 if it stutters. Original was 24.
+            urlNumber('flightTileSse', options.flightTileSSE ?? 12),
             8,
             64,
             24
         );
         this.placementTileSSE = clampNumber(
-            // Static mode 12: slightly finer than the original 16, with manageable cost.
-            // Restore with ?placementTileSse=8.
-            urlNumber('placementTileSse', options.placementTileSSE ?? 12),
+            // Static pick mode: finer than before. 8 loads more detailed tiles while the
+            // drone is parked (no per-frame motion cost), so the map reads crisper when
+            // choosing a spawn / goal. Revert with ?placementTileSse=12.
+            urlNumber('placementTileSse', options.placementTileSSE ?? 8),
             8,
             64,
             16
@@ -732,8 +732,11 @@ export class CesiumWorld {
         setIfPresent('foveatedMinimumScreenSpaceErrorRelaxation', flightMode ? 4 : 2);
         setIfPresent('foveatedTimeDelay', flightMode ? 0.08 : 0.15);
         setIfPresent('dynamicScreenSpaceError', true);
-        setIfPresent('dynamicScreenSpaceErrorDensity', flightMode ? 0.0035 : 0.0025);
-        setIfPresent('dynamicScreenSpaceErrorFactor', flightMode ? 12 : 8);
+        // LOWERED density/factor per request: Cesium now relaxes SSE less aggressively while
+        // the camera moves, so tiles stay finer across the whole frame (less "popping" to
+        // coarse levels mid-flight). Both flight and placement use the finer 0.0025 / 8.
+        setIfPresent('dynamicScreenSpaceErrorDensity', 0.0025);
+        setIfPresent('dynamicScreenSpaceErrorFactor', 8);
         setIfPresent('loadSiblings', false);
         setIfPresent('skipLevelOfDetail', true);
         setIfPresent('baseScreenSpaceError', flightMode ? 1536 : 1024);
