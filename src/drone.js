@@ -212,9 +212,14 @@ export class Drone {
         // is in play. With an obstacle ahead the forward component is squeezed to this fraction, so the
         // drone slides around at the detour speed instead of driving at the obstacle -- this is the
         // "obstacle ahead -> do not command a big forward speed, keep the distance" knob. Lower it
-        // (e.g. 0.05) to hug the obstacle less / brake harder; raise it (e.g. 0.2) only if the drone
+        // (e.g. 0.05) to hug the obstacle less / brake harder; raise it (e.g. 0.3) only if the drone
         // stalls in front of obstacles instead of going around.
-        this.yopoFwdFloorFrac = 0.10;
+        // RAISED 0.10 -> 0.20: with only a 10% forward floor the detour arc had almost no forward
+        // component -- the drone slid sideways past the obstacle face but crawled along it, which
+        // reads as "the detour is not strong / it never gets around". 20% keeps the arc ADVANCING
+        // toward the goal while still sliding; the closing gate and the kinematic brake still clip
+        // any component that points INTO the obstacle, so this cannot become charging.
+        this.yopoFwdFloorFrac = 0.20;
         // Below this distance to the nav target the cruise floor is disabled, so the final-approach
         // PD convergence and the network's own slow-down near the goal are respected.
         this.yopoCruiseMinDist = 5.0;
@@ -2229,6 +2234,19 @@ export class Drone {
                 if (vGoHoldAlt && !belowTooClose && !avoid.clearing) {
                     velTargetY = 0;
                 }
+                // Detour altitude hold: while a horizontal detour (rep + tan) is actually steering
+                // the drone around an obstacle, the vertical channel must NOT descend. The
+                // network's / vert-first descent keeps pulling the drone toward the goal altitude
+                // while the detour is still mid-arc, so it sinks along the obstacle face before it
+                // has rounded it ("it descends before it has got around the obstacle"). Climbing
+                // stays allowed (the correct escape), and upPush / vSafeDown / crashFloor remain
+                // fully in force; once the exit is reached the detour decays and the normal
+                // descent resumes.
+                if (!this.yopoArrived &&
+                    Math.hypot(avoid.repX + avoid.tanX, avoid.repZ + avoid.tanZ) > 1.5 &&
+                    velTargetY < 0) {
+                    velTargetY = 0;
+                }
 
                 // ── Authoritative closing-speed gate (velocity-obstacle clipping) ──
                 // `brake` only ever multiplied the FORWARD component. The detour terms
@@ -2305,10 +2323,17 @@ export class Drone {
             // Hysteresis: engage on the full thresholds, release only once clearly outside them, so
             // the mode does not chatter on/off at the boundary (that chatter would show up as the
             // drone alternating between climbing and circling).
-            const engage = vfH < this.yopoVertFirstHDist &&
+            // A horizontal detour in progress forbids the straight vertical override: while the
+            // ray layer is steering around an obstacle, the vert-first descent would pull the
+            // drone down along the obstacle face before it has rounded it.
+            const detouring = !!(avoid &&
+                Math.hypot(avoid.repX + avoid.tanX, avoid.repZ + avoid.tanZ) > 1.5);
+            const engage = !detouring &&
+                           vfH < this.yopoVertFirstHDist &&
                            vfAbsY > this.yopoVertFirstMinDY &&
                            vfAbsY > this.yopoVertFirstRatio * vfH;
-            const keep = vfH < this.yopoVertFirstHDist * 1.25 &&
+            const keep = !detouring &&
+                         vfH < this.yopoVertFirstHDist * 1.25 &&
                          vfAbsY > this.yopoVertFirstMinDY * 0.6;
             this._vertFirstOn = this._vertFirstOn ? keep : engage;
             vfD_gate = this._vertFirstOn ? 'open' : 'closed';
@@ -3407,7 +3432,13 @@ export class Drone {
                 const c2 = tx2 * udx + tz2 * udz;
                 let fx, fz;
                 if (c1 >= c2) { fx = tx1; fz = tz1; } else { fx = tx2; fz = tz2; }
-                const t = this.yopoAvoidTanGain * Math.max(0, 1 - tanRefD / repRange);
+                // FLOOR 0.4 on the range falloff: the plain 1 - d/range falloff left almost no
+                // steering authority while the obstacle was still 20-28 m out, so the drone
+                // closed most of the gap BEFORE the detour had any bite and then had to do a
+                // sharp late swerve ("the horizontal detour is not strong enough"). The floor
+                // starts the slide-around early and keeps it decisive all the way; the steering
+                // cap (steerCapFrac) and the closing gate still bound the result.
+                const t = this.yopoAvoidTanGain * Math.max(0.4, 1 - tanRefD / repRange);
                 fx *= t; fz *= t;
                 // Direction hysteresis memory: if the angle against the previous frame's tan
                 // exceeds 120 deg while that direction is still clear, keep the previous frame
