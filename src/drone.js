@@ -3862,16 +3862,20 @@ export class Drone {
         // (yopoAvoidStopH + yopoWingMargin) boundary would otherwise toggle rep on/off every frame, which
         // is exactly the descent jitter inside corridors with nearby walls. Engage after 2 frames, drop
         // after 3 -- same scheme as the goalClear hysteresis above.
-        // Near the goal (arrival / final-approach zone) the goal-convergence hold is authoritative and
-        // must not be fought by the wing guards: a building just outside the corridor but inside the 12 m
-        // envelope would otherwise keep rep/tan/brake/vRep alive and shove the drone off the goal point
-        // (the "flies inaccurately near the goal" regression). When goalClear is true the corridor is open
-        // (obstacle > pathHalfWidth off the centre-line) so releasing there cannot clip a wing, hence the
-        // guards are simply disengaged inside this zone -- the ordinary goalClear avoidance still catches
-        // any genuine in-corridor obstacle. The vertical-first descent relies on the descent guard for wall
-        // separation, but it only runs while NOT arrived (yopoArrived false), i.e. outside this 6 m zone,
-        // so it is unaffected.
-        const nearGoal = distGoalH < this.yopoArriveHoldM;
+        // Within the 12 m convergence zone (see _controlYOPO: "Within 12 m of the goal it switches to a
+        // PD convergence onto yopoNavTarget") the goal-convergence hold is authoritative and must not be
+        // fought by the wing guards. A building just outside the corridor but inside the 12 m envelope would
+        // otherwise keep rep/tan/brake/vRep alive, and the guard's own 2/3-frame hysteresis chatters on the
+        // 12 m probe-noise boundary -- together that makes the approach jitter, crawl and land off-target
+        // (the "12 m band is jittery / slow / inaccurate" regression). The design intent is explicit (the
+        // old yopoGoalRepSuppressDist comment): inside the last 12 m the repulsion stays OFF so the drone
+        // can converge onto a goal that sits against a building. So the guards are disengaged across the
+        // whole zone: when goalClear is true the corridor is open (obstacle > pathHalfWidth off the
+        // centre-line) so releasing there cannot clip a wing, and any genuine in-corridor obstacle is still
+        // caught by the ordinary goalClear avoidance. Vertical-first descent keeps its wall separation
+        // OUTSIDE this zone (it runs only while NOT arrived, and only matters at the larger standoff where
+        // the guard stays armed), so it is unaffected.
+        const nearGoal = distGoalH < 12.0;
         const descendingNow = velTargetY < -0.2 && vRep === 0;
         // Only arm the guard for a genuine vertical approach: the goal must actually be LOWER than the
         // drone. A slight incidental descent while sliding around a LEVEL obstacle is a genuine
