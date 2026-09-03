@@ -2805,7 +2805,7 @@ export class Drone {
         // At cruise speed the drone covers several metres per cycle, so a stale / interpolated
         // distance computes the braking distance wrong and the ray layer under-reacts -- which is
         // the "still plans a big speed toward the obstacle" symptom.
-        // Cost: N fresh GPU picks per cycle (N = yopoAvoidRayCount = 24) instead of ~20. The ring
+        // Cost: N fresh GPU picks per cycle (N = yopoAvoidRayCount = 12) instead of ~20. The ring
         // is small enough that this stays affordable, and correctness beats frame rate here.
         // Throttling (how often a probe cycle runs) still happens in _updateAvoidProbe.
         let rayCount = 0;
