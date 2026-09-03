@@ -307,6 +307,16 @@ export class Drone {
                                           // arrival ramp and with the ray layer's vSafeUp / vSafeDown, so a
                                           // faster value cannot overshoot the goal or dive through an obstacle.
         this.yopoVertFirstDecel = 5.0;    // Assumed deceleration for the sqrt(2*a*d) arrival ramp (m/s^2).
+        // HORIZONTAL-OPENNESS GATE for descent: a vertical descent (the straight climb/descent override
+        // above, AND the network's own descent) may only begin when the area is TRULY OPEN -- no obstacle
+        // within this radius (m) in ANY horizontal direction. This stops the drone from descending into the
+        // gap between two obstacles: while it is squeezed between them, dMin (nearest horizontal obstacle)
+        // is smaller than this, so the descent is held and the drone keeps its altitude and finishes the
+        // horizontal detour; only once it has cleared all obstacles (dMin > this) does it drop. It should
+        // be at least the wingspan envelope (yopoAvoidStopH + yopoWingMargin ~= 12 m) plus margin. Near the
+        // goal (within yopoVertFirstHDist * 0.5 horizontally) the gate is waived so the final arrival can
+        // still descend onto the goal column even if a building sits beside it.
+        this.yopoVertClearR = 16.0;
                                           // RAISED 3.0 -> 5.0: at 3.0 the ramp only allowed sqrt(2*3*10) ~= 7.7 m/s
                                           // at a 10 m height error, so the descent was stuck at ~8 m/s and the
                                           // yopoVertFirstVMax = 10 ceiling was never reached (it needed ~16.7 m of
@@ -2440,7 +2450,15 @@ export class Drone {
             const vRepAgainst = !!(avoid && avoid.vRep &&
                                    Math.sign(avoid.vRep) !== Math.sign(vfDy));
             vfD_go = vGoActive; vfD_rep = vRepAgainst;
-            if (this._vertFirstOn && !vGoActive && !vRepAgainst) {
+            // Horizontal-openness gate for the straight descent: only drop while the area is TRULY
+            // OPEN (no obstacle within yopoVertClearR in any horizontal direction). In the slot between
+            // two obstacles dMin is smaller than that, so the descent is held and the drone keeps its
+            // altitude and finishes the horizontal detour instead of diving into the gap between them.
+            // Waived only within yopoVertFirstHDist * 0.5 of the goal so the final arrival can still
+            // descend onto the goal column even if a building sits beside it.
+            const vfOpenArea = !avoid || (Number.isFinite(avoid.dMin) && avoid.dMin > this.yopoVertClearR);
+            const vfNearGoal = vfH < this.yopoVertFirstHDist * 0.5;
+            if (this._vertFirstOn && !vGoActive && !vRepAgainst && (vfOpenArea || vfNearGoal)) {
                 // Arrival ramp sqrt(2*a*d): the climb eases off as the goal altitude is approached
                 // (no overshoot) and never starts with a velocity step.
                 vfD_ramp = Math.sqrt(2 * this.yopoVertFirstDecel * vfAbsY);
@@ -2488,6 +2506,22 @@ export class Drone {
             }
         } else {
             this._vertFirstOn = false;
+        }
+
+        // ── Horizontal-openness gate for ALL descent (belt-and-suspenders over the vert-first gate
+        // above) ──
+        // Even the network's own descent command must not drop the drone into the gap between two
+        // obstacles. While the area is NOT open (some obstacle within yopoVertClearR in any horizontal
+        // direction) and we are NOT within the near-goal arrival window, hold altitude (velTargetY >= 0)
+        // and keep detouring until the surroundings are truly clear -- then descend. The near-goal window
+        // is waived so the final arrival can still descend onto the goal; once arrived the block above
+        // (yopoArrived) also skips this. Climbs (velTargetY > 0) are never affected.
+        if (this.yopoNavTarget && !this.yopoArrived) {
+            const clx = this.yopoNavTarget.x - this.x, clz = this.yopoNavTarget.z - this.z;
+            const clh = Math.hypot(clx, clz);
+            const clNearGoal = clh < this.yopoVertFirstHDist * 0.5;
+            const clOpen = !avoid || (Number.isFinite(avoid.dMin) && avoid.dMin > this.yopoVertClearR);
+            if (!clOpen && !clNearGoal && velTargetY < 0) velTargetY = 0;
         }
 
         // ── Passive ground safety net (not geometric avoidance) ──
@@ -4148,6 +4182,11 @@ export class Drone {
                  threatDirX: dAheadDirX, threatDirZ: dAheadDirZ,
                  threatHasDir: dAheadHasDir, vCloseMax, nearSpeedCap,
                  nearDirX: dMinDirX, nearDirZ: dMinDirZ, nearHasDir,
+                 // Nearest horizontal-obstacle distance (drives repulsion / tangential). Exposed so
+                 // _controlYOPO can require a TRULY OPEN area before a vertical descent: a descent must
+                 // only start once no obstacle sits within yopoVertClearR in any horizontal direction,
+                 // never while the drone is squeezed into a gap between two obstacles.
+                 dMin,
                  // Diagnostic: true when the way to the goal was judged open and the avoidance
                  // terms above were released. N here while the path looks clear is the direct
                  // cause of "it still detours / climbs although the goal direction is open".
