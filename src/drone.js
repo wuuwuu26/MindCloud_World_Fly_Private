@@ -3862,6 +3862,16 @@ export class Drone {
         // (yopoAvoidStopH + yopoWingMargin) boundary would otherwise toggle rep on/off every frame, which
         // is exactly the descent jitter inside corridors with nearby walls. Engage after 2 frames, drop
         // after 3 -- same scheme as the goalClear hysteresis above.
+        // Near the goal (arrival / final-approach zone) the goal-convergence hold is authoritative and
+        // must not be fought by the wing guards: a building just outside the corridor but inside the 12 m
+        // envelope would otherwise keep rep/tan/brake/vRep alive and shove the drone off the goal point
+        // (the "flies inaccurately near the goal" regression). When goalClear is true the corridor is open
+        // (obstacle > pathHalfWidth off the centre-line) so releasing there cannot clip a wing, hence the
+        // guards are simply disengaged inside this zone -- the ordinary goalClear avoidance still catches
+        // any genuine in-corridor obstacle. The vertical-first descent relies on the descent guard for wall
+        // separation, but it only runs while NOT arrived (yopoArrived false), i.e. outside this 6 m zone,
+        // so it is unaffected.
+        const nearGoal = distGoalH < this.yopoArriveHoldM;
         const descendingNow = velTargetY < -0.2 && vRep === 0;
         // Only arm the guard for a genuine vertical approach: the goal must actually be LOWER than the
         // drone. A slight incidental descent while sliding around a LEVEL obstacle is a genuine
@@ -3869,7 +3879,7 @@ export class Drone {
         // below and let the drone sink along the building face).
         const goalBelow = this.yopoNavTarget && (this.y - this.yopoNavTarget.y) > 1.0;
         let wingKeepNow = false;
-        if (descendingNow && goalBelow && dMin < this.yopoAvoidStopH + this.yopoWingMargin && distGoalH > 0.5) {
+        if (!nearGoal && descendingNow && goalBelow && dMin < this.yopoAvoidStopH + this.yopoWingMargin && distGoalH > 0.5) {
             const projN = dMinDirX * gx + dMinDirZ * gz;   // >0: nearest obstacle lies toward the goal
             if (projN > 0 && dMin * projN <= distGoalH) wingKeepNow = true;
         }
@@ -3892,7 +3902,7 @@ export class Drone {
         // stay straight, genuine detours still complete. Hysteresis identical to the descent guard
         // (engage 2 / drop 3 frames) to avoid probe-noise chatter on the envelope boundary.
         let sideKeepNow = false;
-        if (dMin < this.yopoAvoidStopH + this.yopoWingMargin && distGoalH > 0.5) {
+        if (!nearGoal && dMin < this.yopoAvoidStopH + this.yopoWingMargin && distGoalH > 0.5) {
             const projN = dMinDirX * gx + dMinDirZ * gz;   // >0: nearest obstacle lies toward the goal
             const latOff = dMin * Math.sqrt(Math.max(0, 1 - projN * projN)); // perpendicular offset from the goal bearing (corridor measure)
             if (projN > 0 && dMin * projN <= distGoalH && latOff < 2.5) sideKeepNow = true;
