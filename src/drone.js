@@ -2254,9 +2254,16 @@ export class Drone {
                 // stays allowed (the correct escape), and upPush / vSafeDown / crashFloor remain
                 // fully in force; once the exit is reached the detour decays and the normal
                 // descent resumes.
+                // EXCEPTION: when the wingspan guard is actively keeping the lateral repulsion during
+                // a descent toward a goal below (avoid.wingKeepActive), that rep is the intentional
+                // wing-clearance push, not a mid-arc detour -- suppressing the hold there lets the
+                // drone descend while keeping its lateral separation instead of freezing at altitude
+                // (the "won't descend to a clear-below goal next to a wall" regression added with the
+                // wingspan guard). Genuine level mid-detours still arm the guard and keep the hold.
                 if (!this.yopoArrived &&
                     Math.hypot(avoid.repX + avoid.tanX, avoid.repZ + avoid.tanZ) > 1.5 &&
-                    velTargetY < 0) {
+                    velTargetY < 0 &&
+                    !avoid.wingKeepActive) {
                     velTargetY = 0;
                 }
 
@@ -3796,8 +3803,13 @@ export class Drone {
         // is exactly the descent jitter inside corridors with nearby walls. Engage after 2 frames, drop
         // after 3 -- same scheme as the goalClear hysteresis above.
         const descendingNow = velTargetY < -0.2 && vRep === 0;
+        // Only arm the guard for a genuine vertical approach: the goal must actually be LOWER than the
+        // drone. A slight incidental descent while sliding around a LEVEL obstacle is a genuine
+        // mid-detour and must NOT arm the guard (it would wrongly suppress the detour altitude-hold
+        // below and let the drone sink along the building face).
+        const goalBelow = this.yopoNavTarget && (this.y - this.yopoNavTarget.y) > 1.0;
         let wingKeepNow = false;
-        if (descendingNow && dMin < this.yopoAvoidStopH + this.yopoWingMargin && distGoalH > 0.5) {
+        if (descendingNow && goalBelow && dMin < this.yopoAvoidStopH + this.yopoWingMargin && distGoalH > 0.5) {
             const projN = dMinDirX * gx + dMinDirZ * gz;   // >0: nearest obstacle lies toward the goal
             if (projN > 0 && dMin * projN <= distGoalH) wingKeepNow = true;
         }
@@ -3975,7 +3987,7 @@ export class Drone {
                  // Diagnostic: true when the way to the goal was judged open and the avoidance
                  // terms above were released. N here while the path looks clear is the direct
                  // cause of "it still detours / climbs although the goal direction is open".
-                 goalClear, goalClearHyst: releaseAllowed };
+                 goalClear, goalClearHyst: releaseAllowed, wingKeepActive: !wingClear };
     }
 
     // ---- Collision ----
