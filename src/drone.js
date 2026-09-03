@@ -946,6 +946,12 @@ export class Drone {
         this._avoidWingKeepN = 0;        // consecutive frames the wing-envelope keep-rep is asserted (descent)
         this._avoidWingBlockN = 0;       // consecutive frames it is not asserted
         this._avoidWingKeepOn = false;   // hysteretic wing-keep state
+        // Horizontal (all-flight) wing-clearance keep-rep state: level / climbing counterpart of the
+        // descent wing-guard. Keeps lateral repulsion on during a "clear corridor" release when a near
+        // obstacle sits within the wingspan envelope (stopH + wingMargin).
+        this._avoidSideKeepN = 0;
+        this._avoidSideBlockN = 0;
+        this._avoidSideKeepOn = false;
         this._avoidLastTan = null;
         this.yopoCmdYaw = 0;
         this.yopoCmdYawDot = 0;
@@ -1308,6 +1314,9 @@ export class Drone {
             this._avoidClearDir = 0;
             this._avoidVRepFilt = 0;
             this._avoidGoalClearN = 0;
+            this._avoidSideKeepN = 0;
+            this._avoidSideBlockN = 0;
+            this._avoidSideKeepOn = false;
             this._avoidLastTan = null;
             this.yopoCmdYaw = 0;
             this.yopoCmdYawDot = 0;
@@ -3870,8 +3879,26 @@ export class Drone {
         if (!this._avoidWingKeepOn && this._avoidWingKeepN >= 2) this._avoidWingKeepOn = true;
         if (this._avoidWingKeepOn && this._avoidWingBlockN >= 3) this._avoidWingKeepOn = false;
         if (!this._avoidWingKeepOn) wingClear = false;
+        // Horizontal wing-clearance guard (level / climbing flight): the descent wing-guard above is
+        // gated on a real descent, so a level or climbing drone on a "clear" corridor with a building
+        // just outside the narrow ±pathHalfWidth band but inside the wingspan envelope (stopH +
+        // wingMargin) still has its rep/tan zeroed by the release below and flies straight -- the wing
+        // then clips that side obstacle (it "flies past / overshoots" the obstacle instead of sliding
+        // around it). Keep the lateral repulsion here too, for any near obstacle within the wing
+        // envelope that lies between the drone and the goal, so the drone maintains wing clearance and
+        // goes AROUND it. Hysteresis identical to the descent guard (engage 2 / drop 3 frames) to
+        // avoid probe-noise chatter on the envelope boundary.
+        let sideKeepNow = false;
+        if (dMin < this.yopoAvoidStopH + this.yopoWingMargin && distGoalH > 0.5) {
+            const projN = dMinDirX * gx + dMinDirZ * gz;   // >0: nearest obstacle lies toward the goal
+            if (projN > 0 && dMin * projN <= distGoalH) sideKeepNow = true;
+        }
+        if (sideKeepNow) { this._avoidSideKeepN = (this._avoidSideKeepN || 0) + 1; this._avoidSideBlockN = 0; }
+        else { this._avoidSideBlockN = (this._avoidSideBlockN || 0) + 1; this._avoidSideKeepN = 0; }
+        if (!this._avoidSideKeepOn && this._avoidSideKeepN >= 2) this._avoidSideKeepOn = true;
+        if (this._avoidSideKeepOn && this._avoidSideBlockN >= 3) this._avoidSideKeepOn = false;
         if (releaseAllowed && (des > 0.3 || this.yopoNavTarget) &&
-            dAhead > standoff + reactionDist + 2.0 && wingClear) {
+            dAhead > standoff + reactionDist + 2.0 && wingClear && !this._avoidSideKeepOn) {
             repX = 0; repZ = 0;          // Horizontal repulsion fully zeroed (no 15% residual push left)
             tanX = 0; tanZ = 0;          // Tangential removed entirely (avoids detouring back to the start)
             brake = 1.0;                 // Clear exit means full speed, not slowed by vertical threats
