@@ -3979,7 +3979,15 @@ export class Drone {
         let wingClear = true;
         if (!this._avoidWingKeepOn && this._avoidWingKeepN >= 2) this._avoidWingKeepOn = true;
         if (this._avoidWingKeepOn && this._avoidWingBlockN >= 3) this._avoidWingKeepOn = false;
-        if (!this._avoidWingKeepOn) wingClear = false;
+        // wingClear must mean "the wingspan guard is INACTIVE (clear to release)", i.e. the logical
+        // negation of the keep-rep flag _avoidWingKeepOn. The side guard below uses !_avoidSideKeepOn
+        // the same way; this must mirror it. The previous code wrote `if (!_avoidWingKeepOn) wingClear
+        // = false`, which made wingClear == _avoidWingKeepOn (inverted): during level flight the descent
+        // guard is always off so wingClear was forced false and the release (rep/tan/brake reset) could
+        // NEVER fire while any obstacle sat within ~12 m -- even on a clear goal corridor. That kept the
+        // side-building's repulsion on (false detour / overshooting the clear channel). Fixed to the
+        // correct negation so straight flight down a clear corridor is released again.
+        if (this._avoidWingKeepOn) wingClear = false;
         // Horizontal wing-clearance guard (level / climbing flight): the descent wing-guard above is
         // gated on a real descent, so an in-corridor obstacle whose goalClear verdict flickers N/Y
         // during a detour would have its rep/tan zeroed by the release below and the drone would fly
