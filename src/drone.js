@@ -930,6 +930,11 @@ export class Drone {
         this._avoidClearDir = 0;
         this._avoidVRepFilt = 0;
         this._avoidGoalClearN = 0;
+        this._avoidGoalBlockN = 0;       // consecutive "corridor blocked" frames for goalClear hysteresis
+        this._avoidReleaseOn = false;    // hysteretic release (full avoidance stand-down) state
+        this._avoidWingKeepN = 0;        // consecutive frames the wing-envelope keep-rep is asserted (descent)
+        this._avoidWingBlockN = 0;       // consecutive frames it is not asserted
+        this._avoidWingKeepOn = false;   // hysteretic wing-keep state
         this._avoidLastTan = null;
         this.yopoCmdYaw = 0;
         this.yopoCmdYawDot = 0;
@@ -2444,7 +2449,7 @@ export class Drone {
         // exactly the authority the avoidance layer itself uses (on goalClear it already zeroes
         // rep/tan and releases the closing-speed gate to vCloseMax = Infinity). Obstacles still win
         // because a blocked corridor makes goalClear false and the floor stands down.
-        const goalOpen = !!(avoid && avoid.goalClear);
+        const goalOpen = !!(avoid && avoid.goalClearHyst);
         // Only ever active on the CRUISE branch (following the network trajectory). It must stay out
         // of: (a) stick override -- it would shove 12 m/s toward the goal while the pilot is flying;
         // (b) the final-approach hold -- that PD is deliberately decelerating onto the goal, and
@@ -3616,9 +3621,20 @@ export class Drone {
         // Consecutive-frame count of the "corridor open" verdict. Used (a) as a debounced drop
         // of the tangential direction memory and (b) as the clearing exit test -- a single
         // grazing-ray frame must not reset either.
-        if (goalClear) this._avoidGoalClearN = (this._avoidGoalClearN || 0) + 1;
-        else this._avoidGoalClearN = 0;
+        if (goalClear) { this._avoidGoalClearN = (this._avoidGoalClearN || 0) + 1; this._avoidGoalBlockN = 0; }
+        else { this._avoidGoalBlockN = (this._avoidGoalBlockN || 0) + 1; this._avoidGoalClearN = 0; }
         const goalClearStable = this._avoidGoalClearN >= 4;
+        // Hysteresis on the release decision: engage (allow full stand-down) only after 2 consecutive
+        // "clear" frames, drop (re-arm avoidance) only after 3 consecutive "blocked" frames. Without it,
+        // probe noise (refresh 60-400 ms, grazing rays oscillate) flips the RAW goalClear every frame,
+        // toggling rep/tan/brake between released and armed -- the violent jitter in clear corridors, and
+        // the asymmetric brake ratchet then keeps `braking` true so the cruise floor stands down and the
+        // drone crawls ("goalClear=Y, brake=0.26, |vel| falling"). Engage short-debounced kills single
+        // false "open" spikes; drop longer-debounced stops one grazing-ray frame re-arming mid-corridor.
+        // Genuinely blocked corridors still re-arm within 3 frames (~0.18 s), well inside the 0.30 s ramp.
+        if (!this._avoidReleaseOn && this._avoidGoalClearN >= 2) this._avoidReleaseOn = true;
+        if (this._avoidReleaseOn && this._avoidGoalBlockN >= 3) this._avoidReleaseOn = false;
+        const releaseAllowed = this._avoidReleaseOn;
         // Drop the remembered tangent once the corridor has STAYED open for a few frames. The
         // memory exists to keep ONE detour consistent; a stale direction carried past the exit
         // re-uses the tangent that pointed around the far side of the previous obstacle
@@ -3773,13 +3789,25 @@ export class Drone {
         // by the wing as the drone drops straight down. We keep the repulsion unless the only near
         // obstacle is the goal's own wall (beyond the goal, so it is not blocking arrival). This
         // only affects descent; level / climbing flight keeps the original release.
+        // Wingspan guard (descent only): keep the lateral repulsion on even if the narrow goal corridor
+        // is "clear", so a building just outside the ±pathHalfWidth band is not struck by the wing while
+        // dropping straight down. The raw keep condition is DEBOUNCED: probe noise around the
+        // (yopoAvoidStopH + yopoWingMargin) boundary would otherwise toggle rep on/off every frame, which
+        // is exactly the descent jitter inside corridors with nearby walls. Engage after 2 frames, drop
+        // after 3 -- same scheme as the goalClear hysteresis above.
         const descendingNow = velTargetY < -0.2 && vRep === 0;
-        let wingClear = true;
+        let wingKeepNow = false;
         if (descendingNow && dMin < this.yopoAvoidStopH + this.yopoWingMargin && distGoalH > 0.5) {
             const projN = dMinDirX * gx + dMinDirZ * gz;   // >0: nearest obstacle lies toward the goal
-            if (projN > 0 && dMin * projN <= distGoalH) wingClear = false;
+            if (projN > 0 && dMin * projN <= distGoalH) wingKeepNow = true;
         }
-        if (goalClear && (des > 0.3 || this.yopoNavTarget) &&
+        if (wingKeepNow) { this._avoidWingKeepN = (this._avoidWingKeepN || 0) + 1; this._avoidWingBlockN = 0; }
+        else { this._avoidWingBlockN = (this._avoidWingBlockN || 0) + 1; this._avoidWingKeepN = 0; }
+        let wingClear = true;
+        if (!this._avoidWingKeepOn && this._avoidWingKeepN >= 2) this._avoidWingKeepOn = true;
+        if (this._avoidWingKeepOn && this._avoidWingBlockN >= 3) this._avoidWingKeepOn = false;
+        if (!this._avoidWingKeepOn) wingClear = false;
+        if (releaseAllowed && (des > 0.3 || this.yopoNavTarget) &&
             dAhead > standoff + reactionDist + 2.0 && wingClear) {
             repX = 0; repZ = 0;          // Horizontal repulsion fully zeroed (no 15% residual push left)
             tanX = 0; tanZ = 0;          // Tangential removed entirely (avoids detouring back to the start)
@@ -3947,7 +3975,7 @@ export class Drone {
                  // Diagnostic: true when the way to the goal was judged open and the avoidance
                  // terms above were released. N here while the path looks clear is the direct
                  // cause of "it still detours / climbs although the goal direction is open".
-                 goalClear };
+                 goalClear, goalClearHyst: releaseAllowed };
     }
 
     // ---- Collision ----
