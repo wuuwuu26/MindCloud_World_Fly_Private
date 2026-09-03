@@ -203,7 +203,7 @@ export class Drone {
         // closing gate stay on, so the drone cannot charge into the wall -- only the slide-around
         // speed is freed up. Lower this (e.g. 16) if fast detours clip wall corners; raise toward 28
         // to match vRep exactly.
-        this.yopoDetourSpeedFloor = 22.0;
+        this.yopoDetourSpeedFloor = 28.0;
         // Fraction of the budget the lateral detour (rep + tan) may consume. Kept at the measured-safe
         // 0.72 (0.75 measured as "detouring too fast"); the higher get-around speed comes from the
         // raised budget floor above, not from loosening this share.
@@ -388,7 +388,7 @@ export class Drone {
         // spacing left big gaps on the sides/diagonals, missing corners / pillars / recesses).
         // Generates yopoAvoidRayCount equiangular horizontal rays so an obstacle in any
         // direction is detected.
-        this.yopoAvoidRayCount = 24;       // Number of 360 deg rays (15 deg spacing); denser = more ray cost, lower this if the frame rate stutters
+        this.yopoAvoidRayCount = 12;       // Number of 360 deg rays (30 deg spacing); denser = more ray cost, lower this if the frame rate stutters
         this.yopoAvoidRays = (() => {
             const arr = [], N = this.yopoAvoidRayCount;
             for (let i = 0; i < N; i++) {
@@ -431,12 +431,12 @@ export class Drone {
                                       // safety (upPush/vRep = gain * factor); the horizontal
                                       // rep/tan have been split into separate gains below so they
                                       // can be tuned independently.
-        this.yopoAvoidRepGain = 24.0; // RAISED 18 -> 20 -> 24. Repulsion (radial push-away) max speed (m/s): raised for a more decisive push-off (highest-priority avoidance)
+        this.yopoAvoidRepGain = 26.0; // RAISED 18 -> 20 -> 24 -> 26. Repulsion (radial push-away) max speed (m/s): raised for a more decisive push-off (highest-priority avoidance)
                                       // for a more decisive push/detour on contact
                                       // (together with the wider side pushRange + keep-out weight it reacts sooner
                                       // and holds further off building faces), instead
                                       // of just being "pushed back rather than steered around"
-        this.yopoAvoidTanGain = 78.0; // RAISED 54 -> 68 -> 78. Stronger lateral steer-around so the drone
+        this.yopoAvoidTanGain = 88.0; // RAISED 54 -> 68 -> 78 -> 88. Stronger lateral steer-around so the drone
                                       // commits to sliding past the obstacle instead of grazing it.
                                       // Still pairs with steerCap inside _controlYOPO (kept at/below
                                       // 0.72 of maxSpd) so the detour stays physically smooth; drop
@@ -461,7 +461,7 @@ export class Drone {
                                       // cosine (> ~100 deg off the bearing) the direction memory is
                                       // dropped and the turn-back toward the goal is allowed.
                                       // -1 restores the old unconditional memory.
-        this.yopoTanAwayScale = 0.65; // Scale applied to a tangent that points more than 90 deg away
+        this.yopoTanAwayScale = 0.78; // Scale applied to a tangent that points more than 90 deg away
                                       // from the goal: it is no longer steering around the obstacle,
                                       // it is carrying the drone away, so the goal-directed terms
                                       // (trajectory / cruise floor) get the upper hand. 1.0 disables
@@ -589,7 +589,7 @@ export class Drone {
         // min(strength, vGoSafe) and vGoSafe was the binding constraint. With this, vGo reaches a
         // usable escape speed (≈5 m/s at 3 m clearance, ≈9 m/s at 4 m, ≈11 m/s at 5 m) while still
         // never driving into the side obstacle measured along the escape direction.
-        this.yopoAvoidVGoDecel = 25.0;
+        this.yopoAvoidVGoDecel = 34.0;
         this.yopoAvoidVBlock = 20.0;      // RAISED 16 -> 20. Forward clearance below this triggers vertical clearing (m):
                                           // at 18 m/s stop+12 ~= 13.1 m ~= 0.73 s, leaving more clearing
                                           // lead time than the old 8 m (0.44 s), so it does not climb
@@ -2064,6 +2064,11 @@ export class Drone {
                     const fwdZ = velTargetZ * avoid.brake;
                     let steerX = avoid.repX + avoid.tanX;
                     let steerZ = avoid.repZ + avoid.tanZ;
+                    // Arrived: hold position on the goal -- do NOT apply the directional detour
+                    // (rep/tan) push, otherwise the drone keeps sliding / veering around obstacles
+                    // near the goal instead of settling. Only the passive brake (keeping velTarget
+                    // scaled by avoid.brake) and the vertical vSafe clamps still apply.
+                    if (this.yopoArrived) { steerX = 0; steerZ = 0; }
                     // Cap the detour vector ITSELF. Previously lateralBudget only shrank fwdAllow
                     // and the steer vector was added unclamped -- with the tangential gain at
                     // 34 m/s and the repulsion at 15, the detour could alone command maxSpd even
@@ -2135,8 +2140,10 @@ export class Drone {
                 // Horizontal detour around vertical obstacles (something straight below / above):
                 // add vGo to leave the obstacle footprint smoothly (neither climbing nor
                 // descending).
-                velTargetX += avoid.vGoX;
-                velTargetZ += avoid.vGoZ;
+                if (!this.yopoArrived) {
+                    velTargetX += avoid.vGoX;
+                    velTargetZ += avoid.vGoZ;
+                }
                 // Vertical: DIRECTION-AWARE instead of the old blanket `velTargetY *= brake`.
                 // The old line throttled the climb by the HORIZONTAL obstacle brake, so near a
                 // goal against a building (brake ~0.3) even the PD's straight climb crawled --
@@ -2149,8 +2156,10 @@ export class Drone {
                 //   - DESCENT keeps the horizontal brake scaling (an obstacle ahead at this
                 //     altitude IS a threat while descending into it) plus the vSafeDown clamp
                 //     below for the clearance under the drone.
-                if (avoid.vRep) velTargetY = velTargetY * 0.3 + avoid.vRep;
-                velTargetY += avoid.upPush;
+                if (!this.yopoArrived) {
+                    if (avoid.vRep) velTargetY = velTargetY * 0.3 + avoid.vRep;
+                    velTargetY += avoid.upPush;
+                }
                 if (velTargetY < 0) {
                     velTargetY = velTargetY * avoid.brake;
                 } else if (avoid.vSafeUp !== null && Number.isFinite(avoid.vSafeUp) &&
@@ -3613,7 +3622,15 @@ export class Drone {
         // Genuine hovering (no nav target and des <= 0.3) still keeps rep/tan to hold a safe distance
         // from obstacles. Vertical safety (upPush/vSafeDown) always applies and does not interfere
         // with straight horizontal flight.
-        if (goalClear && (des > 0.3 || this.yopoNavTarget)) {
+        // Forward-cone guard: only release to full speed (brake = 1, rep/tan cleared) when the
+        // forward cone dAhead is ALSO genuinely clear. The 2.5 m corridor test above can miss a
+        // wide wall that no ray happened to hit inside that narrow band -- common with the sparse
+        // 12-ray ring -- leaving goalClear true while an obstacle still sits in the path. dAhead
+        // (cone ~+-80 deg) captures it, so when dAhead is short we KEEP the distance-based brake /
+        // rep / tan instead of charging in at full speed. (Fixes "obstacle ahead but it still plans
+        // that direction's speed".)
+        if (goalClear && (des > 0.3 || this.yopoNavTarget) &&
+            dAhead > standoff + reactionDist + 2.0) {
             repX = 0; repZ = 0;          // Horizontal repulsion fully zeroed (no 15% residual push left)
             tanX = 0; tanZ = 0;          // Tangential removed entirely (avoids detouring back to the start)
             brake = 1.0;                 // Clear exit means full speed, not slowed by vertical threats

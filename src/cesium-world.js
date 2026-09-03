@@ -458,16 +458,16 @@ export class CesiumWorld {
             height: urlNumber('height', options.height ?? DEFAULT_VIEW.height),
         };
         this.flightResolutionScale = clampNumber(
-            urlNumber('resolutionScale', options.resolutionScale ?? 0.72),
+            urlNumber('resolutionScale', options.resolutionScale ?? 0.9),
             0.45,
             1,
-            0.72
+            0.9
         );
         this.placementResolutionScale = clampNumber(
-            urlNumber('placementResolutionScale', options.placementResolutionScale ?? 0.88),
+            urlNumber('placementResolutionScale', options.placementResolutionScale ?? 1.0),
             0.5,
             1,
-            0.88
+            1.0
         );
         this.flightTileSSE = clampNumber(
             // Balancing SSE against frame rate: 12 fills 8 GB of VRAM with extremely fine
@@ -709,7 +709,7 @@ export class CesiumWorld {
             scene.msaaSamples = 1;
         }
         if (scene.postProcessStages && scene.postProcessStages.fxaa) {
-            scene.postProcessStages.fxaa.enabled = false;
+            scene.postProcessStages.fxaa.enabled = true;
         }
         scene.highDynamicRange = false;
     }
@@ -1790,7 +1790,7 @@ export class CesiumWorld {
         if ('resolutionScale' in viewer) viewer.resolutionScale = 1;
         if ('msaaSamples' in viewer.scene) viewer.scene.msaaSamples = 1;
         if (viewer.scene.postProcessStages && viewer.scene.postProcessStages.fxaa) {
-            viewer.scene.postProcessStages.fxaa.enabled = false;
+            viewer.scene.postProcessStages.fxaa.enabled = true;
         }
 
         const tileset = await this._createGoogleTileset(null);
