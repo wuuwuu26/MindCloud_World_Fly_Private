@@ -3915,8 +3915,16 @@ export class Drone {
         else { this._avoidSideBlockN = (this._avoidSideBlockN || 0) + 1; this._avoidSideKeepN = 0; }
         if (!this._avoidSideKeepOn && this._avoidSideKeepN >= 2) this._avoidSideKeepOn = true;
         if (this._avoidSideKeepOn && this._avoidSideBlockN >= 3) this._avoidSideKeepOn = false;
+        // Inside the 12 m convergence zone the forward-cone gate is dropped. At that range dAhead is
+        // always < standoff + reactionDist + 2.0 (~16 m), so the clean release (brake = 1, rep = 0) could
+        // never fire and the drone stayed in avoidance braking -- the "jittery / very slow approach to
+        // 6 m" symptom. Within the zone goalClear (the ±pathHalfWidth corridor) is the authoritative
+        // clearance test, so release on it alone; a wide wall the narrow corridor misses is still held off
+        // because the convergence PD keeps the drone on the goal column. Outside the zone the original
+        // forward-cone gate is retained unchanged.
+        const releaseDAhead = nearGoal ? 0.0 : standoff + reactionDist + 2.0;
         if (releaseAllowed && (des > 0.3 || this.yopoNavTarget) &&
-            dAhead > standoff + reactionDist + 2.0 && wingClear && !this._avoidSideKeepOn) {
+            dAhead > releaseDAhead && wingClear && !this._avoidSideKeepOn) {
             repX = 0; repZ = 0;          // Horizontal repulsion fully zeroed (no 15% residual push left)
             tanX = 0; tanZ = 0;          // Tangential removed entirely (avoids detouring back to the start)
             brake = 1.0;                 // Clear exit means full speed, not slowed by vertical threats
