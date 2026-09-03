@@ -3988,23 +3988,28 @@ export class Drone {
         // side-building's repulsion on (false detour / overshooting the clear channel). Fixed to the
         // correct negation so straight flight down a clear corridor is released again.
         if (this._avoidWingKeepOn) wingClear = false;
-        // Horizontal wing-clearance guard (level / climbing flight): the descent wing-guard above is
-        // gated on a real descent, so an in-corridor obstacle whose goalClear verdict flickers N/Y
-        // during a detour would have its rep/tan zeroed by the release below and the drone would fly
-        // straight -- it "flies past / overshoots" the obstacle instead of sliding around it. Keep the
-        // lateral repulsion here too, but ONLY for an obstacle that is actually IN the flight corridor
-        // (perpendicular offset from the goal bearing < pathHalfWidth = 2.5 m). A far side-building
-        // whose lateral offset is several metres is outside the path and is passed safely in a straight
-        // line, so gating on bare radial distance wrongly forced a detour down a clear corridor. The
-        // lateral gate mirrors goalClear's own corridor test, so the guard now fires only for the same
-        // in-corridor obstacle whose flicker would otherwise release rep mid-detour -- clear corridors
-        // stay straight, genuine detours still complete. Hysteresis identical to the descent guard
-        // (engage 2 / drop 3 frames) to avoid probe-noise chatter on the envelope boundary.
+        // Omnidirectional wing-clearance guard (ALL flight phases, ALL ray directions): reserve the
+        // wingspan envelope (yopoAvoidStopH + yopoWingMargin) around the drone in EVERY direction, not
+        // just along the goal bearing or during a descent. The wing is a physical span, so a wall off to
+        // the side or at an oblique angle that lies INSIDE the envelope would clip the wingtip even
+        // though the body centre clears it. Keep the lateral repulsion on whenever ANY ring ray (any
+        // direction) finds an obstacle inside the envelope that is NOT beyond the goal (a wall the goal
+        // sits against is beyond the goal, so it is allowed and the drone can still converge onto a goal
+        // against a building). This stops the release below from zeroing the side push-away and letting
+        // the drone drift into a side wall. The forward-corridor brake is still governed by dAheadH, so a
+        // side wall only makes the drone hold its offset -- it does NOT force a crawl. Hysteresis
+        // identical to the descent guard (engage 2 / drop 3 frames) to avoid probe-noise chatter.
         let sideKeepNow = false;
-        if (!nearGoal && dMin < this.yopoAvoidStopH + this.yopoWingMargin && distGoalH > 0.5) {
-            const projN = dMinDirX * gx + dMinDirZ * gz;   // >0: nearest obstacle lies toward the goal
-            const latOff = dMin * Math.sqrt(Math.max(0, 1 - projN * projN)); // perpendicular offset from the goal bearing (corridor measure)
-            if (projN > 0 && dMin * projN <= distGoalH && latOff < 2.5) sideKeepNow = true;
+        if (!nearGoal && distGoalH > 0.5) {
+            const wingEnv = this.yopoAvoidStopH + this.yopoWingMargin;
+            for (let i = 0; i < dirs.length; i++) {
+                const d = dists[i];
+                if (!Number.isFinite(d) || d <= 0 || d >= wingEnv) continue;
+                const dotG = dirs[i].x * gx + dirs[i].z * gz;  // along-goal projection of this ray
+                const aG = d * dotG;                           // along-goal distance of the obstacle
+                // Inside the envelope, not beyond the goal, and not clearly behind -> reserve the wing here.
+                if (aG <= distGoalH && dotG > -0.3) { sideKeepNow = true; break; }
+            }
         }
         if (sideKeepNow) { this._avoidSideKeepN = (this._avoidSideKeepN || 0) + 1; this._avoidSideBlockN = 0; }
         else { this._avoidSideBlockN = (this._avoidSideBlockN || 0) + 1; this._avoidSideKeepN = 0; }
