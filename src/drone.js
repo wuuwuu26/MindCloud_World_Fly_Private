@@ -1912,7 +1912,11 @@ export class Drone {
             const gErrX = this.yopoNavTarget.x - this.x;
             const gErrZ = this.yopoNavTarget.z - this.z;
             const gErrY = this.yopoNavTarget.y - this.y;
-            const holdKp = 1.5, holdAltKp = 2.5, holdKd = 1.5, holdMaxV = 2.0;
+            // holdMaxV was 2.0 m/s -- a creep that made the last 6 m take ~3 s and read as "very slow
+            // near the goal". Raised to 3.0 for a snappier settle. holdKd raised 1.5 -> 2.2 (above the
+            // ~2.45 critical value for kp=1.5) to keep it overdamped, so the faster arrival does not
+            // start to overshoot / sway at the goal.
+            const holdKp = 1.5, holdAltKp = 2.5, holdKd = 2.2, holdMaxV = 3.0;
             velTargetX = holdKp * gErrX - holdKd * this.vx;
             velTargetZ = holdKp * gErrZ - holdKd * this.vz;
             velTargetY = holdAltKp * gErrY - holdKd * this.vy;
@@ -2136,8 +2140,17 @@ export class Drone {
                     let steerScale = 1.0;
                     let fwdFloor = this.yopoFwdFloorFrac;
                     if (avoid.goalClear && !this.yopoArrived) {
-                        steerScale = 0.7;
-                        fwdFloor = Math.max(fwdFloor, 0.35);
+                        // When the corridor to the goal is open the detour must stand down HARD, not
+                        // gently. A 0.7 scale kept 70% of the tangential push, so while the (2-frame)
+                        // release hysteresis engaged the drone kept sliding tangentially and sailed
+                        // PAST the opening it had just reached ("horizontal detour overshoots the clear
+                        // channel"). Dropping it to 0.4 kills the residual tangential quickly so the
+                        // forward (goalward) component reclaims the velocity and the drone re-enters the
+                        // corridor instead of flying past it. The full clean release (steer = 0) still
+                        // fires via the guarded block once the hysteresis confirms -- this just makes the
+                        // transition prompt and removes the overshoot.
+                        steerScale = 0.4;
+                        fwdFloor = Math.max(fwdFloor, 0.45);
                     }
                     steerX *= steerScale;
                     steerZ *= steerScale;
@@ -2155,6 +2168,20 @@ export class Drone {
                     // still caught by _handleCollisions and the brake still slows any real approach.
                     const nearGoalZone = distGoalH < 12.0;
                     if (this.yopoArrived || nearGoalZone) { steerX = 0; steerZ = 0; }
+                    // Near-goal clean convergence: with the directional push already zeroed above, also
+                    // force the safety brake fully open whenever the goal corridor is clear. The kinematic
+                    // brake is driven by the WIDE cone and flips frame to frame with probe noise near a
+                    // side building, so left alone it keeps the final approach both SLOW and SPEED-JITTERY
+                    // ("jittery / very slow near the goal"). A full-speed convergence is safe here --
+                    // vSafeUp / vSafeDown still clamp the vertical and _handleCollisions still catches a
+                    // real strike -- so we only drop the speed-limiting brake, not the other safety layers.
+                    // When the corridor is actually blocked (goalClear false) we leave the brake alone so
+                    // the drone still slows for a genuine in-corridor obstacle.
+                    if (nearGoalZone && avoid.goalClear) {
+                        this._avoidBrakeFilt = 1.0;
+                        avoid.brake = 1.0;
+                        braking = false;
+                    }
                     // Cap the detour vector ITSELF. Previously lateralBudget only shrank fwdAllow
                     // and the steer vector was added unclamped -- with the tangential gain at
                     // 34 m/s and the repulsion at 15, the detour could alone command maxSpd even
