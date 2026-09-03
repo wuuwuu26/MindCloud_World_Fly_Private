@@ -255,7 +255,7 @@ export class Drone {
         // a calmer, quicker settle.
         // (removed) yopoTakeoverSlew was the velocity-target slew cap of the old takeover zone.
         this.yopoArriveHoldM = 6.0;        // Client-side arrival lock distance threshold (m). DISTANCE-ONLY
-                                          // RAISED 2.0 -> 6.0 per request ("接管"): switch to the position-hold
+                                          // RAISED 2.0 -> 6.0 per request ("takeover"): switch to the position-hold
                                           // takeover earlier, at 6 m, so the drone stops cruising / driving
                                           // straight at the goal before it closes in enough to graze a building
                                           // with its wing during the final descent. The server's cmd.arrived

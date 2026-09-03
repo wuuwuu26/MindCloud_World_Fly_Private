@@ -459,7 +459,7 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   insufficient.
 - **Arrival latching**: the server-side 2 m arrival verdict latches in `main.js` (`cmd.arrived` →
   `yopoArrived`, released only when the goal is more than `YOPO_ARRIVE_RELEASE_M` away); the client
-  additionally has a backstop — within `yopoArriveHoldM = 2.0` m (distance-only, no speed gate — `yopoArriveHoldV` was removed; lowered 4.0 -> 2.0 so the 2-4 m band keeps cruising instead of hovering) it
+  additionally has a backstop — within `yopoArriveHoldM = 6.0` m (distance-only, no speed gate — `yopoArriveHoldV` was removed; raised 2.0 -> 6.0 so the takeover engages earlier, before the drone closes in far enough to graze a building with its wing during the final descent) it
   also treats the goal as arrived, avoiding "always one step short" before the asynchronous server verdict
   returns. Once arrived it enters the goal-point position hold described in the arrival-handling section.
 
@@ -527,8 +527,8 @@ Key parameters (all in the `src/drone.js` constructor):
 | `yopoAvoidRange` | 65.0 | Obstacle detection radius (m); ray length is free, lengthening only helps |
 | `yopoAvoidRepRange` | 28.0 | Repulsion / tangential / braking range (m); also `goalClear`'s clear threshold — do **not** raise |
 | `yopoAvoidRepRangeHi` | 60.0 | The same range at `yopoAvoidRefSpeed` (m) |
-| `yopoAvoidRepGain` | 26.0 | Maximum radial push-away speed (m/s) |
-| `yopoAvoidTanGain` | 88.0 | Tangential detour gain (m/s); higher = more decisive detour |
+| `yopoAvoidRepGain` | 30.0 | Maximum radial push-away speed (m/s) |
+| `yopoAvoidTanGain` | 104.0 | Tangential detour gain (m/s); higher = more decisive detour |
 | `yopoTanConeCos` | 0.17 | Only use obstacles within a ±80° cone around the goal bearing as the detour reference, so buildings behind/beside cannot steer it off |
 | `yopoTanAwayCos` | -0.2 | Drop the remembered tangent when it points >100° away from the goal, allowing a turn back |
 | `yopoTanAwayScale` | 0.78 | Scale applied to a tangent pointing >90° away from the goal, avoiding being pushed off the goal |
@@ -552,6 +552,7 @@ Key parameters (all in the `src/drone.js` constructor):
 | `yopoCruiseMinSpd` | 12.0 | Cruise speed floor (m/s): tops up forward speed along the goal bearing when the path is clear and the goal is far; yields while braking |
 | `yopoCruiseMinDist` | 5.0 | Distance to the goal below which the cruise floor is switched off, respecting the arrival deceleration |
 | `yopoVertFirstEnabled` | `true` | Master switch of the cruise-phase "vertical-first" direct climb/descent |
+| `yopoVertClearR` | 16.0 | Horizontal-openness radius (m) for descent: a vertical descent may only begin when no obstacle lies within this radius in any horizontal direction (dMin > this, i.e. "truly open"); otherwise the drone holds altitude and keeps detouring until the area is clear, then descends. Waived within `yopoVertFirstHDist` × 0.5 of the goal so the final arrival can still descend. |
 | `droneMaxVSpeed` | 15.0 | Hard vertical speed ceiling (m/s) |
 | `droneMaxAngle` | 60 | Maximum tilt angle (°): the physical tilt ceiling |
 
@@ -600,8 +601,8 @@ are still live and now only interpolate the **action ranges** (`repRange` / `bra
 | `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 55 | **Retired** (ray tiering removed): no outer cone concept |
 | `yopoAvoidSliceMax` | 12 | **Retired** (ray tiering removed): no round-robin slices any more |
 | `yopoAvoidRepRangeHi` | 60.0 | Repulsion/detour/brake action range at speed (m) |
-| `yopoAvoidTanGain` | 88.0 | Tangential detour gain (m/s), more decisive than 30 |
-| `yopoAvoidRepGain` | 26.0 | Maximum radial push-away speed (m/s), more decisive than 12 |
+| `yopoAvoidTanGain` | 104.0 | Tangential detour gain (m/s), more decisive than 12 |
+| `yopoAvoidRepGain` | 30.0 | Maximum radial push-away speed (m/s), more decisive than 18 |
 | `yopoAvoidBrakeRangeHi` | 54.0 | Soft-brake start distance at speed (m) |
 | `yopoAvoidBrakeReaction` | 0.80 | Brake reaction time at speed (s): the lag (attitude build-up + control loop) is converted to a reaction distance `spd × reaction` subtracted from the stopping room, so at 15 m/s braking starts ~3 m earlier and still stops inside the standoff |
 
@@ -716,7 +717,7 @@ During navigation:
   this geometric layer goes to zero and does not interfere with navigation — see "Avoidance
   Architecture and Tuning".
 - Arrival has two layers: the server flags arrival within 2 m of the goal (`ARRIVE_THRESHOLD`); the
-  client additionally latches arrival within 2.0 m (distance-only, no speed gate; lowered 4.0 -> 2.0 so the 2-4 m band keeps cruising instead of hovering), so the asynchronous server reply
+  client additionally latches arrival within 6.0 m (distance-only, no speed gate; raised 2.0 -> 6.0 so the takeover engages earlier, before the drone closes in far enough to graze a building with its wing during the final descent), so the asynchronous server reply
   cannot leave it "always one step short"
 - Press **`X`** (or click **"Stop Nav"**) to end navigation
 
