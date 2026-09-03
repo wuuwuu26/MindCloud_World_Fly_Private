@@ -203,11 +203,16 @@ export class Drone {
         // closing gate stay on, so the drone cannot charge into the wall -- only the slide-around
         // speed is freed up. Lower this (e.g. 16) if fast detours clip wall corners; raise toward 28
         // to match vRep exactly.
-        this.yopoDetourSpeedFloor = 28.0;
+        this.yopoDetourSpeedFloor = 34.0; // RAISED 28 -> 34: stronger horizontal get-around authority so the
+                                          // drone commits to sliding past obstacles instead of grazing them. Forward
+                                          // budget is unchanged (still NOT raised by this floor), so it cannot charge in.
         // Fraction of the budget the lateral detour (rep + tan) may consume. Kept at the measured-safe
         // 0.72 (0.75 measured as "detouring too fast"); the higher get-around speed comes from the
         // raised budget floor above, not from loosening this share.
-        this.yopoSteerCapFrac = 0.72;
+        this.yopoSteerCapFrac = 0.74; // RAISED 0.72 -> 0.74: a little more of the speed budget may go into the
+                                      // lateral detour. 0.75 was still "detouring too fast", but the forward budget is
+                                      // now decoupled (fwdBudget is NOT raised by the detour floor) and forward is
+                                      // squeezed to yopoFwdFloorFrac while a detour is in play, so 0.74 stays safe.
         // Minimum share of the (unraised) forward budget kept as a forward floor while a lateral detour
         // is in play. With an obstacle ahead the forward component is squeezed to this fraction, so the
         // drone slides around at the detour speed instead of driving at the obstacle -- this is the
@@ -449,13 +454,13 @@ export class Drone {
                                       // safety (upPush/vRep = gain * factor); the horizontal
                                       // rep/tan have been split into separate gains below so they
                                       // can be tuned independently.
-        this.yopoAvoidRepGain = 26.0; // RAISED 18 -> 20 -> 24 -> 26. Repulsion (radial push-away) max speed (m/s): raised for a more decisive push-off (highest-priority avoidance)
-                                      // for a more decisive push/detour on contact
+        this.yopoAvoidRepGain = 30.0; // RAISED 18 -> 20 -> 24 -> 26 -> 30. Repulsion (radial push-away) max speed (m/s): raised for a more decisive push-off (highest-priority avoidance)
                                       // (together with the wider side pushRange + keep-out weight it reacts sooner
                                       // and holds further off building faces), instead
                                       // of just being "pushed back rather than steered around"
-        this.yopoAvoidTanGain = 88.0; // RAISED 54 -> 68 -> 78 -> 88. Stronger lateral steer-around so the drone
-                                      // commits to sliding past the obstacle instead of grazing it.
+        this.yopoAvoidTanGain = 104.0; // RAISED 54 -> 68 -> 78 -> 88 -> 104. Stronger lateral steer-around so the drone
+                                       // commits to sliding past the obstacle instead of grazing it. Steer is still
+                                       // capped by yopoSteerCapFrac * budget, so excess is absorbed smoothly.
                                       // Still pairs with steerCap inside _controlYOPO (kept at/below
                                       // 0.72 of maxSpd) so the detour stays physically smooth; drop
                                       // back toward 54 if it feels wild.
