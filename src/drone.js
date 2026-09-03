@@ -3880,18 +3880,22 @@ export class Drone {
         if (this._avoidWingKeepOn && this._avoidWingBlockN >= 3) this._avoidWingKeepOn = false;
         if (!this._avoidWingKeepOn) wingClear = false;
         // Horizontal wing-clearance guard (level / climbing flight): the descent wing-guard above is
-        // gated on a real descent, so a level or climbing drone on a "clear" corridor with a building
-        // just outside the narrow ±pathHalfWidth band but inside the wingspan envelope (stopH +
-        // wingMargin) still has its rep/tan zeroed by the release below and flies straight -- the wing
-        // then clips that side obstacle (it "flies past / overshoots" the obstacle instead of sliding
-        // around it). Keep the lateral repulsion here too, for any near obstacle within the wing
-        // envelope that lies between the drone and the goal, so the drone maintains wing clearance and
-        // goes AROUND it. Hysteresis identical to the descent guard (engage 2 / drop 3 frames) to
-        // avoid probe-noise chatter on the envelope boundary.
+        // gated on a real descent, so an in-corridor obstacle whose goalClear verdict flickers N/Y
+        // during a detour would have its rep/tan zeroed by the release below and the drone would fly
+        // straight -- it "flies past / overshoots" the obstacle instead of sliding around it. Keep the
+        // lateral repulsion here too, but ONLY for an obstacle that is actually IN the flight corridor
+        // (perpendicular offset from the goal bearing < pathHalfWidth = 2.5 m). A far side-building
+        // whose lateral offset is several metres is outside the path and is passed safely in a straight
+        // line, so gating on bare radial distance wrongly forced a detour down a clear corridor. The
+        // lateral gate mirrors goalClear's own corridor test, so the guard now fires only for the same
+        // in-corridor obstacle whose flicker would otherwise release rep mid-detour -- clear corridors
+        // stay straight, genuine detours still complete. Hysteresis identical to the descent guard
+        // (engage 2 / drop 3 frames) to avoid probe-noise chatter on the envelope boundary.
         let sideKeepNow = false;
         if (dMin < this.yopoAvoidStopH + this.yopoWingMargin && distGoalH > 0.5) {
             const projN = dMinDirX * gx + dMinDirZ * gz;   // >0: nearest obstacle lies toward the goal
-            if (projN > 0 && dMin * projN <= distGoalH) sideKeepNow = true;
+            const latOff = dMin * Math.sqrt(Math.max(0, 1 - projN * projN)); // perpendicular offset from the goal bearing (corridor measure)
+            if (projN > 0 && dMin * projN <= distGoalH && latOff < 2.5) sideKeepNow = true;
         }
         if (sideKeepNow) { this._avoidSideKeepN = (this._avoidSideKeepN || 0) + 1; this._avoidSideBlockN = 0; }
         else { this._avoidSideBlockN = (this._avoidSideBlockN || 0) + 1; this._avoidSideKeepN = 0; }
