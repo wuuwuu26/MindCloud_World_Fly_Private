@@ -512,6 +512,21 @@ How the client-side geometric layer works (see `_avoidanceVelocity`):
   all go to zero and `vGo` is suppressed**, so the drone flies straight at the goal at full speed,
   never pushed away or detouring without reason.
 
+#### Wing-envelope guard (reserve the wingspan in every direction)
+
+The wing is a rigid body with a physical span: even when the body centre already keeps the `yopoAvoidStopH` standoff from an obstacle, the wingtips can still be clipped by a nearby building on the side / at an oblique angle — especially while descending through a corridor that looks "clear" for the body. So before the geometric layer zeroes `rep`/`tan`/`brake`/`vRep` and lets the drone fly straight at the goal (the "release"), it runs an extra **wingspan-envelope guard** so the release cannot clip a wing against a side obstacle.
+
+Envelope radius = `yopoAvoidStopH` (9.0 m) + `yopoWingMargin` (3.0 m) = **12 m**: a 12 m wingspan safety circle is reserved around the body in every direction.
+
+The guard has two layers (both with hysteresis: asserted only after 2 consecutive occupying frames, cleared only after 3 consecutive clear frames, to avoid probe-noise chatter / crawling):
+
+- **Descent guard (along the goal bearing)**: active only when "not in the near-goal zone (≥ 12 m from goal), actually descending, the goal is below the body (a true vertical approach), and the nearest obstacle `dMin < 12 m`". It takes the nearest obstacle's projection `projN` and lateral offset `latOff` onto the goal bearing; the lateral repulsion is kept only when the obstacle is "ahead of the goal (`projN>0` and `dMin·projN ≤` the goal's horizontal distance)" AND "its lateral offset < `yopoWingMargin`" — i.e. only an obstacle that could actually clip a wing blocks the release. Otherwise (an obstacle far to the side, outside the real span) it is released, avoiding "clear path yet shoved away".
+- **Omnidirectional guard (level / climb / descent, every ray direction)**: it walks all 12 horizontal rays; if ANY direction finds an obstacle inside the 12 m envelope that is NOT beyond the goal (along-goal distance ≤ the goal's horizontal distance — i.e. not the wall the goal sits against) and not clearly behind (`dotG > −0.3`), it sets `_avoidSideKeepOn`, which stops the release logic from zeroing the lateral `rep`. So in level flight, climb or descent alike, the wing position on any side is reserved — the drone does not mis-release just because the body-centre corridor is clear and then graze a wing. The forward-corridor brake is still governed by `dAheadH`, so a side wall only makes the drone hold its offset, never crawl.
+
+Inside the 12 m near-goal convergence zone both guards are disengaged: the convergence PD pins the drone to the goal column and `goalClear`'s corridor is authoritative, so the release cannot clip a wing; the wall the goal sits against is judged "beyond the goal" and also released, so the drone can still land on a goal point next to a wall.
+
+Caller interaction: while descending, if the wing guard is keeping the lateral repulsion (`avoid.wingKeepActive`), that `rep` is treated as "wingspan reservation" rather than "mid-detour", so the altitude is NOT frozen (`velTargetY` is not forced to 0). The drone descends while holding its lateral separation from the wall — fixing the "won't descend to a clear-below goal next to a wall" regression.
+
 Key parameters (all in the `src/drone.js` constructor):
 
 | Parameter | Default | Meaning |
@@ -543,6 +558,7 @@ Key parameters (all in the `src/drone.js` constructor):
 | `yopoAvoidBrakeFloor` | 0.85 | Soft-brake speed floor ratio (still decelerates when close, without over-compressing the cruise) |
 | `yopoAvoidSideStandoff` | 10.0 | **Lateral** desired clearance (m): the distance held off walls / building faces; the keep-out repulsion runs at full strength within 10 m (reverted from 13.0 to 10.0: prevents the detour from being steered back once abreast of the obstacle) |
 | `yopoAvoidStopH` | 9.0 | **Horizontal** brake safety standoff (m): drives the forward brake standoff and the repulsion decay — keeps further off walls / buildings (raised 6.0 → 7.5 → 9.0 per request) |
+| `yopoWingMargin` | 3.0 | **Wingspan-envelope** extra lateral margin (m): stacked on `yopoAvoidStopH` to form the 12 m wing guard envelope (`StopH + WingMargin`); before releasing, if any ray finds an obstacle inside the envelope that is not beyond the goal, the lateral repulsion is kept to avoid clipping a wingtip |
 | `yopoAvoidStop` | 6.0 | **Vertical UP** safety clearance (m): drives the up-clearance brake (vSafeUp) and the vertical-clearing block distance; deliberately NOT raised with StopH, because a clearance below it would over-restrict climbing / over-head clearance |
 | `yopoAvoidStopDown` | 10.0 | **Down (descent)** safety clearance (m), SEPARATE from `yopoAvoidStop`: drives only `vSafeDown` (the descent kinematic brake against an obstacle straight below). Decoupled from `yopoAvoidStop` (lowered 8.0 → 5.0 then raised to 7.0, and widened to 10.0 this change to remove the "skim the rooftop while overflying" window), keeps margin above an obstacle below while descending; does NOT affect the up / over-head clearance nor the horizontal avoidance. |
 | `yopoMinAlt` | 10.0 | Minimum ground/roof clearance (m): below it the upward push engages (2.5 → 3.0 → 4.0 → 8.0 → 10.0). When flying OVER a rooftop the binding clearance is the straight-down ray `vDownDist`: with under 10.0 m to the rooftop below the drone is pushed up, holding ~10 m of vertical margin instead of skimming the rooftop. |
