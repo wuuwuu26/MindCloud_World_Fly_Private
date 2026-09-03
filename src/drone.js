@@ -1833,11 +1833,13 @@ export class Drone {
         // was the source of the persistent end-game sway: it fought the network, the ray layer
         // and the velocity-measurement noise all at the same time.
         let distGoal = Number.POSITIVE_INFINITY;
+        let distGoalH = Number.POSITIVE_INFINITY;
         if (this.yopoNavTarget) {
             const gdx = this.yopoNavTarget.x - this.x;
             const gdy = this.yopoNavTarget.y - this.y;
             const gdz = this.yopoNavTarget.z - this.z;
             distGoal = Math.sqrt(gdx * gdx + gdy * gdy + gdz * gdz);
+            distGoalH = Math.sqrt(gdx * gdx + gdz * gdz);
         }
         this.yopoDistToGoal = distGoal;
 
@@ -2143,7 +2145,16 @@ export class Drone {
                     // (rep/tan) push, otherwise the drone keeps sliding / veering around obstacles
                     // near the goal instead of settling. Only the passive brake (keeping velTarget
                     // scaled by avoid.brake) and the vertical vSafe clamps still apply.
-                    if (this.yopoArrived) { steerX = 0; steerZ = 0; }
+                    // Near-goal convergence zone (within 12 m, the docstring's "switch to PD
+                    // convergence" band): behave the same as arrived for the LATERAL push. A building
+                    // sitting beside or just below the goal (e.g. the drone is about to land on a
+                    // rooftop) would otherwise have its repulsion / tangential / vGo slide the drone
+                    // AWAY from the goal point ("reaches the goal area but is shoved off it"). Inside
+                    // this zone the velocity is driven by the convergence (network PD / arrival hold)
+                    // scaled only by the safety brake, so it settles ON the goal; hard collisions are
+                    // still caught by _handleCollisions and the brake still slows any real approach.
+                    const nearGoalZone = distGoalH < 12.0;
+                    if (this.yopoArrived || nearGoalZone) { steerX = 0; steerZ = 0; }
                     // Cap the detour vector ITSELF. Previously lateralBudget only shrank fwdAllow
                     // and the steer vector was added unclamped -- with the tangential gain at
                     // 34 m/s and the repulsion at 15, the detour could alone command maxSpd even
@@ -2214,8 +2225,12 @@ export class Drone {
                 }
                 // Horizontal detour around vertical obstacles (something straight below / above):
                 // add vGo to leave the obstacle footprint smoothly (neither climbing nor
-                // descending).
-                if (!this.yopoArrived) {
+                // descending). Suppressed in the near-goal convergence zone (same as arrived):
+                // when the goal itself sits on / beside a structure (landing on a rooftop, hovering
+                // next to a tower) the straight-below / straight-above ray would trigger vGo and
+                // slide the drone OFF the goal point -- so inside the zone we let the convergence
+                // hold it on the goal instead.
+                if (!this.yopoArrived && distGoalH >= 12.0) {
                     velTargetX += avoid.vGoX;
                     velTargetZ += avoid.vGoZ;
                 }
