@@ -203,16 +203,18 @@ export class Drone {
         // closing gate stay on, so the drone cannot charge into the wall -- only the slide-around
         // speed is freed up. Lower this (e.g. 16) if fast detours clip wall corners; raise toward 28
         // to match vRep exactly.
-        this.yopoDetourSpeedFloor = 34.0; // RAISED 28 -> 34: stronger horizontal get-around authority so the
+        this.yopoDetourSpeedFloor = 40.0; // RAISED 28 -> 34 -> 40: yet stronger horizontal get-around authority so the
                                           // drone commits to sliding past obstacles instead of grazing them. Forward
                                           // budget is unchanged (still NOT raised by this floor), so it cannot charge in.
         // Fraction of the budget the lateral detour (rep + tan) may consume. Kept at the measured-safe
         // 0.72 (0.75 measured as "detouring too fast"); the higher get-around speed comes from the
         // raised budget floor above, not from loosening this share.
-        this.yopoSteerCapFrac = 0.74; // RAISED 0.72 -> 0.74: a little more of the speed budget may go into the
-                                      // lateral detour. 0.75 was still "detouring too fast", but the forward budget is
-                                      // now decoupled (fwdBudget is NOT raised by the detour floor) and forward is
-                                      // squeezed to yopoFwdFloorFrac while a detour is in play, so 0.74 stays safe.
+        this.yopoSteerCapFrac = 0.77; // RAISED 0.72 -> 0.74 -> 0.77: more of the speed budget may go into the
+                                      // lateral detour. 0.75 was "detouring too fast" only when the forward budget was
+                                      // still coupled; now fwdBudget is decoupled and squeezed to yopoFwdFloorFrac while
+                                      // a detour is in play, and the closing gate + proximity governor still strip the
+                                      // toward-obstacle component, so 0.77 stays safe while the slide-around gets more
+                                      // authority.
         // Minimum share of the (unraised) forward budget kept as a forward floor while a lateral detour
         // is in play. With an obstacle ahead the forward component is squeezed to this fraction, so the
         // drone slides around at the detour speed instead of driving at the obstacle -- this is the
@@ -464,7 +466,7 @@ export class Drone {
                                       // safety (upPush/vRep = gain * factor); the horizontal
                                       // rep/tan have been split into separate gains below so they
                                       // can be tuned independently.
-        this.yopoAvoidRepGain = 30.0; // RAISED 18 -> 20 -> 24 -> 26 -> 30. Repulsion (radial push-away) max speed (m/s): raised for a more decisive push-off (highest-priority avoidance)
+        this.yopoAvoidRepGain = 34.0; // RAISED 18 -> 20 -> 24 -> 26 -> 30 -> 34. Repulsion (radial push-away) max speed (m/s): raised for a more decisive push-off (highest-priority avoidance)
                                       // (together with the wider side pushRange + keep-out weight it reacts sooner
                                       // and holds further off building faces), instead
                                       // of just being "pushed back rather than steered around"
@@ -481,25 +483,26 @@ export class Drone {
         // past it (user report: "the way to the goal is clear, yet it goes around the other side of
         // the building"). Both act on the angle between the tangential direction and the goal
         // bearing:
-        this.yopoTanConeCos = 0.17;   // Cosine of the cone (+-80 deg) around the goal bearing in
+        this.yopoTanConeCos = 0.0;    // Cosine of the cone (+-90 deg) around the goal bearing in
                                       // which an obstacle counts as "in the way" for the tangential
-                                      // detour. Widened from 0.34 so obstacles slightly to the side
-                                      // still trigger a steer-around instead of only a push-away.
-                                      // Obstacles further to the side / behind no longer supply the
-                                      // detour direction (they are handled by the repulsion instead).
-                                      // -1 restores the old behaviour of taking the globally nearest
-                                      // obstacle.
+                                      // detour. Widened from 0.34 -> 0.17 -> 0.0 so obstacles well to
+                                      // the side still trigger a steer-around instead of only a
+                                      // push-away -- the detour fires in more situations. Obstacles
+                                      // behind still never supply the detour direction (they are
+                                      // handled by the repulsion instead). -1 restores the old
+                                      // behaviour of taking the globally nearest obstacle.
         this.yopoTanAwayCos = -0.2;   // The remembered tangent from the previous frame is only kept
                                       // while it still leads roughly toward the goal; below this
                                       // cosine (> ~100 deg off the bearing) the direction memory is
                                       // dropped and the turn-back toward the goal is allowed.
                                       // -1 restores the old unconditional memory.
-        this.yopoTanAwayScale = 0.78; // Scale applied to a tangent that points more than 90 deg away
+        this.yopoTanAwayScale = 0.85; // Scale applied to a tangent that points more than 90 deg away
                                       // from the goal: it is no longer steering around the obstacle,
                                       // it is carrying the drone away, so the goal-directed terms
                                       // (trajectory / cruise floor) get the upper hand. 1.0 disables
-                                      // the guard; raised from 0.5 so the detour keeps more authority
-                                      // while rounding the obstacle before turning back.
+                                      // the guard; raised from 0.5 -> 0.78 -> 0.85 so the detour keeps
+                                      // even more authority while rounding the obstacle before turning
+                                      // back (less likely to give up the detour and drop early).
         this.yopoAvoidDecel = 8.5;    // Retained for config compatibility. The active vertical kinematic
                                       // deceleration for vSafeUp / vSafeDown is now yopoAvoidVDecel (below); the
                                       // forward brake uses yopoAvoidBrakeDecel, so this value no longer gates any cap.
