@@ -914,6 +914,11 @@ export class Drone {
         this.yopoCmdVel = null;
         this.yopoCmdAcc = null;
         this.yopoCmdTime = 0;
+        // Clearing / detour state must not leak across flights
+        this._avoidClearDir = 0;
+        this._avoidVRepFilt = 0;
+        this._avoidGoalClearN = 0;
+        this._avoidLastTan = null;
         this.yopoCmdYaw = 0;
         this.yopoCmdYawDot = 0;
         this.yopoInferenceCount = 0;
@@ -1271,6 +1276,11 @@ export class Drone {
             this.yopoCmdVel = null;
             this.yopoCmdAcc = null;
             this.yopoCmdTime = 0;
+            // Clearing / detour state must not leak across navigation sessions
+            this._avoidClearDir = 0;
+            this._avoidVRepFilt = 0;
+            this._avoidGoalClearN = 0;
+            this._avoidLastTan = null;
             this.yopoCmdYaw = 0;
             this.yopoCmdYawDot = 0;
             this.yopoDepthUnavailable = false;
@@ -2018,7 +2028,7 @@ export class Drone {
         if (this.yopoAvoidEnabled && this.yopoNavTarget &&
             !stickActive) {
             this._updateAvoidProbe();
-            avoid = this._avoidanceVelocity(velTargetX, velTargetZ, velTargetY);
+            avoid = this._avoidanceVelocity(velTargetX, velTargetZ, velTargetY, dt);
             if (avoid) {
                 // Smooth the ray brake: asymmetric low-pass, TIGHTEN AT ONCE / RELEASE SLOWLY.
                 // The probe is noisy near a goal that sits against a building -- measured: brake
@@ -2072,6 +2082,21 @@ export class Drone {
                     const fwdZ = velTargetZ * avoid.brake;
                     let steerX = avoid.repX + avoid.tanX;
                     let steerZ = avoid.repZ + avoid.tanZ;
+                    // Exit priority: when the corridor to the goal is open, decay the detour
+                    // and guarantee a solid forward floor -- otherwise the lateral budget keeps
+                    // squeezing the forward component down to its 10% floor and the drone keeps
+                    // circling the obstacle rim instead of heading straight for the goal once
+                    // the exit is reached ("walked to the exit but cannot get out"). The full
+                    // release (rep/tan = 0, brake = 1) below still requires the forward cone to
+                    // be clear, so a mis-judged corridor verdict keeps the brake armed.
+                    let steerScale = 1.0;
+                    let fwdFloor = this.yopoFwdFloorFrac;
+                    if (avoid.goalClear && !this.yopoArrived) {
+                        steerScale = 0.7;
+                        fwdFloor = Math.max(fwdFloor, 0.35);
+                    }
+                    steerX *= steerScale;
+                    steerZ *= steerScale;
                     // Arrived: hold position on the goal -- do NOT apply the directional detour
                     // (rep/tan) push, otherwise the drone keeps sliding / veering around obstacles
                     // near the goal instead of settling. Only the passive brake (keeping velTarget
@@ -2129,7 +2154,7 @@ export class Drone {
                         // forward component is squeezed down to this floor while the lateral detour
                         // carries the motion, so the drone slides around and keeps its distance
                         // instead of driving at the obstacle.
-                        const fwdAllow = Math.max(fwdBudget * this.yopoFwdFloorFrac,
+                        const fwdAllow = Math.max(fwdBudget * fwdFloor,
                                                   fwdBudget - lateralBudget);
                         const fwdMag = Math.hypot(fwdX, fwdZ);
                         if (fwdMag > fwdAllow) {
@@ -2201,7 +2226,7 @@ export class Drone {
                 const belowTooClose = avoid.vSafeDown !== null &&
                                       Number.isFinite(avoid.vSafeDown) &&
                                       avoid.vSafeDown <= 0.05;
-                if (vGoHoldAlt && !belowTooClose) {
+                if (vGoHoldAlt && !belowTooClose && !avoid.clearing) {
                     velTargetY = 0;
                 }
 
@@ -2218,7 +2243,7 @@ export class Drone {
                 // component ALONG the threat direction is removed, so the tangential part
                 // survives untouched -- "charging at the wall" becomes "sliding along the wall",
                 // the detour we actually want, rather than stalling in place.
-                if (avoid.threatHasDir) {
+                if (avoid.threatHasDir && !avoid.clearing) {
                     const vClose = velTargetX * avoid.threatDirX +
                                    velTargetZ * avoid.threatDirZ;
                     if (vClose > avoid.vCloseMax) {
@@ -2747,13 +2772,18 @@ export class Drone {
         // fast" against "frame rate" (the GPU cost of a forceFresh full probe scales linearly
         // with frequency).
         const spdHNow = Math.hypot(this.vx, this.vz);
+        // Vertical motion must keep the probe dense too: while climbing / diving over an
+        // obstacle the layer distances (distsHigh / vUpDist) change fastest, and a relaxed
+        // interval feeds the clearing decision 400 ms-old data -- the climb then chatters
+        // (upClear flips on stale rays) and the drone sinks between refreshes.
+        const spdProbeNow = Math.max(spdHNow, Math.abs(this.vy));
         // Above yopoAvoidFastSpeed the probe runs at the full rate (yopoAvoidQueryMs) so the
         // forward cone is refreshed every cycle; below it the interval relaxes up to 400 ms,
         // since a slow-moving drone needs far less look-ahead and the saved time goes to the
         // frame rate.
-        const queryMs = spdHNow > this.yopoAvoidFastSpeed
+        const queryMs = spdProbeNow > this.yopoAvoidFastSpeed
             ? this.yopoAvoidQueryMs
-            : Math.max(this.yopoAvoidQueryMs, Math.min(400, 400 - spdHNow * 25));
+            : Math.max(this.yopoAvoidQueryMs, Math.min(400, 400 - spdProbeNow * 25));
         if (p && now - p.time < queryMs) return;
         // Reusable when the position barely changed, reducing Cesium pickFromRay cost.
         // The 900 ms reuse window is only safe when the drone is nearly stationary: at speed the
@@ -2971,7 +3001,7 @@ export class Drone {
      * brake = 1 and rep/tan = 0, so the ultimate goal of navigating to the target point is
      * never affected.
      */
-    _avoidanceVelocity(velTargetX, velTargetZ, velTargetY = 0) {
+    _avoidanceVelocity(velTargetX, velTargetZ, velTargetY = 0, dt = 0.016) {
         const p = this._avoidProbe;
         if (!p) return null;
         const R = this.yopoAvoidRange;
@@ -3406,7 +3436,16 @@ export class Drone {
                         // goal; once the remembered tangent points more than ~100 deg away from the
                         // goal bearing it is dropped and the flip back is allowed.
                         const ltToGoal = (lt.x / lm) * gx + (lt.z / lm) * gz;
-                        if (cos < -0.5 && lastOk && ltToGoal > this.yopoTanAwayCos) {
+                        // Exit fix: also compare the NEW tangent's projection on the goal
+                        // bearing. Only keep the memory when the new tangent is NOT more
+                        // goal-directed than the remembered one. Rounding the obstacle's centre
+                        // / corner the fresh tangent flips back toward the goal while the
+                        // remembered one still points along the far side -- honouring the memory
+                        // there made the drone sail around the far side ("walked to the exit,
+                        // then turned back around").
+                        const newTanToGoal = nm > 1e-3 ? (fx * gx + fz * gz) / nm : 1;
+                        if (cos < -0.5 && lastOk && ltToGoal > this.yopoTanAwayCos &&
+                            newTanToGoal < ltToGoal) {
                             fx = lt.x * nm / lm; fz = lt.z * nm / lm;
                         }
                     }
@@ -3536,6 +3575,18 @@ export class Drone {
             const pathBlockedClose = dPath < this.yopoCorridorGuardDist;
             if (dPath > reach || (dCmd > reach && !pathBlockedClose)) goalClear = true;
         }
+        // Consecutive-frame count of the "corridor open" verdict. Used (a) as a debounced drop
+        // of the tangential direction memory and (b) as the clearing exit test -- a single
+        // grazing-ray frame must not reset either.
+        if (goalClear) this._avoidGoalClearN = (this._avoidGoalClearN || 0) + 1;
+        else this._avoidGoalClearN = 0;
+        const goalClearStable = this._avoidGoalClearN >= 4;
+        // Drop the remembered tangent once the corridor has STAYED open for a few frames. The
+        // memory exists to keep ONE detour consistent; a stale direction carried past the exit
+        // re-uses the tangent that pointed around the far side of the previous obstacle
+        // ("there is an exit but it turns back around"). Only the memory is dropped here --
+        // rep/tan themselves are still released by the guarded block further below.
+        if (goalClearStable) this._avoidLastTan = null;
 
         // ---- Vertical obstacle clearing (A) ----
         // When forward progress is strongly blocked (dAhead small) and one vertical side is
@@ -3559,15 +3610,41 @@ export class Drone {
         // "taking off although the way is clear" (the dual corridor / goalClear can break
         // during final trimming when the velocity direction points at a side building).
         // Vertical safety (upPush/vSafeDown) is still kept to prevent ground / ceiling hits.
-        if (!this.yopoArrived && !goalClear && dAheadH < blockDist && des > 0.3 &&
-            p.distsHigh && p.distsHigh2 && p.distsLow) {
-            // Among the directions that got a high-layer probe (highProbeIdx), if the upper layer
-            // is clear in ANY direction inside the "forward hemisphere" it counts as flyable --
-            // not just the best-aligned direction, so "straight ahead is blocked but a gap
-            // slightly to the side can be flown over" is not missed (raises clearing willingness /
-            // success rate).
-            const clearD = R * this.yopoAvoidVClear; // A layer distance above this value counts as clear, i.e. flyable
-            const hiIdx = p.highProbeIdx || null;
+        // ---- Commit / hysteresis state machine for the clearing direction ----
+        // Re-judging upClear every frame lets the GRAZING rays at the obstacle's top edge break
+        // the climb: the 3 forward layer rays skim the rooftop, their distances oscillate, and
+        // probes only refresh every 60-400 ms -- so vRep stepped between +-e and 0, velTargetY
+        // fell back to the network's (usually negative) vertical command, and the drone "climbed,
+        // sank, climbed again" in front of the obstacle. Instead: once a clearing direction is
+        // COMMITTED it is HELD until the obstacle is genuinely passed (corridor open for several
+        // frames / dAheadH well past the footprint) or that direction is physically sealed
+        // (insufficient clearance straight above / below). The hold test is much looser than the
+        // entry test, direction flips mid-clear are forbidden, and the vSafeUp / vSafeDown
+        // kinematic clamps still hard-limit the final climb / dive.
+        const clearD = R * this.yopoAvoidVClear; // A layer distance above this value counts as clear, i.e. flyable
+        const hiIdx = p.highProbeIdx || null;
+        const e = this.yopoAvoidGain * this.yopoAvoidVClimbScale;
+        const canTrigger = !this.yopoArrived && !goalClear && dAheadH < blockDist && des > 0.3 &&
+            p.distsHigh && p.distsHigh2 && p.distsLow;
+        // Persistent clearing direction: 0 = none, +1 = climbing over, -1 = diving under.
+        let heldDir = this._avoidClearDir || 0;
+        if (heldDir === +1) {
+            const sealed = Number.isFinite(p.vUpDist) && p.vUpDist <= this.yopoAvoidStop + 1.0;
+            const exited = goalClearStable || dAheadH > blockDist * 1.5;
+            if (sealed || exited) heldDir = 0;
+        } else if (heldDir === -1) {
+            const sealed = Number.isFinite(p.vDownDist) &&
+                (p.vDownDist <= this.yopoAvoidStopDown ||
+                 (Number.isFinite(p.groundGap) && p.groundGap <= this.yopoMinAlt));
+            const exited = goalClearStable || dAheadH > blockDist * 1.5;
+            if (sealed || exited) heldDir = 0;
+        }
+        if (heldDir === 0 && canTrigger) {
+            // Fresh entry decision (strict, as before). Among the directions that got a
+            // high-layer probe (highProbeIdx), if the upper layer is clear in ANY direction
+            // inside the "forward hemisphere" it counts as flyable -- not just the best-aligned
+            // direction, so "straight ahead is blocked but a gap slightly to the side can be
+            // flown over" is not missed (raises clearing willingness / success rate).
             let upClear = false, downClear = false;
             for (let i = 0; i < dirs.length; i++) {
                 if (hiIdx && hiIdx.indexOf(i) < 0) continue; // Only directions probed at the high layer
@@ -3581,16 +3658,31 @@ export class Drone {
                     Number.isFinite(p.groundGap) && p.groundGap > this.yopoMinAlt &&
                     Number.isFinite(p.vDownDist) && p.vDownDist > this.yopoMinAlt) downClear = true;
             }
-            const e = this.yopoAvoidGain * this.yopoAvoidVClimbScale;
-            if (upClear && downClear) vRep = e;       // Both available -> prefer climbing (safer)
-            else if (upClear) vRep = e;               // Fly over
-            else if (downClear) vRep = -e;            // Dive under (clearance confirmed sufficient)
+            if (upClear) heldDir = +1;                // Both available -> prefer climbing (safer)
+            else if (downClear) heldDir = -1;         // Dive under (clearance confirmed sufficient)
         }
+        this._avoidClearDir = heldDir;
+        if (heldDir !== 0) vRep = heldDir * e;
+        // Slew the clearing command so engage / release are step-free: the raw vRep jumps by
+        // ~28 m/s, which the velocity loop turns into a vertical lurch (and, on release, into
+        // the "sank in front of the obstacle" drop). The ramp keeps the climb decisive but
+        // continuous; vSafeUp / vSafeDown still clamp the final value, so safety is unchanged.
+        if (this._avoidVRepFilt === undefined || !Number.isFinite(this._avoidVRepFilt)) {
+            this._avoidVRepFilt = 0;
+        } else {
+            const vTau = 0.15;
+            const dtv = dt > 0 ? dt : 0.016;
+            const va = 1 - Math.exp(-dtv / vTau);
+            this._avoidVRepFilt += (vRep - this._avoidVRepFilt) * va;
+            if (vRep === 0 && Math.abs(this._avoidVRepFilt) < 0.3) this._avoidVRepFilt = 0;
+        }
+        vRep = this._avoidVRepFilt;
         // Vertical-clearing (fly-over / dive-under) flag: the drone has committed to passing the
         // obstacle ABOVE / BELOW, so there is no horizontal-collision risk to pace the horizontal
         // speed for. While clearing, the proximity governor / closing gate / forward brake must all
         // stay off -- otherwise the drone crawls into the obstacle footprint instead of clearing it.
-        const clearing = vRep !== 0;
+        // (Hysteresis: any meaningful ramped vRep counts, so the flags do not chatter at zero.)
+        const clearing = Math.abs(vRep) > 1.0;
 
         // The potential field only handles "stop without hitting", it does not keep pushing away:
         // it is modulated by the "nearest obstacle distance dMin" (any direction) rather than by
@@ -3798,7 +3890,7 @@ export class Drone {
                 `vDown=${Number.isFinite(p.vDownDist) ? p.vDownDist.toFixed(1) : 'n/a'}`);
         }
 
-        return { repX, repZ, tanX, tanZ, brake, upPush, vRep, vSafeDown, vSafeUp, vGoX, vGoZ,
+        return { repX, repZ, tanX, tanZ, brake, upPush, vRep, clearing, vSafeDown, vSafeUp, vGoX, vGoZ,
                  threatDirX: dAheadDirX, threatDirZ: dAheadDirZ,
                  threatHasDir: dAheadHasDir, vCloseMax, nearSpeedCap,
                  nearDirX: dMinDirX, nearDirZ: dMinDirZ, nearHasDir,
