@@ -495,7 +495,7 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 
 - **brake（近障刹车）**：前向速度取"指令速度"与"机体实际速度"较大者；威胁距离 `dAhead` 同时按指令方向与机体实际航向取较小值（防止网络把指令拐向旁边、机体却仍冲墙时不刹车）。反应距离 `reactionDist = spdFwd·reactionSec`（高速档 `yopoAvoidBrakeReactionHi` 更大）从可刹车距离中扣除，使高速时提前约 3 m 起步、并在 standoff 内停住。双层减速取较保守者：① 硬运动学刹车 `vSafe = √(2·yopoAvoidBrakeDecel·dEff)`（`dEff = brakeClear − standoff − reactionDist`，`yopoAvoidBrakeDecel≈6.5` 远低于物理可达，留 ~2× 余量）；② 渐进软刹车在 `brakeRange` 内随距离平滑缩速、地板 `yopoAvoidBrakeFloor=0.85`。目标背后障碍（`dAhead > distGoalH`）只保留 `yopoAvoidGoalBrakeFloor`，不刹最终进近。触发刹车时调用点**压制 YOPO 加速度前馈**并沿速度反方向注入最强减速前馈（最高 `yopoAvoidBrakeAccel≈17`，对应 60° 倾转 `droneMaxAngle=60`，至少交付 `yopoAvoidBrakeMinFrac=0.85`）；合成速度再沿威胁方向由 `vCloseMax = √(2·BrakeDecel·dGate)` 硬性限速，确保 rep/tan/vGo 叠加后仍能停下。
 
-- **vRep（竖直越障）**：仅当"前向水平走廊真正被挡"（`!goalClear` 且 `dAheadH < yopoAvoidStop + yopoAvoidVBlock`，即 26 m）且非近目标区时触发。在前向半球内，只要任一条高层 `distsHigh`/`distsHigh2` 中任一层 `> clearD (= yopoAvoidRange·yopoAvoidVClear ≈ 24.7 m)` 且正上方 `vUpDist` 也畅通 → 可越顶；若 `lowOk` 且低层 `dL` 畅通、下方净空足够 → 可下钻。两者皆可优先上爬，只上通则上爬（`vRep = yopoAvoidGain·yopoAvoidVClimbScale`），只下达则下钻（取负）。竖直探测随高度动态刷新，持续爬升直到越过障碍顶。
+- **vRep（竖直越障）**：仅当"前向水平走廊真正被挡"（`!goalClear` 且 `dAheadH < yopoAvoidStop + yopoAvoidVBlock`，即 26 m）且非近目标区时触发。在前向半球内，只要任一条高层 `distsHigh`/`distsHigh2` 中任一层 `> clearD (= yopoAvoidRange·yopoAvoidVClear ≈ 29.3 m)` 且正上方 `vUpDist` 也畅通 → 可越顶；若 `lowOk` 且低层 `dL` 畅通、下方净空足够 → 可下钻。两者皆可优先上爬，只上通则上爬（`vRep = yopoAvoidGain·yopoAvoidVClimbScale`），只下达则下钻（取负）。竖直探测随高度动态刷新，持续爬升直到越过障碍顶。
 
 - **vGo（竖直障碍足迹水平绕行）**：当正下方"是结构非地形"（`vDownDist < yopoAvoidVGoThresh` 且 `groundGap − vDownDist > 1.5`，即不是贴地飞行）或正上方被挡（`vUpDist < yopoAvoidVGoThresh`），且"前方走廊不通"（`!goalClear`）、非近目标时触发。选最空水平方向离开足迹（优先前向半球最空，否则全局最空 `openDir`），保证仍朝目标推进而非掉头。强度 `strength = yopoAvoidTanGain·(yopoAvoidVGoBase + yopoAvoidVGoSpan·(1 − closeness))`；安全上限 `vGoSafe = √(2·yopoAvoidVGoDecel·max(0, vGoClear − standoff))` 用侧向滚转专属减速（远大于前向刹车），避免冲进侧障也不被压到 ~3 m/s。vGo 直接叠加到速度目标、不经前向刹车，所以自带该限速。
 
@@ -538,10 +538,10 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 | `yopoAvoidStop` | 6.0 | 安全净距 (m)：驱动**上/下**净空刹车（vSafeUp / vSafeDown）与竖直越障封锁距离；刻意不随 StopH 上调，否则净空小于它时完全禁止上升/下降，低目标/近地无法到达 |
 | `yopoAvoidStopDown` | 10.0 | **下方（下降）**独立安全净距 (m)：仅驱动 `vSafeDown`（下降时对脚下障碍的运动学刹车）。与 `yopoAvoidStop` 解耦（曾由 8.0 下调到 5.0 再回调到 7.0，本次为消除"飞越楼顶贴顶飞"窗口再放大到 10.0），下降时在脚下障碍上方保持余量，不影响上升/头顶净空 |
 | `yopoMinAlt` | 10.0 | 最小离地/离顶净空 (m)：低于它触发向上推离（2.5 → 3.0 → 4.0 → 8.0 → 10.0）。飞过楼顶时绑定净空是**正下射线 `vDownDist`**：脚下楼顶净空 < 10 m 即被推升，保持 ~10 m 垂直余量、不再贴着楼顶飞；下方余量更大 |
-| `yopoAvoidVClimbScale` | 2.2 | 竖直越障爬升力度 |
+| `yopoAvoidVClimbScale` | 2.6 | 竖直越障爬升力度（本次 2.2→2.6，飞越更果断） |
 | `yopoAvoidVBlock` | 20.0 | 前方净空低于此值触发竖直越障 (m) |
 | `yopoAvoidVGoBase` / `VGoSpan` | 0.85 / 0.60 | 足下障碍"水平移出足迹"速度 (vGo) 的近/远强度 |
-| `yopoAvoidVClear` | 0.38 | 上层"畅通"判定占比，越低越障意愿越强 |
+| `yopoAvoidVClear` | 0.45 | 上层"畅通"判定占比，越低越障意愿越强（本次 0.38→0.45，飞越意愿更强） |
 | `yopoCorridorGuardDist` | 12.0 | 近距目标走廊守卫 (m)：此距离内即便速度方向走廊通畅，若目标方位走廊被挡也强制刹车 |
 | `yopoCruiseMinSpd` | 12.0 | 巡航最小速度地板 (m/s)：路径畅通且目标较远时沿目标方位补齐前进速度，避障刹车时让位 |
 | `yopoCruiseMinDist` | 5.0 | 距目标小于此值时关闭巡航地板，尊重到达减速 |
