@@ -493,7 +493,7 @@ How the client-side geometric layer works (see `_avoidanceVelocity`):
   "network-commanded direction" and the "drone's actual heading", so the network cannot turn the
   command aside and thereby exclude an obstacle straight ahead and skip braking.
 - **Lateral speed budget**: while detouring, "forward" and "lateral detour" are budgeted separately —
-  lateral takes at most 72% of the budget base and forward keeps at least 10%, so the velocity
+  lateral takes at most 77% of the budget base and forward keeps at least 20%, so the velocity
   vector really tilts tangentially and slides along the obstacle instead of "charging at full speed
   while grazing it". The budget base is `max(yopoCruiseMinSpd, actual commanded speed)`: the network
   itself slows its commands when the depth shows obstacles, so keying the budget to the commanded
@@ -527,11 +527,13 @@ Key parameters (all in the `src/drone.js` constructor):
 | `yopoAvoidRange` | 65.0 | Obstacle detection radius (m); ray length is free, lengthening only helps |
 | `yopoAvoidRepRange` | 28.0 | Repulsion / tangential / braking range (m); also `goalClear`'s clear threshold — do **not** raise |
 | `yopoAvoidRepRangeHi` | 60.0 | The same range at `yopoAvoidRefSpeed` (m) |
-| `yopoAvoidRepGain` | 30.0 | Maximum radial push-away speed (m/s) |
+| `yopoAvoidRepGain` | 34.0 | Maximum radial push-away speed (m/s) |
 | `yopoAvoidTanGain` | 104.0 | Tangential detour gain (m/s); higher = more decisive detour |
-| `yopoTanConeCos` | 0.17 | Only use obstacles within a ±80° cone around the goal bearing as the detour reference, so buildings behind/beside cannot steer it off |
+| `yopoTanConeCos` | 0.0 | Only use obstacles within a ±90° cone around the goal bearing as the detour reference, so buildings behind/beside cannot steer it off (widened from 0.17 so obstacles further to the side still trigger a detour) |
 | `yopoTanAwayCos` | -0.2 | Drop the remembered tangent when it points >100° away from the goal, allowing a turn back |
-| `yopoTanAwayScale` | 0.78 | Scale applied to a tangent pointing >90° away from the goal, avoiding being pushed off the goal |
+| `yopoTanAwayScale` | 0.85 | Scale applied to a tangent pointing >90° away from the goal, avoiding being pushed off the goal (raised from 0.78 to keep more detour authority while rounding) |
+| `yopoSteerCapFrac` | 0.77 | Fraction of the speed budget the lateral detour may consume (lateral speed cap = budget base x this). Forward budget is decoupled and squeezed, so raising it only enlarges the slide-around authority, never the charge-in. |
+| `yopoDetourSpeedFloor` | 40.0 | Horizontal speed floor (m/s) while a detour is actually in play: raises the decisiveness of the slide-around so the horizontal detour is as strong as the vertical clearing (vRep); the forward gate is NOT raised by this. |
 | `yopoAvoidDecel` | 8.5 | Assumed deceleration used by the *vertical* brake threshold (m/s²) |
 | `yopoAvoidBrakeDecel` | 6.5 | *Horizontal* brake planning deceleration (m/s²): deliberately below the reachable value to leave ~2× margin |
 | `yopoAvoidBrakeAccel` | 17.0 | Max *actual* deceleration the ray layer may command while braking (m/s²): matches the 60° tilt ceiling (`droneMaxAngle=60`). It injects a deceleration feed-forward opposing velocity and **suppresses the network's acceleration feed-forward** |
@@ -602,7 +604,7 @@ are still live and now only interpolate the **action ranges** (`repRange` / `bra
 | `yopoAvoidSliceMax` | 12 | **Retired** (ray tiering removed): no round-robin slices any more |
 | `yopoAvoidRepRangeHi` | 60.0 | Repulsion/detour/brake action range at speed (m) |
 | `yopoAvoidTanGain` | 104.0 | Tangential detour gain (m/s), more decisive than 12 |
-| `yopoAvoidRepGain` | 30.0 | Maximum radial push-away speed (m/s), more decisive than 18 |
+| `yopoAvoidRepGain` | 34.0 | Maximum radial push-away speed (m/s), more decisive than 18 |
 | `yopoAvoidBrakeRangeHi` | 54.0 | Soft-brake start distance at speed (m) |
 | `yopoAvoidBrakeReaction` | 0.80 | Brake reaction time at speed (s): the lag (attitude build-up + control loop) is converted to a reaction distance `spd × reaction` subtracted from the stopping room, so at 15 m/s braking starts ~3 m earlier and still stops inside the standoff |
 
