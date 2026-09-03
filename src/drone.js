@@ -322,6 +322,13 @@ export class Drone {
         this.yopoVertFirstHScale = 0.3;   // Fraction of the horizontal command kept: it still creeps
                                           // onto the goal column instead of hovering in place
         this.yopoVertFirstMinV = 1.0;     // If the clearance only allows less than this (m/s), stand
+        this.yopoVertFirstFloor = 8.0;    // Vertical approach speed FLOOR (m/s): whenever the clearance
+                                          // (vSafeUp/vSafeDown) and the arrival ramp both permit at least this
+                                          // (i.e. vAllow >= floor), the straight climb/descent is held at no less
+                                          // than this. Without it a clear vertical approach to a goal above/below
+                                          // would crawl at the network's < 1 m/s. The floor never overrides a
+                                          // genuine clearance-limited slowdown (near the goal the ramp drops vAllow
+                                          // below the floor and the safe arrival easing takes over).
                                           // down: something is straight above / below, so a straight
                                           // climb / descent is not possible and freezing in place would
                                           // be worse than letting the network spiral
@@ -2347,12 +2354,18 @@ export class Drone {
             // drone down along the obstacle face before it has rounded it.
             const detouring = !!(avoid &&
                 Math.hypot(avoid.repX + avoid.tanX, avoid.repZ + avoid.tanZ) > 1.5);
-            const engage = !detouring &&
-                           vfH < this.yopoVertFirstHDist &&
+            // The horizontal-detour guard (detouring) is intentionally NOT used to disable the vertical
+            // override any more. In a corridor / beside a building there is almost always a side obstacle
+            // within the 12 m wing envelope, so `detouring` was permanently true and the guard switched the
+            // vertical channel back to the network -- which descends at < 1 m/s in that geometry, making the
+            // whole approach crawl. The wingspan guard (in _avoidanceVelocity) keeps the lateral repulsion
+            // during the descent, so the drone holds its separation from the wall while it drops; the
+            // vertical override is therefore safe and is allowed to run even mid-detour. `detouring` still
+            // scales the HORIZONTAL command below (rayPushing); it just no longer vetoes the descent itself.
+            const engage = vfH < this.yopoVertFirstHDist &&
                            vfAbsY > this.yopoVertFirstMinDY &&
                            vfAbsY > this.yopoVertFirstRatio * vfH;
-            const keep = !detouring &&
-                         vfH < this.yopoVertFirstHDist * 1.25 &&
+            const keep = vfH < this.yopoVertFirstHDist * 1.25 &&
                          vfAbsY > this.yopoVertFirstMinDY * 0.6;
             this._vertFirstOn = this._vertFirstOn ? keep : engage;
             vfD_gate = this._vertFirstOn ? 'open' : 'closed';
@@ -2383,7 +2396,15 @@ export class Drone {
                 }
                 if (vAllow >= this.yopoVertFirstMinV) {
                     vertFirst = true;
-                    const vCmd = Math.min(vAllow, this.yopoVertFirstKp * vfAbsY);
+                    // Vertical speed floor: when the clearance (vSafeUp/Down) and the arrival ramp both
+                    // permit at least yopoVertFirstFloor, hold the descent/climb at no less than that --
+                    // otherwise a clear vertical approach to a goal above/below crawls at < 1 m/s. The
+                    // floor only applies when vAllow itself is >= the floor, so it never overrides a
+                    // genuine clearance-limited slowdown (near the goal the ramp drops vAllow below the
+                    // floor and the safe arrival easing takes over) nor the hard VMax.
+                    const vFloor = this.yopoVertFirstFloor;
+                    let vCmd = Math.min(vAllow, this.yopoVertFirstKp * vfAbsY);
+                    if (vAllow >= vFloor) vCmd = Math.max(vCmd, vFloor);
                     vfD_vcmd = vfDy > 0 ? vCmd : -vCmd;
                     velTargetY = vfDy > 0 ? vCmd : -vCmd;
                     // Horizontal: normally only a fraction is kept, so the drone creeps onto the goal
