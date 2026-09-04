@@ -290,21 +290,16 @@ export class Drone {
         // yopoVertFirstVMax / yopoVertFirstDecel / the descent standoff have NO effect (observed: the
         // descent speed did not move across all three). The old gate (vfH < 20 AND |dy| > 1.2*vfH)
         // only opened almost directly above the goal column, so most descents never took over.
-        this.yopoVertFirstHDist = 50.0;   // Max horizontal distance to the goal for this mode (m):
-                                          // 20 -> 35 -> 50: a descent starts being client-driven even
-                                          // earlier, so the drone climbs / descends onto the goal altitude
-                                          // instead of cruising straight PAST the goal column (the "flies
-                                          // past the goal" overshoot).
+        this.yopoVertFirstHDist = 35.0;   // Max horizontal distance to the goal for this mode (m):
+                                          // 20 -> 35 so a descent starts being client-driven earlier.
                                           // Wider = straight altitude changes start earlier (and the
                                           // cruise floor stands down over a wider area), narrower =
                                           // the network keeps cruising longer first
-        this.yopoVertFirstMinDY = 3.0;    // Min |height error| to engage (m); released below 0.6x of it.
-                                          // 4.0 -> 3.0: take over the vertical channel a touch sooner.
-        this.yopoVertFirstRatio = 0.7;    // The height error must also exceed this multiple of the
+        this.yopoVertFirstMinDY = 4.0;    // Min |height error| to engage (m); released below 0.6x of it
+        this.yopoVertFirstRatio = 0.9;    // The height error must also exceed this multiple of the
                                           // horizontal offset, so a far-away goal keeps cruising.
-                                          // 1.2 -> 0.9 -> 0.7: open the descent override while the height
-                                          // error still clearly dominates, so it engages before the cruise
-                                          // floor pushes the drone past the goal column.
+                                          // 1.2 -> 0.9: the old value required the drone to be nearly
+                                          // overhead before the descent override opened at all.
         this.yopoVertFirstKp = 1.5;       // P gain on the height error -> climb / descent speed
         this.yopoVertFirstVMax = 10.0;    // Hard cap on that speed (m/s): 6.0 -> 10.0. This is the climb /
                                           // descent speed held while going straight up / down onto the goal
