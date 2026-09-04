@@ -153,22 +153,34 @@
         }
         .primary-action:hover { background: #4272F5; color: #000; }
 
-        /* Key Guide */
+        /* Key Guide -- now hosts the YOPO Navigation menu (buttons/inputs need clicks) */
         #key-guide {
             /* Anchored above the bottom-left target map instead of vertically centered,
            to avoid overlapping the minimap. Width aligned with the minimap box (300px). */
             position: absolute; bottom: 350px; left: 16px; width: 300px;
             box-sizing: border-box;
-            z-index: 300; pointer-events: none;
+            z-index: 300; pointer-events: auto;
             background: rgba(0,0,0,0.5); border-radius: 8px; padding: 12px 16px;
             font-family: 'Courier New', monospace; font-size: 12px; color: #ccc;
-            line-height: 1.6; white-space: pre; display: none;
+            line-height: 1.6; white-space: normal; display: none;
         }
         #key-guide.visible { display: block; }
         #key-guide .guide-title {
             color: #4272F5; font-weight: bold; font-size: 13px; margin-bottom: 4px;
         }
         #key-guide kbd {
+            background: rgba(255,255,255,0.15); border-radius: 3px;
+            padding: 1px 5px; font-size: 11px; color: #fff;
+        }
+        /* Key list inside the Tab settings panel (rendered by updateKeyGuide) */
+        #settings-flight-controls {
+            font-family: 'Courier New', monospace; font-size: 12px; color: #ccc;
+            line-height: 1.6; white-space: pre;
+        }
+        #settings-flight-controls .guide-title {
+            color: #4272F5; font-weight: bold; font-size: 13px; margin-bottom: 4px;
+        }
+        #settings-flight-controls kbd {
             background: rgba(255,255,255,0.15); border-radius: 3px;
             padding: 1px 5px; font-size: 11px; color: #fff;
         }
@@ -577,6 +589,21 @@
             border: 1px solid #4b6bff; border-radius: 4px; padding: 5px 6px;
             font-family: 'Courier New', monospace; font-size: 12px;
         }
+        /* YOPO target selection altitude panel (flight mode, goal select map) */
+        #yopo-target-alt-panel {
+            position: absolute; right: 20px; bottom: 112px; width: min(300px, calc(100vw - 40px));
+            background: rgba(0,0,0,0.72); color: #d9e6ff; padding: 12px 14px;
+            border: 1px solid rgba(255,210,58,0.55); border-radius: 8px;
+            font-family: 'Courier New', monospace; font-size: 12px;
+            pointer-events: auto; display: none; z-index: 12;
+        }
+        #yopo-target-alt-panel.visible { display: block; }
+        .yopo-target-alt-title { color: #ffd23a; font-weight: bold; margin-bottom: 8px; }
+        #yopo-target-alt-input {
+            width: 96px; box-sizing: border-box; background: #111827; color: #fff;
+            border: 1px solid #b39821; border-radius: 4px; padding: 5px 6px;
+            font-family: 'Courier New', monospace; font-size: 12px;
+        }
         #spawn-altitude-hint {
             margin-top: 8px; color: #9fb5ff; line-height: 1.35;
         }
@@ -635,10 +662,46 @@
 	    </div>
 
     <!-- Key guide overlay -->
-    <div id="key-guide"></div>
+    <!-- YOPO Navigation menu: lives in the old key-guide slot (bottom-left, above the target
+         map). The key list that used to be here moved into the Tab settings panel
+         (#settings-flight-controls). Element IDs match the old settings-panel section, so all
+         main.js bindings (buttons / inputs / status spans) keep working unchanged. -->
+    <div id="key-guide">
+        <div class="guide-title">YOPO NAVIGATION</div>
+        <div style="font-size:11px;color:#8aa;line-height:1.4;margin-bottom:6px;white-space:normal;">
+            End-to-end autonomous navigation. Press <b>T</b>: pick the goal on the map (click to
+            place, numpad fine-tunes, 5 confirm &amp; start, 0/Esc cancel). <b>X</b> stops navigation.
+        </div>
+        <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 8px;align-items:center;margin-bottom:6px;white-space:normal;">
+            <label for="yopo-target-x" style="color:#9ab;">Target X</label>
+            <input type="number" id="yopo-target-x" step="0.1" value="0" style="width:100%;box-sizing:border-box;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:11px;">
+            <label for="yopo-target-y" style="color:#9ab;">Target Y</label>
+            <input type="number" id="yopo-target-y" step="0.1" value="2" style="width:100%;box-sizing:border-box;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:11px;">
+            <label for="yopo-target-z" style="color:#9ab;">Target Z</label>
+            <input type="number" id="yopo-target-z" step="0.1" value="0" style="width:100%;box-sizing:border-box;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:11px;">
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:6px;">
+            <button class="assign-btn" id="yopo-select-target-btn" style="flex:1;font-size:11px;padding:4px 2px;">Pick Target</button>
+            <button class="assign-btn" id="yopo-start-nav-btn" style="flex:1;font-size:11px;padding:4px 2px;background:#285e6e;">Start Nav</button>
+            <button class="assign-btn" id="yopo-stop-nav-btn" style="flex:1;font-size:11px;padding:4px 2px;background:#5e285e;">Stop Nav</button>
+        </div>
+        <div style="font-size:11px;color:#aaa;line-height:1.5;white-space:normal;">
+            <span id="yopo-status-text">Status: Inactive</span><br>
+            <span id="yopo-dist-text">Distance to target: --</span><br>
+            <span id="yopo-count-text">Inference count: 0</span><br>
+            <span id="yopo-avoid-text">Depth: --</span>
+        </div>
+    </div>
 
     <!-- Collision flash overlay -->
     <div id="collision-flash"></div>
+
+    <!-- YOPO target selection altitude panel (visible only during goal select map mode) -->
+    <div id="yopo-target-alt-panel">
+        <div class="yopo-target-alt-title">TARGET ALTITUDE y (m)</div>
+        <input type="number" id="yopo-target-alt-input" min="-500" max="5000" step="0.5" value="2" aria-label="YOPO target altitude in metres">
+        <div style="color:#99a;margin-top:6px;">Type a value or scroll = ±1 m (Shift ±5 m). Numpad 9/3 also adjusts. Click the map to set the goal x/z.</div>
+    </div>
 
     <!-- Placement mode overlay -->
 	    <div id="placement-overlay">
@@ -999,39 +1062,10 @@
             </div>
         </div>
 
-        <h3>YOPO Navigation</h3>
-        <div style="font-size:12px;color:#8aa;margin:-2px 0 8px;line-height:1.4;">
-            End-to-end autonomous navigation. In flight, press <b>T</b> to start picking a target (Numpad 8/2 forward/back along heading, 4/6 left/right, 9/3 up/down; 5 confirms & starts, 0 cancels). Press <b>X</b> to stop navigation.
-        </div>
-        <div class="setting-row">
-            <label>Target X</label>
-            <div class="controls">
-                <input type="number" id="yopo-target-x" step="0.1" value="0" style="width:80px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
-            </div>
-        </div>
-        <div class="setting-row">
-            <label>Target Y</label>
-            <div class="controls">
-                <input type="number" id="yopo-target-y" step="0.1" value="2" style="width:80px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
-            </div>
-        </div>
-        <div class="setting-row">
-            <label>Target Z</label>
-            <div class="controls">
-                <input type="number" id="yopo-target-z" step="0.1" value="0" style="width:80px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
-            </div>
-        </div>
-        <div style="display:flex;gap:8px;margin:8px 0;">
-            <button class="assign-btn" id="yopo-select-target-btn" style="flex:1;">Pick Target</button>
-            <button class="assign-btn" id="yopo-start-nav-btn" style="flex:1;background:#285e6e;">Start Nav</button>
-            <button class="assign-btn" id="yopo-stop-nav-btn" style="flex:1;background:#5e285e;">Stop Nav</button>
-        </div>
-        <div style="font-size:12px;color:#aaa;line-height:1.6;margin-top:4px;">
-            <span id="yopo-status-text">Status: Inactive</span><br>
-            <span id="yopo-dist-text">Distance to target: --</span><br>
-            <span id="yopo-count-text">Inference count: 0</span><br>
-            <span id="yopo-avoid-text">Depth: --</span>
-        </div>
+        <h3>Flight Controls</h3>
+        <!-- Key list moved here from the bottom-left key-guide overlay (which now hosts the
+             YOPO Navigation menu). Rendered by updateKeyGuide() -- adapts Easy/FPV mode. -->
+        <div id="settings-flight-controls"></div>
 
         <h3>Physics</h3>
         <div class="setting-row">

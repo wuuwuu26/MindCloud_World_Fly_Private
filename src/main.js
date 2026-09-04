@@ -1447,8 +1447,9 @@ function enterYOPOTargetSelectMode() {
         world.setNativeCameraControls(true);
     }
     updateYOPOTargetMapCamera();
+    setYOPOTargetAltPanel(true);
     document.getElementById('yopo-status-text').textContent =
-        'Status: goal select map -- left-drag pan, middle-drag tilt, click to place goal, wheel zooms, altitude via Y input / numpad 9/3, numpad fine-tunes, 5 confirm, 0/Esc cancel';
+        'Status: goal select map -- left-drag pan, middle-drag tilt, click to place goal, altitude panel bottom-right / numpad 9/3, numpad fine-tunes, 5 confirm, 0/Esc cancel';
     console.log('YOPO target select mode: starting at drone pos', { x, y, z });
 }
 
@@ -1606,8 +1607,64 @@ function applyYOPOTargetPick(p) {
     if (statusEl) {
         statusEl.textContent =
             `Status: goal picked at (${p.x.toFixed(1)}, ${y.toFixed(1)}, ${p.z.toFixed(1)}) ` +
-            '-- set altitude via Y input / numpad 9/3, click again to move, numpad 5 confirm, Esc cancel';
+            '-- set altitude in the panel / Y input, numpad 5 confirm, Esc cancel';
     }
+}
+
+// ── Target altitude panel (visible only during goal select map mode) ──
+// A placement-like on-screen number input so the altitude can be typed directly while
+// picking, without digging into the Tab settings panel. It stays in sync with the panel's
+// Target Y field (same source of truth) and moves the marker live.
+
+function setYOPOTargetAltPanel(visible) {
+    const panel = document.getElementById('yopo-target-alt-panel');
+    if (!panel) return;
+    panel.classList.toggle('visible', visible);
+    if (visible) {
+        const input = document.getElementById('yopo-target-alt-input');
+        const yInput = document.getElementById('yopo-target-y');
+        if (input && yInput && Number.isFinite(parseFloat(yInput.value))) {
+            input.value = parseFloat(yInput.value).toFixed(1);
+        }
+    }
+}
+
+/** Push the altitude panel value into Target Y and move the marker live. */
+function syncYOPOTargetAltFromPanel() {
+    const input = document.getElementById('yopo-target-alt-input');
+    const yInput = document.getElementById('yopo-target-y');
+    if (!input || !yInput) return;
+    let y = parseFloat(input.value);
+    if (!Number.isFinite(y)) return; // half-typed value ("-"/"") — wait for a valid one
+    yInput.value = y.toFixed(1);
+    const x = parseFloat(document.getElementById('yopo-target-x')?.value);
+    const z = parseFloat(document.getElementById('yopo-target-z')?.value);
+    if (Number.isFinite(x) && Number.isFinite(z)) updateYOPOTargetMarker(x, y, z);
+}
+
+function setupYOPOTargetAltPanel() {
+    const panel = document.getElementById('yopo-target-alt-panel');
+    const input = document.getElementById('yopo-target-alt-input');
+    if (!panel || !input || panel._yopoAltBound) return;
+    panel._yopoAltBound = true;
+    input.addEventListener('input', syncYOPOTargetAltFromPanel);
+    input.addEventListener('change', () => {
+        let y = parseFloat(input.value);
+        if (!Number.isFinite(y)) y = 2;
+        input.value = y.toFixed(1);
+        syncYOPOTargetAltFromPanel();
+    });
+    // Wheel over the panel steps the altitude without zooming the map camera (the event
+    // targets the panel overlay, never the Cesium canvas).
+    panel.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        let y = parseFloat(input.value);
+        if (!Number.isFinite(y)) y = 2;
+        const step = e.shiftKey ? 5 : 1;
+        input.value = (y + (e.deltaY < 0 ? step : -step)).toFixed(1);
+        syncYOPOTargetAltFromPanel();
+    }, { passive: false });
 }
 
 /** Create (or reuse) a Cesium entity marking the YOPO target position. */
@@ -1760,6 +1817,7 @@ async function confirmYOPOTarget(x, y, z) {
     // Leave the free map camera: restore the flight default (native controls off, the
     // per-frame follow camera re-pins the view to the drone on the next frame).
     world?.setNativeCameraControls?.(false);
+    setYOPOTargetAltPanel(false);
     document.getElementById('yopo-status-text').textContent =
         `Status: setting goal (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})...`;
 
@@ -1827,6 +1885,7 @@ function cancelYOPOTarget() {
     yopoTargetSelectMode = false;
     // Same camera restore as confirmYOPOTarget.
     world?.setNativeCameraControls?.(false);
+    setYOPOTargetAltPanel(false);
     // Clear the temporary target set during selection (not yet confirmed
     // with the server, so no goal to revoke there).
     drone.yopoNavTarget = null;
@@ -1923,10 +1982,23 @@ function updateKeyGuide() {
     if (guideState === lastKeyGuideState) return;
     lastKeyGuideState = guideState;
 
-    if (mode !== 'flight') {
+    // The bottom-left overlay now hosts the YOPO Navigation menu (moved out of the Tab
+    // settings panel). Its markup is static in index.html and main.js binds the buttons by
+    // element id, so only visibility is toggled here.
+    if (mode !== 'flight' || cleanMode) {
         el.classList.remove('visible');
-        return;
+    } else {
+        el.classList.add('visible');
     }
+
+    // The key list ("FLIGHT CONTROLS - EASY/FPV") moved into the Tab settings panel.
+    renderSettingsFlightControls();
+}
+
+/** Render the flight key list (adapts to Easy / FPV mode) into the Tab settings panel. */
+function renderSettingsFlightControls() {
+    const target = document.getElementById('settings-flight-controls');
+    if (!target) return;
     const isFPV = drone && drone.flightMode === 'fpv';
     const title = isFPV ? 'FLIGHT CONTROLS - FPV' : 'FLIGHT CONTROLS - EASY';
     const rows = isFPV ? [
@@ -1959,10 +2031,7 @@ function updateKeyGuide() {
         );
     }
     const html = `<div class="guide-title">${title}</div>\n${rows.join('\n')}`;
-    if (el.innerHTML !== html) el.innerHTML = html;
-    if (!cleanMode) {
-        el.classList.add('visible');
-    }
+    if (target.innerHTML !== html) target.innerHTML = html;
 }
 
 function clampNumber(value, min, max) {
@@ -2152,6 +2221,7 @@ function initializeAppShell() {
     setupStartUI();
     setupKeyboard();
     setupSpawnAltitudeControls();
+    setupYOPOTargetAltPanel();
     setProgress('');
     window.googleTilesFlightStart = startTilesMode;
     window.startTilesMode = startTilesMode;
