@@ -80,7 +80,44 @@ main flight all brought up together):
 
 ## Quick Start (First-Time Deployment)
 
-### Clone the Repository
+The steps below take a fresh machine to "manual flight + YOPO autonomous navigation", covering
+Docker / NVIDIA Container Toolkit installation, cloning the code, weight download and the first
+image build. **After first-time deployment, daily use is just `./restart_all.sh`** (see
+"Daily Start / Partial Restart / Stop").
+
+### Step 0: Install Prerequisites
+
+```bash
+# 1) Docker Engine (other systems: https://docs.docker.com/engine/install/)
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker "$USER"    # takes effect after logout/login
+newgrp docker                      # or just for the current shell
+
+# 2) NVIDIA driver (must be able to run nvidia-smi)
+nvidia-smi
+
+# 3) NVIDIA Container Toolkit (lets containers use the GPU)
+sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+
+# 4) Verify the GPU is visible inside a container
+docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi
+```
+
+Other requirements:
+
+| Item | Requirement |
+|------|-------------|
+| Disk | The three images total ~**64 GB** (YOPO ≈35 GB, DA360 ≈28 GB, main flight ≈1 GB), plus the 1.3 GB DA360 weights — **reserve ≥80 GB** |
+| Network | First run pulls base images from Docker Hub and weights from Google Drive; the browser must reach Cesium Ion / Google 3D Tiles and `cdn.jsdelivr.net` (PlayCanvas) |
+| `curl` | used by `restart_all.sh` to wait for services to be ready (usually present) |
+| `python3` + `gdown` | only needed to download the DA360 weights |
+
+> If you only want keyboard flight first (no DA360 / YOPO), skip the GPU and weight steps and just run
+> `./launch.sh` — only the ~1 GB main flight image is built.
+
+### Step 1: Clone the Repository
 
 ```bash
 git clone https://github.com/wuuwuu26/MindCloud_World_Fly_Private.git
@@ -92,24 +129,91 @@ cd MindCloud_World_Fly_Private
 > `third_party/DA360/data/images/Thumbs.db`; see the repository-root `.gitignore` for the full
 > list), so cloning already gives you the source. The
 > **weights** (`DA360_large.pth`, ~1.3GB, over GitHub's 100MB limit) are not in the repository —
-> download them before running the depth service.
+> download them in Step 2.
 
+### Step 2: Download the DA360 Depth Weights
 
-`restart_all.sh` is the recommended way to start the main process, DA360 and YOPO in one shot:
+The YOPO weights and the TensorRT engine ship with the repo; **only the DA360 weights** (~1.3 GB)
+need to be downloaded separately:
+
+```bash
+python3 -m pip install --user gdown
+./scripts/download_da360_model.sh
+# writes third_party/DA360/checkpoints/DA360_large.pth
+```
+
+The DA360 source ships with the repo; when the script detects the source it downloads only the weights.
+
+### Step 3: One-Command Startup (first run builds the three images)
 
 ```bash
 ./restart_all.sh
 ```
 
-This is equivalent to starting them in order: DA360 depth service → YOPO navigation service →
-main flight process (`launch.sh`). Then open `http://127.0.0.1:8080` in a browser, click
-**Start Google 3D Tiles Flight**, set a spawn point in placement mode and press `O` to take off —
-you can now fly with the keyboard.
+It brings up in order: DA360 depth service → YOPO navigation service → main flight process. Each
+entry script **only builds the image when it does not exist**, so the first run is slow (mostly
+pulling the CUDA base image + installing pip deps, usually tens of minutes); afterwards restarts are
+near-instant.
+
+Build/start logs go to:
+
+```bash
+tail -f /tmp/restart_da360.log
+tail -f /tmp/restart_yopo.log
+tail -f /tmp/restart_main.log
+```
+
+You can also build a single image ahead of time or on its own:
+
+```bash
+./launch.sh                                      # main flight image (builds only if missing; --rebuild to force)
+YOPO_FORCE_BUILD=1 ./scripts/start_yopo_api.sh   # YOPO image
+DA360_FORCE_BUILD=1 ./scripts/start_da360_api.sh # DA360 image
+```
 
 > YOPO inference uses TensorRT acceleration by default (the engine `asset/yopo-trt/yopo_trt.pth`
 > ships with the repository). `restart_all.sh` sets `YOPO_USE_TRT=1` **unconditionally**, so no extra
-> step is needed; if the engine is missing it only prints a WARN and `scripts/start_yopo_api.sh`
-> builds the engine with the GPU inside the YOPO container. See "YOPO TensorRT Acceleration".
+> step is needed; if the engine is missing `scripts/start_yopo_api.sh` builds it with the GPU inside
+> the YOPO container.
+>
+> **The TRT engine is bound to the GPU's SM compute capability**: the shipped engine was built on an
+> RTX 4070 Laptop GPU. If your GPU differs (e.g. Orin NX, other desktop cards), delete the existing
+> engine before the first start so the startup script rebuilds it for your GPU:
+>
+> ```bash
+> rm asset/yopo-trt/yopo_trt.pth
+> ./restart_all.sh
+> ```
+>
+> If the auto-build fails or you need manual control, use the manual conversion command in
+> "YOPO TensorRT Acceleration".
+
+### Step 4: Confirm All Three Services Are Alive
+
+```bash
+docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'  # you should see the 3 containers below
+curl http://127.0.0.1:8080/              # main flight: returns the page HTML
+curl http://127.0.0.1:5688/health        # DA360: health check
+curl http://127.0.0.1:5689/yopo/status   # YOPO: service status
+```
+
+### Step 5: Open the Browser and Take Off
+
+Open `http://127.0.0.1:8080` → click **Start Google 3D Tiles Flight** → pick a city in the search box
+→ hold `I` and click the ground to set the spawn point → press `O` to take off. See
+"Usage Flow" for details.
+
+### First-Time Deployment FAQ
+
+| Symptom | Cause / Fix |
+|---------|-------------|
+| `docker: permission denied ...` | current user is not in the `docker` group: `sudo usermod -aG docker $USER` then log out/in |
+| `could not select device driver "" with capabilities: [[gpu]]` | NVIDIA Container Toolkit not installed/configured: `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker` |
+| Build stuck pulling `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime` | the base image is large and times out on a poor network; the script retries 3× built-in, rerun once the network recovers; or point `YOPO_BASE_IMAGE` / `DA360_BASE_IMAGE` at a mirror / local image |
+| pip dependency install fails during build | the build runs with `--network=host`: the YOPO side defaults to the host proxy `127.0.0.1:7890`, the DA360 side forwards the host `HTTP(S)_PROXY` and probes `git config` for a proxy |
+| `Port 8080 is already in use` | change port: `PORT=18081 ./launch.sh` or `./launch.sh --port 18081` |
+| DA360 stays not-ready for a long time | check `/tmp/restart_da360.log`; if weights are missing the script auto-calls `download_da360_model.sh`; slowness is usually the Google Drive download |
+| YOPO first start is slow | with TensorRT enabled but `asset/yopo-trt/yopo_trt.pth` absent, the engine is baked in-container with the GPU and written back to that dir, then loaded directly afterwards |
 
 ## Daily Start / Partial Restart / Stop
 
