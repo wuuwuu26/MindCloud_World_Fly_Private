@@ -671,6 +671,13 @@ export class Drone {
         // the goal's own wall (beyond the goal, so it cannot block arrival) -- the wing never grazes
         // a side building during the descent. 0 would fall back to the bare standoff.
         this.yopoWingMargin = 3.0;
+        // REPULSION FLOOR (0..1): lateral repulsion is scaled by repHold = clamp(dMin/standoff, .., 1),
+        // so it fades as the drone nears a wall. Without a floor it reaches ZERO once glued to / clipping
+        // the obstacle, leaving the wing with no push-away force so the drone gets stuck inside the wall
+        // ("passes through, then cannot get out"). The floor keeps a steady lateral push even at contact, so
+        // the side-guard repulsion always extracts the wing. It only bites within ~floor*standoff (~4.5 m) of
+        // the surface, so the normal standoff behaviour at larger range is unchanged.
+        this.yopoRepHoldFloor = 0.5;
         // VERTICAL DOWN standoff (m), SEPARATE from the shared yopoAvoidStop so that "keep further from
         // obstacles below" raises only the DESCENT safety margin and does NOT also forbid climbing /
         // over-head clearance (vSafeUp / vGo still use yopoAvoidStop = 6.0).
@@ -2156,7 +2163,7 @@ export class Drone {
                     // be clear, so a mis-judged corridor verdict keeps the brake armed.
                     let steerScale = 1.0;
                     let fwdFloor = this.yopoFwdFloorFrac;
-                    if (avoid.goalClear && !this.yopoArrived) {
+                    if (avoid.goalClearHyst && !this.yopoArrived) {
                         // When the corridor to the goal is open the detour must stand down HARD, not
                         // gently. A 0.7 scale kept 70% of the tangential push, so while the (2-frame)
                         // release hysteresis engaged the drone kept sliding tangentially and sailed
@@ -3833,8 +3840,27 @@ export class Drone {
         const clearD = R * this.yopoAvoidVClear; // A layer distance above this value counts as clear, i.e. flyable
         const hiIdx = p.highProbeIdx || null;
         const e = this.yopoAvoidGain * this.yopoAvoidVClimbScale;
+        // Prefer the horizontal detour over vertical clearing: only climb / dive when there is
+        // genuinely NO way around the obstacle on the side the detour would take. If the tangential
+        // escape direction still has open clearance, the drone should slide around horizontally
+        // instead of going over / under it -- the user wants the horizontal detour to win, not the
+        // vertical one (which was being chosen every time).
+        let horizEscape = false;
+        const tmag = Math.hypot(tanX, tanZ);
+        if (tmag > 1e-3 && dAhead < repRange) {
+            const txn = tanX / tmag, tzn = tanZ / tmag;
+            let bestSide = 0;
+            for (let i = 0; i < dirs.length; i++) {
+                const d = dists[i];
+                if (!Number.isFinite(d) || d <= 0) continue;
+                // Within ~60 deg of the detour direction -> the side the drone would slide around to.
+                if (dirs[i].x * txn + dirs[i].z * tzn > 0.5 && d > bestSide) bestSide = d;
+            }
+            // The escape side is open beyond the keep-out band (+ margin) -> room to slide around.
+            if (bestSide > this.yopoAvoidSideStandoff + 6.0) horizEscape = true;
+        }
         const canTrigger = !this.yopoArrived && !goalClear && dAheadH < blockDist && des > 0.3 &&
-            p.distsHigh && p.distsHigh2 && p.distsLow;
+            p.distsHigh && p.distsHigh2 && p.distsLow && !horizEscape;
         // Persistent clearing direction: 0 = none, +1 = climbing over, -1 = diving under.
         let heldDir = this._avoidClearDir || 0;
         if (heldDir === +1) {
@@ -3902,7 +3928,7 @@ export class Drone {
         // around then goes back"); it only goes to zero when really glued to the obstacle
         // (dMin <= standoff) (once stopped it does not push back), and combined with rep decaying
         // with distance w it naturally weakens once away, never pushing too far.
-        const repHold = clamp(dMin / standoff, 0, 1);
+        const repHold = clamp(dMin / standoff, this.yopoRepHoldFloor, 1);
         repX *= repHold; repZ *= repHold;
         // The tangential detour is NOT decayed by repHold: the closer the obstacle, the MORE
         // steering authority the detour needs, and decaying it here (repHold < 1 whenever
