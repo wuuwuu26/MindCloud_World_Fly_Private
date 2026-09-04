@@ -1007,25 +1007,6 @@ high-speed action range does not make "the path is actually clear" get misjudged
 `__yopoPerf()` in the browser console to read live metrics (`fps` / `probeMsAvg` / `probeHz` /
 `depthHz` / `cmdHz` / `ringAgeMaxMs`).
 
-### Start the YOPO Backend
-
-> The YOPO avoidance backend is brought up by `restart_all.sh` (TensorRT enabled by default with
-> `YOPO_VELOCITY=15`); the commands below are only for manually building/starting it on its own.
-
-```bash
-# The Docker image needs to be built the first time
-YOPO_FORCE_BUILD=1 ./scripts/start_yopo_api.sh
-
-# Later starts (build is skipped automatically, local yopo_server.py is mounted)
-./scripts/start_yopo_api.sh
-
-# If you hit proxy issues while building, make sure a proxy is available on host port 7890
-# Dockerfile.yopo uses --network=host + http://127.0.0.1:7890
-```
-
-The service runs at `http://127.0.0.1:5689`. `yopo_server.py` is mounted through a Docker volume, so
-editing it needs no image rebuild.
-
 ### Key YOPO Backend Environment Variables
 
 All variables below except `YOPO_SPEED_CAP` are forwarded into the container by
