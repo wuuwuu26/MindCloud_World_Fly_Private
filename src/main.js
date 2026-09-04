@@ -436,19 +436,37 @@ function setupCesiumPlacementHandler() {
 
     screenHandler = new Cesium.ScreenSpaceEventHandler(world.viewer.scene.canvas);
     screenHandler.setInputAction(async (movement) => {
-        if (mode !== 'placement') return;
-        const initClickActive =
-            placementKeysDown.has('KeyI') ||
-            performance.now() <= placementInitClickUntil;
-        if (!initClickActive) return;
+        if (mode === 'placement') {
+            const initClickActive =
+                placementKeysDown.has('KeyI') ||
+                performance.now() <= placementInitClickUntil;
+            if (!initClickActive) return;
 
-        const picked = await world.pickSpawn(movement.position, spawnAltitudeMeters);
-        if (picked) {
-            spawnPoint = picked;
-            setSpawnAltitude(spawnAltitudeMeters);
-            updateSpawnUI();
+            const picked = await world.pickSpawn(movement.position, spawnAltitudeMeters);
+            if (picked) {
+                spawnPoint = picked;
+                setSpawnAltitude(spawnAltitudeMeters);
+                updateSpawnUI();
+            }
+            return;
+        }
+        // YOPO target selection: left-click places the goal on the top-down map
+        // (pickTargetPoint keeps the current local frame, unlike pickSpawn).
+        if (mode === 'flight' && yopoTargetSelectMode) {
+            const p = await world.pickTargetPoint(movement.position);
+            if (p) applyYOPOTargetPick(p);
         }
     }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+    // Wheel zooms the target-selection map by moving the overhead camera up/down.
+    // Safe to hijack: in flight mode the native camera controls are disabled, so the
+    // wheel has no other meaning on the main canvas.
+    canvas.addEventListener('wheel', (e) => {
+        if (mode !== 'flight' || !yopoTargetSelectMode) return;
+        e.preventDefault();
+        const factor = e.deltaY > 0 ? 1.2 : 1 / 1.2;
+        yopoTargetMapHeight = Math.max(30, Math.min(1500, yopoTargetMapHeight * factor));
+    }, { passive: false });
 }
 
 async function enterPlacementMode(autoPick = false) {
@@ -1263,7 +1281,14 @@ function updateFlight(dt) {
     // Camera mode only selects visualization; controller and physics stay shared.
     const cameraTransform = drone.getCameraTransform();
     const bodyTransform = drone.getBodyTransform ? drone.getBodyTransform() : cameraTransform;
-    if (cameraMode === 'third') {
+    if (yopoTargetSelectMode) {
+        // Target-selection "map mode": a placement-like top-down view that follows the drone.
+        // The aircraft model stays visible as the pick reference; mouse left-click sets the
+        // goal position (see setupCesiumPlacementHandler), wheel zooms, numpad still nudges.
+        world.updateAircraftFromDroneTransform(bodyTransform);
+        world.showAircraft(true);
+        updateYOPOTargetMapCamera();
+    } else if (cameraMode === 'third') {
         world.updateAircraftFromDroneTransform(bodyTransform);
         world.showAircraft(true);
         world.setThirdPersonCamera(bodyTransform, thirdPersonCamera);
@@ -1421,7 +1446,7 @@ function enterYOPOTargetSelectMode() {
     document.getElementById('yopo-target-z').value = z.toFixed(1);
     createYOPOTargetMarker(x, y, z);
     document.getElementById('yopo-status-text').textContent =
-        'Status: goal select mode (numpad 8/2/4/6/9/3 move, 5 confirm, 0 cancel)';
+        'Status: goal select map -- click to place goal, wheel zooms, altitude via Y input / numpad 9/3, numpad fine-tunes, 5 confirm, 0/Esc cancel';
     console.log('YOPO target select mode: starting at drone pos', { x, y, z });
 }
 
@@ -1535,6 +1560,49 @@ function yopoBodyMoveAxes() {
     }
     const right = { x: -fwd.z, z: fwd.x }; // forward × up
     return { fwd, right };
+}
+
+// ── YOPO target map (top-down pick view) ────────────────────────
+// While target selection is active, the main view switches to a placement-like top-down map
+// that follows the drone. Left-click picks the goal x/z (world.pickTargetPoint -- unlike
+// pickSpawn it keeps the current local frame), the altitude stays in the Y input (editable,
+// also numpad 9/3), and the numpad still nudges the goal relative to the nose. The wheel
+// zooms the map by changing this overhead camera height.
+let yopoTargetMapHeight = 150; // metres above the drone
+
+function updateYOPOTargetMapCamera() {
+    if (!world || !world.viewer || !drone) return;
+    const h = Math.max(30, Math.min(1500, yopoTargetMapHeight));
+    const destination = world.localToCartesian({ x: drone.x, y: drone.y + h, z: drone.z });
+    const direction = world.localDirectionToFixed({ x: 0, y: -1, z: 0 }); // straight down
+    const up = world.localDirectionToFixed({ x: 0, y: 0, z: 1 });         // north = screen up
+    world.viewer.camera.setView({
+        destination,
+        orientation: { direction, up },
+    });
+    world.viewer.scene.requestRender();
+}
+
+/** Apply a mouse-picked local point as the goal's horizontal position. The altitude keeps
+ * its current input value so the height stays fully user-controlled (Y input / numpad 9/3). */
+function applyYOPOTargetPick(p) {
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.z)) return;
+    const xInput = document.getElementById('yopo-target-x');
+    const yInput = document.getElementById('yopo-target-y');
+    const zInput = document.getElementById('yopo-target-z');
+    if (!xInput || !yInput || !zInput) return;
+    let y = parseFloat(yInput.value);
+    if (!Number.isFinite(y)) y = drone ? drone.y : 2;
+    xInput.value = p.x.toFixed(1);
+    zInput.value = p.z.toFixed(1);
+    yInput.value = y.toFixed(1);
+    updateYOPOTargetMarker(p.x, y, p.z);
+    const statusEl = document.getElementById('yopo-status-text');
+    if (statusEl) {
+        statusEl.textContent =
+            `Status: goal picked at (${p.x.toFixed(1)}, ${y.toFixed(1)}, ${p.z.toFixed(1)}) ` +
+            '-- set altitude via Y input / numpad 9/3, click again to move, numpad 5 confirm, Esc cancel';
+    }
 }
 
 /** Create (or reuse) a Cesium entity marking the YOPO target position. */
