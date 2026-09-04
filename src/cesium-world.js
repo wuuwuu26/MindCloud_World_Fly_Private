@@ -1883,7 +1883,13 @@ export class CesiumWorld {
         let faceBasis = basis;
         {
             const fwd = basis.forward;
-            const worldUp = new Cesium.Cartesian3(0, 1, 0);
+            // Frame fix: every vector in `basis` is ECEF (getTransformBasisFixed converts the
+            // local basis via localDirectionToFixed / ENU->Fixed). The "world vertical" used to
+            // de-roll the basis must therefore be the ENU up axis converted to ECEF -- NOT
+            // Cartesian3(0, 1, 0), which is the ECEF +Y axis (pointing at 90E on the equator).
+            // Using raw ECEF +Y tilted the roll-free triad by a location-dependent amount
+            // (Los Angeles vs Hong Kong differ), which tore the ERP cube seams apart.
+            const worldUp = this.localDirectionToFixed({ x: 0, y: 1, z: 0 });
             const fDot = Cesium.Cartesian3.dot(worldUp, fwd);
             const upY = Cesium.Cartesian3.subtract(
                 worldUp,
@@ -1924,7 +1930,7 @@ export class CesiumWorld {
         try {
             if (frustum) {
                 if ('fov' in frustum) frustum.fov = faceFovDeg * Math.PI / 180;
-                if ('near' in frustum) frustum.near = 0.5;
+                if ('near' in frustum) frustum.near = 0.03;
                 if ('far' in frustum) frustum.far = 15000000;
             }
 
