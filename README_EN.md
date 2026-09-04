@@ -430,8 +430,7 @@ connected from the settings panel; to check Linux input permissions:
 1. In flight mode, press **`T`** to enter goal selection: the main view switches to a **top-down
    map** with placement-like free camera controls (left-drag pans, middle-drag tilts, wheel zooms).
    The YOPO menu (bottom-left) and the **TARGET ALTITUDE** panel (bottom-right) appear.
-2. **Left-click anywhere on the map** to place the goal (click again to adjust); set the altitude by
-   typing in the bottom-right panel or scrolling over it (±1 m, Shift ±5 m).
+2. **Left-click anywhere on the map** to place the goal (click again to adjust).
 3. Fine-tune with the **numpad** (directions are relative to the **drone's current nose heading**);
    the Target X/Y/Z inputs stay in sync with the marker live:
    - `Numpad 8 / 2`: forward / backward along the nose
