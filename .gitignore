@@ -7,3 +7,5 @@ third_party/DA360/data/images/Thumbs.db
 .trae/
 # Broken symlinks (pointing at absolute paths outside the repo); do not commit
 third_party/yopo/saved/YOPO_1/epoch50.pth
+# 演示视频托管于 GitHub Releases(见 README 顶部链接)，不纳入版本管理，避免仓库与克隆体积膨胀
+asset/display/*.mp4
