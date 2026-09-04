@@ -5,38 +5,154 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>YOPO 连续避障演示 | MindCloud World Fly</title>
   <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-      max-width: 960px;
-      margin: 0 auto;
-      padding: 24px;
-      line-height: 1.6;
-      color: #24292f;
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
     }
-    h1 { font-size: 24px; margin-bottom: 4px; }
-    .sub { color: #57606a; margin-top: 0; }
-    .lang { font-size: 14px; margin-top: 0; }
-    video { width: 100%; border-radius: 8px; background: #000; }
-    a { color: #0969da; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                   "Hiragino Sans GB", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap { max-width: 1000px; margin: 0 auto; padding: 0 24px; }
+
+    .hero {
+      background: linear-gradient(135deg, #1e3a8a 0%, #6d28d9 55%, #0d1117 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 44px 0 38px;
+    }
+    .topbar {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 12px; margin-bottom: 22px;
+    }
+    .brand {
+      font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+      color: #cbd5e1; font-weight: 600;
+    }
+    .lang { display: flex; align-items: center; gap: 6px; }
+    .lang .current { font-size: 13px; color: #fff; font-weight: 600; padding: 4px 8px; }
+    .lang a {
+      font-size: 13px; color: #cbd5e1; text-decoration: none;
+      padding: 4px 12px; border: 1px solid rgba(255,255,255,.28); border-radius: 999px;
+      transition: background .15s ease, color .15s ease;
+    }
+    .lang a:hover { background: rgba(255,255,255,.14); color: #fff; }
+
+    h1 { margin: 0 0 10px; font-size: 30px; font-weight: 700; letter-spacing: -.01em; }
+    .sub { margin: 0; color: #cbd5e1; max-width: 760px; font-size: 15px; }
+
+    main { padding: 30px 0 52px; }
+
+    .video-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      box-shadow: 0 14px 34px rgba(0,0,0,.38);
+    }
+    video { width: 100%; display: block; border-radius: 8px; background: #000; }
+
+    .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .tag {
+      font-size: 12px; color: var(--muted);
+      background: #21262d; border: 1px solid var(--border);
+      border-radius: 999px; padding: 4px 11px;
+    }
+
+    .grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 14px; margin-top: 26px;
+    }
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 16px 18px;
+    }
+    .card h3 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+    .card p { margin: 0; font-size: 13.5px; color: var(--muted); }
+
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 22px 0 40px; color: var(--muted); font-size: 13.5px;
+    }
+    footer .links { display: flex; flex-wrap: wrap; gap: 18px; }
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    @media (max-width: 640px) {
+      h1 { font-size: 23px; }
+      .hero { padding: 30px 0 26px; }
+      .wrap { padding: 0 16px; }
+    }
   </style>
 </head>
 <body>
-  <h1>YOPO 连续避障演示</h1>
-  <p class="lang"><a href="video_en.html">English</a> | 中文</p>
+  <header class="hero">
+    <div class="wrap">
+      <div class="topbar">
+        <div class="brand">MindCloud World Fly with YOPO</div>
+        <div class="lang">
+          <span class="current">中文</span>
+          <a href="video_en.html">English</a>
+        </div>
+      </div>
+      <h1>YOPO 连续避障演示</h1>
+      <p class="sub">
+        一段连续自主飞行录屏：在 Google Photorealistic 3D Tiles 真实城市场景中，YOPO 端到端神经网络
+        持续完成三维避障，穿梭于楼宇之间。
+      </p>
+    </div>
+  </header>
 
-  <p class="sub">
-    MindCloud World Fly with YOPO —— 一段连续自主飞行录屏，展示 YOPO 在楼宇间的三维避障
-    （机翼包络守卫 + 水平绕行）。视频源：GitHub Releases，约 247MB。
-  </p>
+  <main>
+    <div class="wrap">
+      <div class="video-card">
+        <video controls preload="metadata"
+               src="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/continuous_avoidance_v1.mp4">
+          你的浏览器不支持 HTML5 视频播放，请
+          <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/continuous_avoidance_v1.mp4">直接下载观看</a>。
+        </video>
+        <div class="meta">
+          <span class="tag">H.264 MP4</span>
+          <span class="tag">2560×1440</span>
+          <span class="tag">4 分 36 秒</span>
+          <span class="tag">约 247 MB</span>
+        </div>
+      </div>
 
-  <video controls preload="metadata"
-         src="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/continuous_avoidance_v1.mp4">
-    你的浏览器不支持 HTML5 视频播放，请
-    <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/continuous_avoidance_v1.mp4">直接下载观看</a>。
-  </video>
+      <div class="grid">
+        <div class="card">
+          <h3>机翼包络守卫</h3>
+          <p>避障时按机身与翼展在全方向预留安全余量，避免贴障飞行时"擦翼"。</p>
+        </div>
+        <div class="card">
+          <h3>水平绕行</h3>
+          <p>遇障时提升绕行速度上限与径向推开幅度，贴墙滑行更稳、不易剐蹭。</p>
+        </div>
+        <div class="card">
+          <h3>端到端自主导航</h3>
+          <p>设定目标点后由 YOPO 直接输出控制指令，结合 DA360 深度实时 3D 避障。</p>
+        </div>
+      </div>
+    </div>
+  </main>
 
-  <p>
-    <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private">← 返回仓库 README</a>
-  </p>
+  <footer>
+    <div class="wrap">
+      <div class="links">
+        <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private">← 返回仓库 README</a>
+        <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/continuous_avoidance_v1.mp4">下载视频（247 MB）</a>
+        <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/tag/v1.0">Release v1.0</a>
+      </div>
+    </div>
+  </footer>
 </body>
 </html>
