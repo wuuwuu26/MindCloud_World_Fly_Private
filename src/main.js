@@ -1408,7 +1408,6 @@ function setupYOPOUI() {
         const modeSelect = document.getElementById('flight-mode-select');
         if (modeSelect) modeSelect.value = 'yopo_nav';
         document.getElementById('yopo-status-text').textContent = 'Status: navigating...';
-        document.getElementById('yopo-start-nav-btn').textContent = 'Navigating...';
         console.log('YOPO navigation started, goal:', drone.yopoNavTarget);
     });
 
@@ -1480,7 +1479,6 @@ function stopYOPONavigation() {
     const modeSelect = document.getElementById('flight-mode-select');
     if (modeSelect) modeSelect.value = 'simpleflight';
     document.getElementById('yopo-status-text').textContent = 'Status: stopped';
-    document.getElementById('yopo-start-nav-btn').textContent = 'Start Navigation';
     // Keep the goal marker: the "selected goal" stays visible after stopping, so it can be
     // compared against when navigating again
 }
@@ -1898,7 +1896,6 @@ async function confirmYOPOTarget(x, y, z) {
     const modeSelect = document.getElementById('flight-mode-select');
     if (modeSelect) modeSelect.value = 'yopo_nav';
     document.getElementById('yopo-status-text').textContent = 'Status: navigating...';
-    document.getElementById('yopo-start-nav-btn').textContent = 'Navigating...';
     console.log('YOPO navigation started, goal:', drone.yopoNavTarget);
 }
 
