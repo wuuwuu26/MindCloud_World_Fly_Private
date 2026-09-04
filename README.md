@@ -87,7 +87,7 @@ git clone https://github.com/wuuwuu26/MindCloud_World_Fly_Private.git
 cd MindCloud_World_Fly_Private
 ```
 
-> 注意：DA360 的**源码**已随仓库纳入版本管理（对 DA360 而言 `.gitignore` 只忽略权重目录 `third_party/DA360/checkpoints/`，完整忽略清单见仓库根目录 `.gitignore`），克隆后即可获得源码；但**权重**（`DA360_large.pth`，约 1.3GB，超 GitHub 100MB 限制）未入库，需在第 2 步下载。
+> 注意：DA360 的**源码**已随仓库纳入版本管理（对 DA360 而言 `.gitignore` 忽略权重目录 `third_party/DA360/checkpoints/` 及 `third_party/DA360/data/images/Thumbs.db`，完整忽略清单见仓库根目录 `.gitignore`），克隆后即可获得源码；但**权重**（`DA360_large.pth`，约 1.3GB，超 GitHub 100MB 限制）未入库，需在第 2 步下载。
 
 ### 第 2 步：下载 DA360 深度权重
 
@@ -287,7 +287,7 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 
 ### 主飞行进程（`Dockerfile.cesium`）
 
-- 把整个项目 `COPY` 到容器内 `/var/www/google-tiles-flight`，`CMD node scripts/server.js` 启动 Express 静态服务（同时提供 `/api/path/*.json` 门路线路持久化 API），`EXPOSE 8000`。
+- 把整个项目 `COPY` 到容器内 `/var/www/google-tiles-flight`，`CMD ["node", "/var/www/google-tiles-flight/scripts/server.js"]` 启动 Express 静态服务（同时提供 `/api/path/*.json` 门路线路持久化 API），`EXPOSE 8000`（宿主 8080 映射到容器 8000）。
 - 由 `launch.sh` 触发构建：仅当镜像**不存在**或加了 `--rebuild` 时才 `docker build`，否则直接复用已有镜像。
 - 运行时用只读卷挂载 `src/`、`index.html`，读写挂载 `asset/gate-paths`，因此**改前端 JS/HTML 无需重建镜像**——重启容器并在浏览器强刷（Ctrl+F5）即可生效。
 
@@ -320,15 +320,15 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 
 ### `.dockerignore`
 
-构建上下文排除了 `.git`、`node_modules`、`__pycache__`、`*.pyc`、`scene/*`、`asset/gate-paths/*.tmp`、`third_party/DA360/checkpoints`（DA360 权重），避免把无关/大文件打进镜像；DA360 源码仍随镜像提供。
+构建上下文排除了 `.git`、`.gitignore`、`node_modules`、`__pycache__`、`*.pyc`、`scene/*`、`.DS_Store`、`asset/gate-paths/*.tmp`、`third_party/DA360/checkpoints`（DA360 权重），避免把无关/大文件打进镜像；DA360 源码仍随镜像提供。
 
 ## 俯视小地图（目标地图）
 
 主界面左下角常驻一块 **Target Map (Top-Down)** 俯视小地图，飞行中实时刷新，用于直观掌握无人机与目标点的相对位置：
 
-- **渲染实现**：小地图由一个**独立的第二个 Cesium 3D Tiles viewer** 渲染（俯视正交相机，从机体正上方往下看），与右下角全景、主飞行视图共享同一套 Google Tiles 场景。它不是截图或外部地图瓦片，而是真的又加载了一份 3D Tiles 世界。
+- **渲染实现**：小地图由一个**独立的第二个 Cesium 3D Tiles viewer** 渲染（近垂直俯视：`camera.setView` 设 `pitch = -89.9°`，用 Cesium 默认**透视**相机而非正交相机），与右下角全景、主飞行视图共享同一套 Google Tiles 场景。它不是截图或外部地图瓦片，而是真的又加载了一份 3D Tiles 世界。
 - **性能优化（避免与主视图抢 GPU）**：主飞行视图保持 60 fps 连续渲染（`requestRenderMode: false`）；小地图 viewer 则按需渲染——启用 `requestRenderMode: true`（仅在实体位置或相机变化后显式 `requestRender` 一帧，而不是每帧自动重绘），并把 `resolutionScale` 设为 `0.5`（半分辨率，对俯视圆点地图足够清晰），同时在前端以 **~15 Hz（约每 66 ms）节流**刷新。三者叠加后，第二个 3D Tiles 世界不再每帧抢占 GPU，小地图的每秒 GPU 渲染份额降到约四分之一。
-- **显示内容**：以无人机为中心，按水平面投影显示无人机当前机头朝向、目标点位置，以及两者连线。
+- **显示内容**：以无人机为中心，按水平面投影显示无人机当前机头朝向与目标点位置（两个 point 实体：UAV 与 TARGET）。**注**：无人机与目标点之间不绘制连线。
 - **数据标注**：地图下方两行文字分别给出**目标高度 y**（目标点在**局部坐标系**下的 y，即相对局部原点的高度，单位 m）和**坐标差 Δx/Δy/Δz to target**（目标相对无人机的东/上/北方向位移，单位 m）。
 - **目标对准**：进入目标选择模式（按 `T`）后，地图会随数字键盘对目标点的移动同步更新，方便在空间上对齐目标。
 - 该小地图不含任何数据归属水印，纯前端绘制，不依赖外部地图服务。
@@ -431,7 +431,7 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 2. **取对应相对深度**（`_samplePanoramaDepth`）：把每条射线方向按 ERP 布局（`yaw=atan2(x,-z)`、`pitch=asin(y)`）映射到全景深度图 UV，双线性采样得到 DA360 相对深度 `rel`。
 3. **估计尺度**（`estimateScale`）：
    - 逐点算 `ratio = 真距 / rel`，**只保留 `rel < 40` 的近/中程点**——远景点/天空的 `rel` 可达数百，会把 `scale` 压到极小（实测 0.39），使整图缩成"四周皆墙"，故必须滤除。
-   - 有效点 < 2 则回退历史 `scale`，避免单个离群点主导。
+   - ERP 主路径要求本次标定**命中点 ≥ 3** 才进入尺度估计（`calibrationPoints.length >= 3`）；进入后若有效点 < 2 则回退历史 `scale`，避免单个离群点主导。
    - 取 ratio **中位数**，用 MAD（中位绝对偏差）做鲁棒滤波留 inlier，取均值作 `scale`。
    - 物理合理性钳制：`scale ∈ [0.5, 30]`；越界即回退历史值。
    - **时间平滑**：`scale = lastScale×0.5 + scale×0.5`，抑制 DA360 逐帧相对深度漂移导致的尺度跳变，避免网络决策抖动。
@@ -451,6 +451,7 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 
 - **网络输入**：`depth (1,2,192,384)`（通道 0 = 归一化深度，通道 1 = 有效 mask）+ 9 维观测（相机系速度/加速度/目标方向），经 `prepare_input` 展开为 `(1,9,6,12)`。
 - **轨迹选择（服务端：纯 YOPO argmin）**：网络输出 72 条候选轨迹（12 水平 × 6 垂直锚点）的终端状态（PVA）+ score。**服务端严格遵循 YOPO 原版 `test_yopo_ros.py` 部署实现，直接 `argmin(score)` 选最优轨迹**，不叠加任何几何碰撞代价。避障的第一层完全由网络在训练期 `safety_loss` 中学到的 score 提供（**学习式避障**），与官方部署实现完全一致。
+  - **例外：最终进近接管**。距目标 3D 距离 < `FINAL_APPROACH_DIST = 12.0` m（`scripts/yopo_server.py` 的服务端常量）时**完全跳过网络推理**，改由 `_plan_final_approach()` 生成一条直连目标的五次多项式。也就是说最后 12 m 的轨迹由服务端几何规划给出，而非网络 `argmin`。注意这与客户端已删除的 `yopoFinalApproachDist` 是两件事——删除的是**前端**接管参数，**服务端**这段接管仍然保留。
 - **客户端反应式安全层（几何势场）**：在服务端轨迹之上，前端 `src/drone.js` 额外叠加一层基于 Cesium 射线环的几何反应式避障，用于兜住深度重规划（约 70 ms/次）间隙内的突发近障。路径畅通时该层自动完全归零、不干扰网络规划，详见「避障架构与调参」。
 - **目标引导**：score 内已含目标方向代价（训练时 `wg=0.15`），网络原生指向目标。
 - **3D 导航**：不做水平面投影，垂直避障由网络预测的 z 终端状态决定。
@@ -458,20 +459,22 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 - **控制输出**：50Hz 评估多项式 → 位置/速度/加速度 + 偏航 → 前端级联 PID 跟踪。
 - **到达处理**：全程跟随 YOPO 网络轨迹，只有**到达锁定后**才切到目标点位置悬停：
   ```
-  const holdKp = 1.5, holdAltKp = 2.5, holdKd = 1.5, holdMaxV = 2.0;
+  const holdKp = 1.5, holdAltKp = 2.5, holdKd = 2.2, holdMaxV = 3.0;
   velTargetX = holdKp * gErrX - holdKd * this.vx;   // 位置 P + 速度阻尼 D
   ...（Z 同，Y 用 holdAltKp）...
-  if (vh > holdMaxV) velTarget *= holdMaxV / vh;      // 水平速度上限 2 m/s
+  if (vh > holdMaxV) velTarget *= holdMaxV / vh;      // 水平速度上限 3 m/s
   ```
+  （`holdMaxV` 由 2.0 上调到 3.0 让最后一段收敛更利落，`holdKd` 相应由 1.5 上调到 2.2——高于 kp=1.5 的临界阻尼值 2.45 附近，保证更快的同时仍过阻尼、不晃。）
   保留 `D` 项是因为纯 P 会在到达时仍带速度 → 过冲 → 拉回 → 晃动。
-  - **射线避障全程一致生效**：取消了原来"接管区内抑制 `rep`/`tan`"的一整套特例（含 `repScale`、`steerFade`、转向迟滞、末段 stand-down）。导航阶段（未到达）射线层与巡航完全相同——排斥、切向绕行、刹车、垂直越障全开；**到达后**同样施加完整的水平避障（排斥 + 切向绕行 + vGo + 刹车），只是把横向预算压到已限速的 PD 速度上（`budgetBase = |velTarget|`，不取巡航地板），避免干净时多余推离、也避免飞过头；垂直方向仍保留安全底线：`vSafeDown`/`vSafeUp` 净空限制 + `crashFloor` + 碰撞处理，且 PD 自身垂直速度也被限到 `holdMaxV = 2.0`，防止下降冲太快穿过侧边建筑。
-  - **速度环 D 项**回到参考实现：`velKd = useAccFeedforward ? 0 : sfVelKd`（巡航关 D 以避免放大网络前馈跳变；到达后走位置环、`useAccFeedforward=false`，`velKd = sfVelKd = 1.0` 提供阻尼）。
+  - **射线避障全程一致生效**：取消了原来"接管区内抑制 `rep`/`tan`"的一整套特例（含 `repScale`、`steerFade`、转向迟滞、末段 stand-down）。导航阶段（未到达）射线层与巡航一致——排斥、切向绕行、刹车、垂直越障全开，横向预算基准取 `max(yopoCruiseMinSpd, 指令速度, 绕行生效 ? yopoDetourSpeedFloor : 0)`；垂直方向保留 `vSafeDown`/`vSafeUp` 净空限制 + `crashFloor` + 碰撞处理。
+  - **近目标 12 m 收敛区与到达后的横向处理**：距目标水平距离 < 12 m 时进入收敛区，`steer`（`rep + tan`）在**走廊畅通**时被清零（`goalClearHyst` 为判据）、`brake` 强制放开为 1.0、`vGo` 也被禁止叠加（另需 `distGoalH ≥ 12 m`），由收敛 PD 把无人机钉到目标列上——这样"目标紧贴建筑"时不会被排斥力推离目标点。**注意：这是"走廊畅通才清零"**，若走廊仍被挡（例如目标楼旁还有一堵墙横在中间）则 `rep`/`tan` 继续生效、继续绕行，不会被钉在半路卡死。**到达锁定后**（`yopoArrived`）同样清零 `rep`/`tan`、关闭 `vGo`，保留的是刹车缩放与垂直安全底线（`vSafeDown`/`vSafeUp` + `crashFloor` + 碰撞处理），PD 自身垂直速度也限到 `holdMaxV = 3.0`，防止下降冲太快穿过侧边建筑。
+  - **速度环 D 项**回到参考实现：`velKd = (useAccFeedforward || (stickActive && horizActive)) ? 0.0 : sfVelKd`（巡航关 D 以避免放大网络前馈跳变；摇杆接管且有水平输入时同样关 D；到达后走位置环、`useAccFeedforward=false`，`velKd = sfVelKd = 1.0` 提供阻尼）。
   - **已删除的旧接管参数**：`yopoFinalApproachDist`、`yopoFinalApproachVMax`、`yopoGoalRepSuppressDist`、`yopoTakeoverSlew`、`yopoTakeoverSteerEndDist`、`yopoArriveDeadbandM`、`yopoArriveVertH`、`yopoArriveAltKp`/`AltVMax`（注释中留有说明）。
   - **贴墙目标不再被钉在半路**（仍保留）：目标贴墙时前向射线测得 `dAhead ≈ distGoalH`，`yopoAvoidGoalGateMargin = 1.0` 让目标 1 m 容差内的威胁按 beyond-goal 处理（`yopoAvoidGoalBrakeFloor = 0.40` 下限覆盖 `brake = 0` 情形，closing gate 第三条放行），避免被钉在数米外。
-- **深度可用性**：DA360 深度失败/超时时**不回退射线检测**，无人机原地悬停并持续重试，直到拿到有效深度图才恢复导航（详见「DA360 深度估计」）。注：早期版本曾有"整帧被 2 m 内包围即判定深度异常并悬停"的检测，因在城市楼群中会把"近处像素多"误判为深度失效而频繁悬停，已按上游实现移除；深度有效性现交由 mask 通道与网络自身判断。
+- **深度可用性**：DA360 深度失败/超时时**不回退射线检测**，无人机原地悬停并持续重试，直到拿到有效深度图才恢复导航（前端深度请求超时为 **6 s**；服务端另有按深度图年龄的 `_SA_DEPTH_AGE_WARN = 0.2 s` / `_SA_DEPTH_AGE_STOP = 1.0 s` 两级减速/停车保护）。注：早期版本曾有"整帧被 2 m 内包围即判定深度异常并悬停"的检测，因在城市楼群中会把"近处像素多"误判为深度失效而频繁悬停，已按上游实现移除；深度有效性现交由 mask 通道与网络自身判断。
 - **巡航速度地板（`yopoCruiseMinSpd=12`）**：路径畅通且目标较远时，沿目标方位补齐前进速度，避免网络把速度压到爬行；避障刹车时自动让位，距目标 < `yopoCruiseMinDist=5` m 时关闭，尊重接管/到达减速。
 - **垂直优先直升降（`yopoVertFirst*`）**：当高度差占主导（水平距离 < 35 m 且 |Δh| > 4 m 且 > 0.9× 水平偏移）时，直接接管垂直通道做 P 收敛升降、水平只留 30%，消除大幅盘旋；正上/正下净空不足时让位回网络。
-- **到达判定**：服务端 2 m 到达判据在 `main.js` 中锁存（`cmd.arrived` → `yopoArrived`，离目标超过 `YOPO_ARRIVE_RELEASE_M` 才释放）；客户端另有兜底：距目标 < `yopoArriveHoldM = 6.0` m（**仅按距离，无速度门**——`yopoArriveHoldV` 已移除）即判定到达，避免服务端异步判据回来前"总差一步"（`yopoArriveHoldM` 已从 2.0 上调到 6.0：更早接管，避免贴近建筑下降时擦翼；距目标 < 6 m 即按距离锁定兜底，服务端 2 m 判据异步回来前不悬在半路）。到达后即进入上面的目标点位置悬停。
+- **到达判定**：服务端 2 m 到达判据（`ARRIVE_THRESHOLD = 2.0`，3D 距离）在 `main.js` 中锁存（`cmd.arrived` → `yopoArrived`，离目标超过 `YOPO_ARRIVE_RELEASE_M` 才释放，该值默认是 **6 m**，可用 `?yopoArriveReleaseM=` 覆盖）；客户端另有兜底：距目标 < `yopoArriveHoldM = 6.0` m（**仅按距离，无速度门**——`yopoArriveHoldV` 已移除）即判定到达，避免服务端异步判据回来前"总差一步"（`yopoArriveHoldM` 已从 2.0 上调到 6.0：更早接管，避免贴近建筑下降时擦翼；距目标 < 6 m 即按距离锁定兜底，服务端 2 m 判据异步回来前不悬在半路）。到达后即进入上面的目标点位置悬停。
 
 ### 避障架构与调参
 
@@ -480,33 +483,33 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 | 层 | 位置 | 机制 | 作用 |
 |----|------|------|------|
 | 学习式避障 | 服务端 `scripts/yopo_server.py` | 网络 `argmin(score)` 选轨迹（训练期 `safety_loss`） | 全局路径规划、绕开大尺度结构 |
-| 几何反应式势场 | 前端 `src/drone.js` | 360° 射线环（12 条、30° 间隔）实时探测 | 兜住深度重规划间隙内的突发近障 |
+| 几何反应式势场 | 前端 `src/drone.js` | 360° 射线环（24 条、15° 间隔）实时探测 | 兜住深度重规划间隙内的突发近障 |
 
 客户端几何层工作机制（见 `_avoidanceVelocity`）：
 
-- **探测**：以机体为圆心发 12 条水平射线（半径 65 m，30° 间隔）；另对最对齐前进方向的 3 条射线做**上两层 + 下一层**（`high`/`high2`/`low`）共 3 层探测（供竖直越障判断）；另有正上/正下竖直射线。
+- **探测**：以机体为圆心发 24 条水平射线（半径 65 m，15° 间隔）；另对最对齐前进方向的 3 条射线做**上两层 + 下一层**（`high`/`high2`/`low`）共 3 层探测（供竖直越障判断）；另有正上/正下竖直射线。
 - **输出分量**：`rep`（径向推离）/ `tan`（切向绕行）/ `brake`（近障刹车）/ `vRep`（竖直越障）/ `vGo`（竖直障碍足迹水平绕行）/ `upPush` + `vSafeDown`（地面与下降安全）。
 
 #### 各分量实现（前端 `_avoidanceVelocity`，360° 射线环）
 
-输入：12 条水平射线距离 `dists[i]`（半径 `yopoAvoidRange`，30° 间隔），以及最对齐前进方向的 3 层竖直探测（`distsHigh` / `distsHigh2` / `distsLow`）与正上/正下净空（`vUpDist` / `vDownDist` / `groundGap`）。作用距离随速度自适应：`repRange` 在 `yopoAvoidRepRange`(28) 与 `yopoAvoidRepRangeHi`(60) 间按 `tFast` 插值；`goalClear` 的畅通阈值仍用固定的 `yopoAvoidRepRange`，所以放大作用距离不会让"路径其实畅通"被误判为被挡。
+输入：24 条水平射线距离 `dists[i]`（半径 `yopoAvoidRange`，15° 间隔），以及最对齐前进方向的 3 层竖直探测（`distsHigh` / `distsHigh2` / `distsLow`）与正上/正下净空（`vUpDist` / `vDownDist` / `groundGap`）。作用距离随速度自适应：`repRange` 在 `yopoAvoidRepRange`(28) 与 `yopoAvoidRepRangeHi`(60) 间按 `tFast` 插值；侧向 keep-out 另有独立的 `pushRange`（在 `yopoAvoidPushRange`(36) 与 `yopoAvoidPushRangeHi`(70) 间插值，驱动排斥权重）。`goalClear` 的畅通阈值仍用固定的 `yopoAvoidRepRange`，所以放大作用距离不会让"路径其实畅通"被误判为被挡。
 
-- **rep（径向推离）**：遍历每条水平射线，若 `d < repRange` 则按权重 `w = 1 − d/repRange`（越近越强）沿"障碍→机体"反方向累加 `repX/Z −= dir·w`；求和后整体缩放到上限 `yopoAvoidRepGain`（默认 34 m/s）。最后再乘 `repHold = clamp(dMin/standoff, 0, 1)`：`dMin`（任意方向最近障碍）贴近 standoff 时 rep 归零（已停住不再后推），随距离恢复满力——避免绕到障碍侧边时 `dAhead` 很小但 `dMin` 仍近、push 全程不掉线把无人机拽回（修复"绕过去又折返"）。
+- **rep（径向推离）**：遍历每条水平射线，若 `d < pushRange` 则按 **keep-out 形状**权重 `w = clamp((pushRange − d)/(pushRange − yopoAvoidSideStandoff), 0, 1)`（10 m standoff 内满力、到 `pushRange` 线性衰减为 0）沿"障碍→机体"反方向累加 `repX/Z −= dir·w`。**幅值不由射线条数决定，而是由最近障碍距离驱动**：先取方向（加权和，指向背离墙面的合成方向），再把幅值重定为 `yopoAvoidRepGain × closeness(dMin)`，其中 `closeness` 与上面的 `w` 同式、代入 `dMin`（任意方向最近障碍）。这一步是必要的——加权和本质是"数射线"，窄墙只扫到 2~4 条射线时合力仅 2~5 m/s，顶不住 10~15 m/s 的前压，会让无人机贴着墙面磨蹭、擦翼穿模；改为距离驱动后，窄墙也能拿到满额 34 m/s 推离。最后整体乘 `repHold = clamp(dMin/standoff, yopoRepHoldFloor, 1)`（**地板 `yopoRepHoldFloor = 0.5`，不是 0**）：`dMin` 贴近 standoff 时 rep 至少保留一半（已停住不再后推，但仍守住间距），随距离恢复满力。
 
-- **tan（切向绕行）**：参考方向取"目标方位宽锥内（`dotG > yopoTanConeCos`，约 ±90°）最近障碍"，否则取前向威胁方向；取该方向的两条垂直切向中"朝目标侧投影更大"的一条（贴着障碍滑向目标）。强度 `t = yopoAvoidTanGain·max(0, 1 − tanRefD/repRange)`（默认 TanGain 104 m/s，越近越强）。两道防抖：① 方向迟滞记忆 `_avoidLastTan`——与上一帧切向夹角 >120° 但上一帧方向仍畅通且仍指向目标侧（`ltToGoal > yopoTanAwayCos`）时保留上一帧，防止经过障碍中心时合力翻转导致来回绕；② 切向偏离目标方位 >90°（`fToGoal < 0`）时乘 `yopoTanAwayScale=0.85` 衰减，让目标吸引项夺回主导。tan 同样经 `repHold` 调制。
+- **tan（切向绕行）**：参考方向取"目标方位宽锥内（`dotG > yopoTanConeCos`，约 ±90°）最近障碍"，否则取前向威胁方向；取该方向的两条垂直切向中"朝目标侧投影更大"的一条（贴着障碍滑向目标）。强度 `t = yopoAvoidTanGain·max(0.5, 1 − tanRefD/repRange)`（默认 TanGain 120 m/s，**下限 0.5**：障碍还在 20~30 m 外时切向就有咬合力，不必临到跟前才起绕）。三道防抖：① 方向迟滞记忆 `_avoidLastTan`——与上一帧切向夹角 >120°、上一帧方向仍畅通（`dists[i] > yopoAvoidStop + 2.0`）、仍指向目标侧（`ltToGoal > yopoTanAwayCos`）、**且新切向不比记忆中的更朝向目标**（`newTanToGoal < ltToGoal`）时保留上一帧，防止经过障碍中心时合力翻转导致来回绕；② 切向偏离目标方位 >90°（`fToGoal < 0`）时乘 `yopoTanAwayScale=0.95` 衰减，让目标吸引项夺回主导；③ 记忆会在"走廊连续 4 帧畅通（`goalClearStable`）"或触发释放时清空，避免把上一个障碍的绕行方向带进下一个。tan 经 `tanHold = max(repHold, 0.85)` 调制——**保底 85%，不随 `repHold` 同步衰减**：`repHold` 贴近障碍时压低力场对 rep（"停住后不再推离"）是对的，对 tan 是反的，越近越需要绕行力度。
 
-- **brake（近障刹车）**：前向速度取"指令速度"与"机体实际速度"较大者；威胁距离 `dAhead` 同时按指令方向与机体实际航向取较小值（防止网络把指令拐向旁边、机体却仍冲墙时不刹车）。反应距离 `reactionDist = spdFwd·reactionSec`（高速档 `yopoAvoidBrakeReactionHi` 更大）从可刹车距离中扣除，使高速时提前约 3 m 起步、并在 standoff 内停住。双层减速取较保守者：① 硬运动学刹车 `vSafe = √(2·yopoAvoidBrakeDecel·dEff)`（`dEff = brakeClear − standoff − reactionDist`，`yopoAvoidBrakeDecel≈6.5` 远低于物理可达，留 ~2× 余量）；② 渐进软刹车在 `brakeRange` 内随距离平滑缩速、地板 `yopoAvoidBrakeFloor=0.85`。目标背后障碍（`dAhead > distGoalH`）只保留 `yopoAvoidGoalBrakeFloor`，不刹最终进近。触发刹车时调用点**压制 YOPO 加速度前馈**并沿速度反方向注入最强减速前馈（最高 `yopoAvoidBrakeAccel≈17`，对应 60° 倾转 `droneMaxAngle=60`，至少交付 `yopoAvoidBrakeMinFrac=0.85`）；合成速度再沿威胁方向由 `vCloseMax = √(2·BrakeDecel·dGate)` 硬性限速，确保 rep/tan/vGo 叠加后仍能停下。
+- **brake（近障刹车）**：前向速度取"指令速度"与"机体实际速度"较大者；威胁距离 `dAhead` 同时按指令方向与机体实际航向取较小值（防止网络把指令拐向旁边、机体却仍冲墙时不刹车）。反应距离 `reactionDist = spdFwd·reactionSec`（基础 `yopoAvoidBrakeReaction = 0.46 s`，高速档 `yopoAvoidBrakeReactionHi = 1.25 s` 更大）从可刹车距离中扣除，使高速时提前约 15 m 起步、并在 standoff 内停住。双层减速取较保守者：① 硬运动学刹车 `vSafe = √(2·yopoAvoidBrakeDecel·dEff)`（`dEff = brakeClear − standoff − reactionDist`，`yopoAvoidBrakeDecel = 3.5` 远低于物理可达，留 ~2× 余量；**该值越小刹车越早、要求的目标速度越低，只可下调不可上调**）；② 渐进软刹车在 `brakeRange` 内随距离平滑缩速、地板 `yopoAvoidBrakeFloor = 0.78`。目标背后障碍（`dAhead > distGoalH`）只保留 `yopoAvoidGoalBrakeFloor`，不刹最终进近。触发刹车时调用点**压制 YOPO 加速度前馈**并沿速度反方向注入最强减速前馈（最高 `yopoAvoidBrakeAccel≈17`，对应 60° 倾转 `droneMaxAngle=60`，至少交付 `yopoAvoidBrakeMinFrac=0.85`）；合成速度再沿威胁方向由 `vCloseMax = √(2·BrakeDecel·dGate)` 硬性限速，确保 rep/tan/vGo 叠加后仍能停下。刹车值本身经**非对称滤波**：收紧立即生效、松开按 0.30 s 斜坡回弹，避免探测噪声把速度目标抖动成锯齿。
 
-- **vRep（竖直越障）**：仅当"前向水平走廊真正被挡"（`!goalClear` 且 `dAheadH < yopoAvoidStop + yopoAvoidVBlock`，即 26 m）且非近目标区时触发。在前向半球内，只要任一条高层 `distsHigh`/`distsHigh2` 中任一层 `> clearD (= yopoAvoidRange·yopoAvoidVClear ≈ 24.7 m)` 且正上方 `vUpDist` 也畅通 → 可越顶；若 `lowOk` 且低层 `dL` 畅通、下方净空足够 → 可下钻。两者皆可优先上爬，只上通则上爬（`vRep = yopoAvoidGain·yopoAvoidVClimbScale`），只下达则下钻（取负）。竖直探测随高度动态刷新，持续爬升直到越过障碍顶。
+- **vRep（竖直越障）**：仅当"前向水平走廊真正被挡"（`!goalClear` 且 `dAheadH < yopoAvoidStop + yopoAvoidVBlock`，即 26 m）**且尚未到达锁定**（`!yopoArrived`）时触发；这里没有"近目标区"例外，目标在近处同样可以越障。方向由**提交/保持状态机**决定（不再逐帧重判）：进入后方向被锁存为 `heldDir = +1`（爬越）或 `-1`（下钻），直到该方向被物理封死（`vUpDist ≤ yopoAvoidStop + 1` / 下方净空不足）或真正飞过障碍（`dAheadH > blockDist × 1.5 = 39 m`）才释放，中途禁止换向——掠射射线在楼顶边缘的距离抖动曾让 vRep 在 `±e` 与 0 之间跳变，表现为"爬一点、沉一点、再爬"。判定：正上方净空 `vUpDist > clearD (= yopoAvoidRange × yopoAvoidVClear ≈ 24.7 m)` 即判为**可越顶**（`upClear`）——不要求侧向高层射线也畅通，因为障碍顶部高于当前探测层恰恰就是"必须往上爬"的情形；下钻更保守：要求低层 `dL > clearD` 且 `groundGap > yopoMinAlt` 且 `vDownDist > yopoMinAlt`（10 m）。两者皆可优先上爬，只上通则上爬（`vRep = yopoAvoidGain·yopoAvoidVClimbScale`），只下达则下钻（取负）。走廊一旦畅通（连续 4 帧 `goalClearStable`）即**拉平**（`vClimb = 0`）停止继续爬高，但仍保持 `clearHold` 锁住高度、平飞越过障碍，直到 `dAheadH > 39 m` 才允许下降——把"停止爬升"与"允许下降"拆成两个判据，正是修复"越障完立刻掉高度砸回障碍"的关键。爬升/下钻指令再经 `vTau = 0.15 s` 斜坡滤波，避免约 28 m/s 的阶跃造成竖直抽搐。
 
-- **vGo（竖直障碍足迹水平绕行）**：当正下方"是结构非地形"（`vDownDist < yopoAvoidVGoThresh` 且 `groundGap − vDownDist > 1.5`，即不是贴地飞行）或正上方被挡（`vUpDist < yopoAvoidVGoThresh`），且"前方走廊不通"（`!goalClear`）、非近目标时触发。选最空水平方向离开足迹（优先前向半球最空，否则全局最空 `openDir`），保证仍朝目标推进而非掉头。强度 `strength = yopoAvoidTanGain·(yopoAvoidVGoBase + yopoAvoidVGoSpan·(1 − closeness))`；安全上限 `vGoSafe = √(2·yopoAvoidVGoDecel·max(0, vGoClear − standoff))` 用侧向滚转专属减速（远大于前向刹车），避免冲进侧障也不被压到 ~3 m/s。vGo 直接叠加到速度目标、不经前向刹车，所以自带该限速。
+- **vGo（竖直障碍足迹水平绕行）**：当正下方"是结构非地形"（`vDownDist < yopoAvoidVGoThresh` 且 `groundGap − vDownDist > 1.5`，即不是贴地飞行）或正上方被挡（`vUpDist < yopoAvoidVGoThresh`），且"前方走廊不通"（`!goalClear`）、**尚未到达锁定**（`!yopoArrived`）时触发；调用点再叠加"距目标水平距离 ≥ 12 m"的近目标豁免。选最空水平方向离开足迹（优先前向半球最空，否则全局最空 `openDir`），保证仍朝目标推进而非掉头。强度 `strength = yopoAvoidTanGain·(yopoAvoidVGoBase + yopoAvoidVGoSpan·(1 − closeness))`；安全上限 `vGoSafe = √(2·yopoAvoidVGoDecel·max(0, vGoClear − yopoAvoidStop))`（`yopoAvoidVGoDecel = 34.0`，侧向滚转专属减速，远大于前向刹车 3.5；注意括号内是 `yopoAvoidStop`(6.0) 而非 `yopoAvoidStopH`(9.0)），避免冲进侧障也不被压到 ~3 m/s。vGo 直接叠加到速度目标、不经前向刹车，所以自带该限速。
 
 - **upPush + vSafeDown（地面与下降安全）**：`upPush` 在 `groundGap < yopoMinAlt`（头顶/脚下净空不足）时 `= (yopoMinAlt − groundGap)·yopoAvoidGain·0.5`（下降净空不足时用 0.6 系数取较大者）向上推；头顶净空不足时用 `vSafeUp = √(2·aDecel·(vUpDist − standoff))` 限制上推，避免撞顶。`vSafeDown` 取正下方净空 `downGap = min(groundGap, vDownDist)`：若 `≤ yopoAvoidStopDown`（**独立的下方 standoff = 10.0 m，与 `yopoAvoidStop` 解耦，曾由 8.0 下调到 5.0 再回调到 7.0，本次为消除"飞越楼顶贴顶飞"窗口再放大到 10.0**）则禁止下降（=0），否则 `vSafeDown = √(2·aDecel·(downGap − yopoAvoidStopDown))`，调用点把它作为"下降速度硬上限"直接夹住 `velTargetY`。竖向威胁不写入 `dAhead`（无水平方向），故不会误刹前向巡航——地面/天花板安全完全由这两项独立处理。
 
 
-- **刹车（射线层优先于网络）**：运动学硬刹车 `v_safe = √(2·a·(d − standoff))` 规划安全速度（`a` 用保守的 `yopoAvoidBrakeDecel≈6.5 m/s²` 留足余量）。触发刹车时：①**压制 YOPO 网络的加速度前馈**（否则网络轨迹加速度会正顶着障碍、与刹车减速相互抵消）；②沿当前速度反方向直接注入最强减速前馈（最高 `yopoAvoidBrakeAccel≈17.0 m/s²`，对应 60° 倾转上限 `droneMaxAngle=60`），且进入刹车即至少交付 `yopoAvoidBrakeMinFrac=0.85`（≈14.5 m/s²）让减速一踩就猛、够及时。威胁距离 `dAhead` 同时按"网络指令方向"与"无人机实际航向"取较小值，避免网络把指令拐向旁边就把正前方障碍排除、导致不刹车。
-- **侧向速度预算**：绕行时把"前进"与"侧向绕行"拆开预算——侧向最多占预算基准的 77%、前向至少保留 20%，让速度矢量真正偏向切向、贴着障碍滑过，而不是"边全速前冲边轻蹭"。预算基准取 `max(yopoCruiseMinSpd, 实际指令速度)`：网络在深度见障时会自行放慢指令，若只按指令速度算预算，绕行会在最需要时塌掉（指令 8 m/s → 只剩 ~5.4 m/s 侧向力）。另外 **tan 不随 `repHold` 近障衰减**（保底 85%）：`repHold = dMin/standoff` 在贴近障碍时线性压低力场，对"停住后不再推离"的 rep 是对的，对 tan 是反的——越近越需要绕行力度。
-- **畅通直飞（`goalClear`）**：分别沿"机体→目标"（`dPath`）和"命令速度方向"（`dCmd`）各算一次走廊，走廊半宽 2.5 m，**任一**走廊在 `reach = min(yopoAvoidRepRange, 到目标的水平距离)` 内无障即判定畅通（截断到目标距离是为了让"目标背后的墙"不会把走廊永久判为被挡）。近距例外：若距目标 < `yopoCorridorGuardDist`（12 m）且 `dPath` 被挡，则封掉 `dCmd` 这条逃生通道，避免贴着障碍直冲。**通道畅通时 `rep`/`tan`/`brake`/`vRep` 全部归零、`vGo` 被抑制**，无人机全速直飞目标，不会被无谓推离或莫名绕行。
+- **刹车（射线层优先于网络）**：运动学硬刹车 `v_safe = √(2·a·dEff)` 规划安全速度（`dEff = brakeClear − standoff − reactionDist`，`a` 用保守的 `yopoAvoidBrakeDecel = 3.5 m/s²` 留足余量）。触发刹车时：①**压制 YOPO 网络的加速度前馈**（否则网络轨迹加速度会正顶着障碍、与刹车减速相互抵消）；②沿当前速度反方向直接注入最强减速前馈（最高 `yopoAvoidBrakeAccel≈17.0 m/s²`，对应 60° 倾转上限 `droneMaxAngle=60`），且进入刹车即至少交付 `yopoAvoidBrakeMinFrac=0.85`（≈14.5 m/s²）让减速一踩就猛、够及时；③姿态环增益临时放大 `yopoAvoidBrakeAngleGain = 2.2`（`brake < yopoAvoidBrakeUrgent = 0.7` 时），压缩从巡航前倾转到刹车倾角所需的约 0.28 s 死区。威胁距离 `dAhead` 同时按"网络指令方向"与"无人机实际航向"取较小值，避免网络把指令拐向旁边就把正前方障碍排除、导致不刹车。
+- **侧向速度预算**：绕行时把"前进"与"侧向绕行"拆开预算——侧向最多占预算基准的 77%、前向至少保留 20%，让速度矢量真正偏向切向、贴着障碍滑过，而不是"边全速前冲边轻蹭"。预算基准取 `max(yopoCruiseMinSpd, 实际指令速度, 绕行生效 ? yopoDetourSpeedFloor : 0)`（绕行生效指 `|rep+tan| > 1.5 m/s`，此时基准被抬到 40 m/s，使水平绕行与竖直越障同等果断；**前向门不受此抬升**）：网络在深度见障时会自行放慢指令，若只按指令速度算预算，绕行会在最需要时塌掉（指令 8 m/s → 只剩 ~5.4 m/s 侧向力）。另外 **tan 不随 `repHold` 近障衰减**（`tanHold = max(repHold, 0.85)`，保底 85%）：`repHold = clamp(dMin/standoff, 0.5, 1)` 在贴近障碍时压低力场，对"停住后不再推离"的 rep 是对的，对 tan 是反的——越近越需要绕行力度。
+- **畅通直飞（`goalClear`）**：分别沿"机体→目标"（`dPath`）和"命令速度方向"（`dCmd`）各算一次走廊，走廊半宽 2.5 m，**任一**走廊在 `reach = min(yopoAvoidRepRange, 到目标的水平距离)` 内无障即判定畅通（截断到目标距离是为了让"目标背后的墙"不会把走廊永久判为被挡）。近距例外：若距目标 < `yopoCorridorGuardDist`（**18 m**）且 `dPath` 被挡，则封掉 `dCmd` 这条逃生通道，避免贴着障碍直冲——该值必须覆盖释放阈值 `releaseDAhead = standoff + reactionDist + 2.0`（约 12 m），否则绕行甩头时 `dPath` 恰好落在阈值附近会反复"释放全速直冲 → 重新探测到 → 再避障"，表现为左右摇摆。判定再经两级滞后才真正放行：连续 2 帧畅通才置位 `releaseAllowed`、连续 3 帧被挡才解除（探测刷新 40 ms、掠射射线会逐帧翻转原始 `goalClear`）；连续 4 帧畅通另有 `goalClearStable`（用于清空切向记忆与拉平爬升）。**通道畅通时 `rep`/`tan`/`brake`/`vRep` 全部归零、`vGo` 被抑制**，无人机全速直飞目标，不会被无谓推离或莫名绕行。
 
 #### 机翼包络守卫（全方向预留翼展位置）
 
@@ -517,7 +520,9 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 守卫分两层（均已加滞回：连续 2 帧判定占用才置位、连续 3 帧畅通才解除，避免探测噪声逐帧翻转导致抖动 / 爬行）：
 
 - **下降态守卫（沿目标方向）**：仅当"非近目标区（距目标 ≥ 12 m）、正在下降、且目标低于机体（真·垂直进近）、最近障碍 `dMin < 12 m`"时生效。取最近障碍相对目标方位的投影 `projN` 与侧向偏移 `latOff`；只有当障碍"在目标前方（`projN>0` 且 `dMin·projN ≤ 到目标的水平距离`）"且"侧向偏移 < `yopoWingMargin`"时才保留横向排斥——即真正可能刮到机翼的障碍才拦住释放。否则（障碍远在侧方、超出实际翼展）放行，避免"明明畅通却被推开"。
-- **全方向守卫（平飞 / 爬升 / 下降各相位、任意射线方向）**：遍历 12 条水平射线，只要任一方向测得障碍落在 12 m 包络内、且该障碍**未超过目标**（沿目标投影距离 ≤ 到目标的水平距离，即不是目标紧贴的那堵墙）、且并非明显在后方（`dotG > −0.3`），就置位 `_avoidSideKeepOn`，阻止释放逻辑把横向 `rep` 清零。即无论平飞、爬升还是下降，任意一侧的机翼位置都被预留，不会因"机体中心走廊畅通"就误判可释放、结果擦翼。前向走廊刹车仍由 `dAheadH` 决定，故侧向墙只让无人机保持偏移、不会爬行。
+- **全方向守卫（平飞 / 爬升 / 下降各相位、任意射线方向）**：遍历全部 24 条水平射线，只要任一方向测得障碍落在 12 m 包络内、且该障碍**未超过目标**（沿目标投影距离 ≤ 到目标的水平距离，即不是目标紧贴的那堵墙）、且并非明显在后方（`dotG > −0.3`），就置位 `_avoidSideKeepOn`，阻止释放逻辑把横向 `rep` 清零。即无论平飞、爬升还是下降，任意一侧的机翼位置都被预留，不会因"机体中心走廊畅通"就误判可释放、结果擦翼。前向走廊刹车仍由 `dAheadH` 决定，故侧向墙只让无人机保持偏移、不会爬行。
+
+- **释放的两级分流（Tier 1 / Tier 2）**：走廊畅通且-wing 守卫未置位时走 **Tier 1**——`rep`/`tan`/`brake`/`vRep` 全部清零、`vGo` 抑制、全速直飞。若翼展包络内仍有障碍（守卫置位）则走 **Tier 2**——**保留 `rep`**（维持与墙的侧向间距）、`brake` 放开，而 `tan` 是否保留取决于该障碍**是否仍在正前方**：扫描时对每个包络内障碍按沿目标方向的余弦分类（`dotG > 0.2` 判为"仍在前方"，同样 2/3 帧滞回锁存为 `_avoidSideAheadOn`）。仍在正前方 → 保留 `tan`（继续走完绕弧，避免"绕一点就停、绕不过去"）；已到侧方或身后 → 清零 `tan`（否则就是"走廊全通却还在绕"的误绕）。两级都会清空切向方向记忆 `_avoidLastTan`。
 
 近目标 12 m 收敛区内两道守卫均不生效：区内靠收敛 PD 把无人机钉在目标列上、`goalClear` 走廊判定为权威，释放不会刮翼；目标紧贴的墙被判为"在目标之后"也放行，无人机仍可落到贴墙目标点。
 
@@ -528,10 +533,10 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 | 参数 | 默认值 | 含义 |
 |------|--------|------|
 | `yopoAvoidEnabled` | `true` | 几何层总开关 |
-| `yopoAvoidRayCount` | 12 | 360° 射线数（30° 间隔） |
+| `yopoAvoidRayCount` | 24 | 360° 射线数（15° 间隔）。**由 12 上调**：30° 间隔时相邻射线的横向间隙 ≈ `2·d·sin15° ≈ 0.52·d`（20 m 处约 10 m、30 m 处约 15 m），一栋宽 10~15 m 的楼会整栋落在两条射线之间，走廊判定完全看不到它 → 误判畅通、全速直撞；15° 间隔把 20 m 处间隙收窄到约 5 m。射线数增大只增加 GPU pick 次数（相对 200 ms~1 s 的网络推理可忽略），若帧率不足可降到 16 |
 | `yopoAvoidFastSpeed` | 6.0 | 高速档起始速度 (m/s)：高于此进入高速自适应（排斥/切向/刹车作用距离加大、探测节流加密） |
 | `yopoAvoidRefSpeed` | 15.0 | 高速档完全生效速度 (m/s)：排斥/切向/刹车的作用距离按此线性插值到上限（射线本身**不**随速度降采样） |
-| `yopoAvoidStrideHi` | 2 | **已停用**（射线分级已移除）：原高速跨步采样，现 12 条方向每周期全探测 |
+| `yopoAvoidStrideHi` | 2 | **已停用**（射线分级已移除）：原高速跨步采样，现 24 条方向每周期全探测 |
 | `yopoAvoidCoreDeg` | 25 | **已停用**（射线分级已移除）：原核心锥半角，现无核心/外锥之分 |
 | `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 55 | **已停用**（射线分级已移除）：原外锥半角，整圈每周期全探测 |
 | `yopoAvoidSliceMax` | 12 | **已停用**（射线分级已移除）：原外围 round-robin 切片数，现无"本周期未探测"的方向 |
@@ -539,30 +544,35 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 | `yopoAvoidRepRange` | 28.0 | 排斥/切向/刹车作用距离 (m)；同时是 `goalClear` 的畅通判定阈值，**不要**调大 |
 | `yopoAvoidRepRangeHi` | 60.0 | 高速档（≥ `yopoAvoidRefSpeed`）下上述作用距离 (m) |
 | `yopoAvoidRepGain` | 34.0 | 径向推离最大速度 (m/s) |
-| `yopoAvoidTanGain` | 104.0 | 切向绕行增益 (m/s)，越大绕得越果断 |
+| `yopoAvoidTanGain` | 120.0 | 切向绕行增益 (m/s)，越大绕得越果断 |
 | `yopoTanConeCos` | 0.0 | 仅在"目标方位 ±90° 锥内"取障碍当绕行基准，避免被侧后方楼带偏（已从 0.17 扩大到 0.0，更侧方障碍也触发绕行） |
-| `yopoTanAwayCos` | -0.2 | 旧切线偏离目标 >100° 即弃用，允许拐回目标 |
-| `yopoTanAwayScale` | 0.85 | 切线偏离目标 >90° 时按 0.85 衰减，避免被推离目标（已从 0.78 上调，绕弯时保留更多绕行权威） |
+| `yopoTanAwayCos` | -0.5 | 旧切线偏离目标 >120° 才弃用，允许拐回目标（由 -0.2 放宽：绕行途中方向记忆更持久、不轻易换边） |
+| `yopoTanAwayScale` | 0.95 | 切线偏离目标 >90° 时按 0.95 衰减，避免被推离目标（0.78 → 0.85 → 0.95，绕大弯时保留更多绕行权威） |
 | `yopoSteerCapFrac` | 0.77 | 横向绕行可占用的速度预算比例（侧向速度上限 = 预算基准 × 该值）；前向预算已解耦并压紧，故提高它只放大滑墙绕行权威，不会冲墙 |
 | `yopoDetourSpeedFloor` | 40.0 | 绕行实际生效时的水平速度下限 (m/s)：抬升横向滑过障碍的果断度，使水平绕行与竖直越障 (vRep) 同等有力；前向门不受此抬升 |
-| `yopoAvoidDecel` | 8.5 | 竖直刹车阈值所用假定减速度 (m/s²) |
-| `yopoAvoidBrakeDecel` | 6.5 | **水平刹车规划减速度 (m/s²)**：刻意低于可达值，给真实减速留 ~2× 余量 |
+| `yopoAvoidDecel` | 8.5 | **已失效（仅为兼容保留）**：实际竖直减速取 `aDecel = min(yopoAvoidVDecel, yopoAccMax) × 0.9 = 9.9`，`vSafeUp` / `vSafeDown` / `upPush` 均用 `aDecel` |
+| `yopoAvoidVDecel` | 13.0 | **竖直**减速假定值 (m/s²)：与 `yopoAccMax`(11) 取小后再乘 0.9 得到实际 `aDecel`（= 9.9），驱动 `vSafeUp` / `vSafeDown`。竖直推力轴比前倾轴刹得猛，故可远高于前向的 `yopoAvoidBrakeDecel` |
+| `yopoAvoidBrakeDecel` | 3.5 | **水平刹车规划减速度 (m/s²)**：刻意远低于可达值，给真实减速留 ~2× 余量（6.5 → 4.5 → 3.5）。**它同时驱动 `vSafe`、关速门 `vCloseMax` 与近距限速器**：调小 = 刹车更早、要求的目标速度更低，只可下调不可上调 |
 | `yopoAvoidBrakeAccel` | 17.0 | **刹车时允许的最大实际减速度 (m/s²)**：对应 60° 倾转上限（`droneMaxAngle=60`），直接注入反方向减速前馈并**压制网络加速度前馈** |
 | `yopoAvoidBrakeMinFrac` | 0.85 | 进入刹车即至少交付 0.85×`BrakeAccel`（≈14.5 m/s²），一踩就猛 |
-| `yopoAvoidBrakeReaction` | 0.46 / 0.80 | 刹车反应时间 (s)：基础 / 高速档（≥ `yopoAvoidRefSpeed`） |
+| `yopoAvoidBrakeReaction` | 0.46 / 1.25 | 刹车反应时间 (s)：基础 / 高速档（≥ `yopoAvoidRefSpeed`）。高速档 0.80 → 1.00 → 1.25，15 m/s 下刹车指令提前约 15 m 下达 |
 | `yopoAvoidBrakeRange` / `BrakeRangeHi` | 30.0 / 54.0 | 渐进软刹车区间 (m)：低速 / 高速（随 `yopoAvoidStopH` 6→7.5→9.0 同步放大到 30.0，保证 `(brakeClear − standoff×2)` 归一化不退化） |
-| `yopoAvoidBrakeFloor` | 0.85 | 软刹车速度下限比例（接近时仍减速但不过度压缩巡航） |
+| `yopoAvoidBrakeFloor` | 0.78 | 软刹车速度下限比例（接近时仍减速但不过度压缩巡航）；由 0.85 下调，让接近障碍时更早收油 |
+| `yopoAvoidBrakeAngleGain` | 2.2 | 刹车期间姿态环增益倍率：压缩"巡航前倾 → 刹车倾角"约 0.28 s → ~0.12 s 的死区，使 17 m/s² 真的能在还有距离时建立起来 |
+| `yopoAvoidBrakeUrgent` | 0.7 | 仅当 `brake` 低于此值（真急停或关速门触发）才启用上面的增益boost，避免巡航中常态放大增益导致抖动 |
+| `yopoRepHoldFloor` | 0.5 | `repHold = clamp(dMin/standoff, ·, 1)` 的地板：贴近障碍时 `rep` 至少保留一半，而不是归零 |
+| `yopoAvoidVGoDecel` | 34.0 | vGo 侧向逃逸专属减速 (m/s²)：远大于前向刹车（3.5），使离开足下/头顶障碍足迹的横向速度不被压到 ~3 m/s |
 | `yopoAvoidSideStandoff` | 10.0 | **侧向**期望净距 (m)：与建筑面/墙体保持的距离，keep-out 排斥在 10 m 内满力推离（已从 13.0 回退到 10.0：避免绕行出口被带回） |
 | `yopoAvoidStopH` | 9.0 | **水平**刹车安全净距 (m)：驱动前进方向刹车 standoff 与 rep 衰减，**离墙/楼更远**（按要求 6.0 → 7.5 → 9.0） |
 | `yopoWingMargin` | 3.0 | **翼展包络**附加横向余量 (m)：叠加在 `yopoAvoidStopH` 之上构成机翼守卫的 12 m 包络（`StopH + WingMargin`）；释放前若任一方向障碍落在包络内且未超过目标，则保留横向排斥防擦翼 |
-| `yopoAvoidStop` | 6.0 | 安全净距 (m)：驱动**上/下**净空刹车（vSafeUp / vSafeDown）与竖直越障封锁距离；刻意不随 StopH 上调，否则净空小于它时完全禁止上升/下降，低目标/近地无法到达 |
+| `yopoAvoidStop` | 6.0 | 安全净距 (m)：驱动**上方**净空刹车 `vSafeUp`、竖直越障封锁距离，以及 vGo 的 `vGoSafe` 上限；**下降**方向另有 `yopoAvoidStopDown` 负责。刻意不随 StopH 上调，否则净空小于它时完全禁止上升、低目标/近地无法到达 |
 | `yopoAvoidStopDown` | 10.0 | **下方（下降）**独立安全净距 (m)：仅驱动 `vSafeDown`（下降时对脚下障碍的运动学刹车）。与 `yopoAvoidStop` 解耦（曾由 8.0 下调到 5.0 再回调到 7.0，本次为消除"飞越楼顶贴顶飞"窗口再放大到 10.0），下降时在脚下障碍上方保持余量，不影响上升/头顶净空 |
 | `yopoMinAlt` | 10.0 | 最小离地/离顶净空 (m)：低于它触发向上推离（2.5 → 3.0 → 4.0 → 8.0 → 10.0）。飞过楼顶时绑定净空是**正下射线 `vDownDist`**：脚下楼顶净空 < 10 m 即被推升，保持 ~10 m 垂直余量、不再贴着楼顶飞；下方余量更大 |
 | `yopoAvoidVClimbScale` | 2.2 | 竖直越障爬升力度 |
 | `yopoAvoidVBlock` | 20.0 | 前方净空低于此值触发竖直越障 (m) |
 | `yopoAvoidVGoBase` / `VGoSpan` | 0.85 / 0.60 | 足下障碍"水平移出足迹"速度 (vGo) 的近/远强度 |
 | `yopoAvoidVClear` | 0.38 | 上层"畅通"判定占比，越低越障意愿越强 |
-| `yopoCorridorGuardDist` | 12.0 | 近距目标走廊守卫 (m)：此距离内即便速度方向走廊通畅，若目标方位走廊被挡也强制刹车 |
+| `yopoCorridorGuardDist` | 18.0 | 近距目标走廊守卫 (m)：此距离内即便速度方向走廊通畅，若目标方位走廊被挡也强制刹车。由 12.0 上调，必须覆盖释放阈值 `releaseDAhead ≈ 12 m`，否则绕行甩头时会在该边界反复"释放直冲 / 重新避障"（左右摇摆、绕不过去） |
 | `yopoCruiseMinSpd` | 12.0 | 巡航最小速度地板 (m/s)：路径畅通且目标较远时沿目标方位补齐前进速度，避障刹车时让位 |
 | `yopoCruiseMinDist` | 5.0 | 距目标小于此值时关闭巡航地板，尊重到达减速 |
 | `yopoVertFirstEnabled` | `true` | 巡航阶段"垂直优先"直升降总开关 |
@@ -582,14 +592,15 @@ GPU 场景渲染 + 回读同步，且**同步跑在渲染帧循环里**。为压
 测得的距离：巡航速度下无人机一个周期就移动数米，过期或插值出来的距离会把刹车距离算错，表现为
 "前方明明有障碍，却仍规划出大速度直冲过去"（避障层被绕过）。因此：
 
-- **全量、每周期、全 fresh**：12 条水平射线（`yopoAvoidRayCount`）**逐条每周期**真实 GPU pick
+- **全量、每周期、全 fresh**：24 条水平射线（`yopoAvoidRayCount`）**逐条每周期**真实 GPU pick
   （`forceFresh=true`，不走缓存），无跨步降采样、无 round-robin 轮换、也不用邻居方向镜像填充。
 - **竖直层（high/high2/low）每周期发射**：沿最朝前的 3 条射线各探 3 层（+9 条），且不再由上一
   周期"走廊被挡"的判定来门控——那层滞后一拍的门控曾让竖直越障始终不触发。
 - **正上 / 正下**：每周期各 1 条 fresh（天花板 / 地面安全不接受过期值），不再"每 N 周期"跳过。
 
-节流仍在 `_updateAvoidProbe`：高速每 **60 ms** 一轮（≈16.7 Hz），低速每 **≤400 ms** 一轮（≈2.5 Hz）；
-位置几乎未变（`moved < 0.4 m` 且 `|Δy| < 2 m`）时复用上一轮结果。这是**周期级节流**，不是射线缓存。
+节流仍在 `_updateAvoidProbe`：高于 `yopoAvoidFastSpeed` 时每 **`yopoAvoidQueryMs = 40 ms`** 一轮（≈25 Hz），
+低速时线性放宽到 **≤400 ms** 一轮（≈2.5 Hz）；
+位置几乎未变（`moved < 0.4 m` 且 `|Δy| < 2 m`）**且距上次探测未超过复用时限**（高速 `min(120, 2×queryMs)` ms、低速 900 ms）时复用上一轮结果。这是**周期级节流**，不是射线缓存。
 
 `yopoAvoidStrideHi` / `yopoAvoidCoreDeg` / `yopoAvoidConeDeg` / `ConeDegHi` / `yopoAvoidSliceMax` /
 `yopoAvoidVertEvery` **均已停用**（保留赋值只为兼容外部 / UI 覆盖），`_computeAvoidProbe` 不再读取。
@@ -606,13 +617,13 @@ GPU 场景渲染 + 回读同步，且**同步跑在渲染帧循环里**。为压
 | `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 55 | **已停用**（射线分级已移除）：无外锥概念 |
 | `yopoAvoidSliceMax` | 12 | **已停用**（射线分级已移除）：不再有 round-robin 切片 |
 | `yopoAvoidRepRangeHi` | 60.0 | 高速时排斥/绕行/刹车的作用距离 (m) |
-| `yopoAvoidTanGain` | 104.0 | 切向绕行增益 (m/s)，比 12 更果断 |
+| `yopoAvoidTanGain` | 120.0 | 切向绕行增益 (m/s)，比 12 更果断 |
 | `yopoAvoidRepGain` | 34.0 | 径向推离最大速度 (m/s)，比 18 更果断 |
 | `yopoAvoidBrakeRangeHi` | 54.0 | 高速时软刹车起始距离 (m) |
-| `yopoAvoidBrakeReaction` | 0.80 | 高速档刹车反应时间 (s)：姿态建立+控制环延迟，折算成反应距离 `spd×反应时间` 从可刹车距离中扣除，使 15 m/s 下提前约 3 m 开始减速、并在 standoff 内稳稳停住 |
+| `yopoAvoidBrakeReaction` | 1.25 | 高速档刹车反应时间 (s)：姿态建立+控制环延迟，折算成反应距离 `spd×反应时间` 从可刹车距离中扣除，使 15 m/s 下提前约 15 m 开始减速、并在 standoff 内稳稳停住（基础档 0.46 s） |
 
-实测每轮发射射线数：**12 水平 + 9 竖直层 + 2 正上下 = 23 条，全部为 fresh GPU pick**（不再存在
-"cached 命中不计 pick"的部分）。`yopoAvoidRepRange`（= `goalClear` 的畅通阈值）**不随速度变化**，
+实测每轮发射射线数：**24 水平 + 9 竖直层 + 2 正上下 = 35 条，全部为 fresh GPU pick**（不再存在
+"cached 命中不计 pick"的部分；`lowOk` 为假时低层不发射，为 32 条）。`yopoAvoidRepRange`（= `goalClear` 的畅通阈值）**不随速度变化**，
 因此加大高速作用距离不会让"路径其实畅通"被误判为被挡。
 
 浏览器控制台执行 `__yopoPerf()` 可查看实测指标（`fps` / `probeMsAvg` / `probeHz` / `depthHz` /
@@ -620,15 +631,15 @@ GPU 场景渲染 + 回读同步，且**同步跑在渲染帧循环里**。为压
 
 ### YOPO 后端关键环境变量
 
-由 `scripts/start_yopo_api.sh` 转发进容器：
+除 `YOPO_SPEED_CAP` 外，下表变量均由 `scripts/start_yopo_api.sh` 通过 `docker run -e` 转发进容器：
 
 | 变量 | 默认值 / 推荐值 | 说明 |
 |------|------------------|------|
 | `YOPO_VELOCITY` | 15.0（`restart_all.sh` 设定） | 网络规划巡航速度 `vel_max` (m/s)，决定实际飞行速度；环境未设时回退到 yaml 配置值 |
-| `YOPO_CTRL_TIME_SCALE` | 1.0 | 指令"快进"倍率。`>1` 会按 `vel_max × SCALE` 推进（2 即 ≈30 m/s），虽被 `YOPO_SPEED_CAP` 钳回，但会造成规划位置超前、无人机持续追迹滞后，故保持 1 |
-| `YOPO_SPEED_CAP` | 15.0 | 指令速度绝对硬上限 (m/s)，保证"所有限速最高到 15 m/s" |
+| `YOPO_CTRL_TIME_SCALE` | 1.0（`restart_all.sh` 设 `1`） | 指令"快进"倍率。`>1` 会按 `vel_max × SCALE` 推进（2 即 ≈30 m/s），虽被 `YOPO_SPEED_CAP` 钳回，但会造成规划位置超前、无人机持续追迹滞后，故保持 1 |
+| `YOPO_SPEED_CAP` | 15.0 | 指令速度绝对硬上限 (m/s)，保证"所有限速最高到 15 m/s"。**注意：该变量未列入 `start_yopo_api.sh` 的 `docker run -e` 转发清单**，在宿主机上设置它对容器无效（恒取 `yopo_server.py` 内的默认 15.0）；需要改动只能改服务端脚本，或用本地（`--local`）模式运行 |
 | `YOPO_TRAJ_EXTEND_S` | 2.0 | 轨迹末端外推时长 (s)，修重规划间隔内的指令冻结锯齿；超时仍无重规划则退回冻结行为，避免无限盲飞 |
-| `YOPO_USE_TRT` | 1（`restart_all.sh` 设定） | TensorRT 加速开关，见「YOPO TensorRT 加速」 |
+| `YOPO_USE_TRT` | 1（`restart_all.sh` 设定） | TensorRT 加速开关，见「YOPO TensorRT 加速」。注：`yopo_server.py` 自身默认是 `0`，启动脚本在检测到引擎存在时会置 1，`restart_all.sh` 则无条件设 1 |
 
 > 反应预算限速器（原按重规划间隔动态限速）已移除：飞行速度直接由 `YOPO_VELOCITY × YOPO_CTRL_TIME_SCALE` 决定，并受 `YOPO_SPEED_CAP` 硬钳制；避障改由「服务端网络 `argmin(score)` + 客户端几何反应式势场」两层共同保证（见「避障架构与调参」）。
 

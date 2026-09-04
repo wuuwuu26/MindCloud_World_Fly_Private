@@ -29,8 +29,9 @@ cd MindCloud_World_Fly_Private
 ```
 
 > Note: the DA360 **source code** is version-controlled with this repository (as far as DA360 is
-> concerned, `.gitignore` only excludes the weights directory `third_party/DA360/checkpoints/`; see
-> the repository-root `.gitignore` for the full list), so cloning already gives you the source. The
+> concerned, `.gitignore` excludes the weights directory `third_party/DA360/checkpoints/` and
+> `third_party/DA360/data/images/Thumbs.db`; see the repository-root `.gitignore` for the full
+> list), so cloning already gives you the source. The
 > **weights** (`DA360_large.pth`, ~1.3GB, over GitHub's 100MB limit) are not in the repository —
 > download them before running the depth service.
 
@@ -122,6 +123,8 @@ script (install `gdown` first):
 - Python 3 for local development mode
 - DA360 depth inference needs an NVIDIA GPU, the NVIDIA Container Toolkit, Python 3 + pip, and
   network access to the model download URL
+- `git` is required by `scripts/download_da360_model.sh` even when the DA360 source is already
+  vendored — the script aborts early if `git` is missing
 
 ### Verified Environment
 
@@ -152,8 +155,9 @@ rebuild trigger:
 ### Main Flight Process (`Dockerfile.cesium`)
 
 - `COPY`s the whole project into `/var/www/google-tiles-flight` inside the container, with
-  `CMD node scripts/server.js` starting the Express static server (which also serves the
-  `/api/path/*.json` gate-route persistence API), `EXPOSE 8000`.
+  `CMD ["node", "/var/www/google-tiles-flight/scripts/server.js"]` starting the Express static server
+  (which also serves the `/api/path/*.json` gate-route persistence API), `EXPOSE 8000` (host 8080 is
+  mapped to container 8000).
 - Built from `launch.sh`: it only runs `docker build` when the image does **not** exist or when
   `--rebuild` is passed; otherwise the existing image is reused.
 - At runtime `src/` and `index.html` are mounted read-only and `asset/gate-paths` read-write, so
@@ -219,8 +223,8 @@ rebuild trigger:
 
 ### `.dockerignore`
 
-The build context excludes `.git`, `node_modules`, `__pycache__`, `*.pyc`, `scene/*`,
-`asset/gate-paths/*.tmp` and `third_party/DA360/checkpoints` (the DA360 weights), keeping
+The build context excludes `.git`, `.gitignore`, `node_modules`, `__pycache__`, `*.pyc`, `scene/*`,
+`.DS_Store`, `asset/gate-paths/*.tmp` and `third_party/DA360/checkpoints` (the DA360 weights), keeping
 unrelated / large files out of the image; the DA360 source still ships inside the image.
 
 ## DA360 Depth Estimation
@@ -401,6 +405,11 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   The first layer of avoidance comes entirely from the score the network learned through
   `safety_loss` during training (**learning-based avoidance**), exactly as in the official
   deployment.
+  - **Exception — final-approach takeover**: within `FINAL_APPROACH_DIST = 12.0` m (3D) of the goal the
+    server **skips the network inference entirely** and plans with `_plan_final_approach()`, a quintic
+    polynomial straight to the goal. So the last 12 m are planned geometrically by the server, not by
+    `argmin(score)`. Note this is unrelated to the *client* parameter `yopoFinalApproachDist`, which
+    was removed — that was a frontend takeover parameter; this server-side one is still live.
 - **Client-side reactive safety layer (geometric potential field)**: on top of the server
   trajectory, the frontend `src/drone.js` adds a geometric reactive avoidance layer based on a Cesium
   ray ring, to cover sudden near obstacles during the depth replanning gap (~70 ms per replan).
@@ -416,26 +425,36 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   yaw → tracked by the frontend cascaded PID.
 - **Arrival handling**: the drone tracks the YOPO network trajectory all the way in; only **after arrival is latched** does it switch to a position hold on the goal:
   ```
-  const holdKp = 1.5, holdAltKp = 2.5, holdKd = 1.5, holdMaxV = 2.0;
+  const holdKp = 1.5, holdAltKp = 2.5, holdKd = 2.2, holdMaxV = 3.0;
   velTargetX = holdKp * gErrX - holdKd * this.vx;   // position P + velocity damping D
   ... (same on Z; Y uses holdAltKp) ...
-  if (vh > holdMaxV) velTarget *= holdMaxV / vh;      // 2 m/s horizontal speed cap
+  if (vh > holdMaxV) velTarget *= holdMaxV / vh;      // 3 m/s horizontal speed cap
   ```
+  (`holdMaxV` was raised 2.0 → 3.0 for a snappier final settle, and `holdKd` 1.5 → 2.2 — above the
+  ~2.45 critical value for kp = 1.5, so the faster settle stays overdamped.)
   The D term is kept on purpose: a pure P term would still be carrying speed at the goal → overshoot →
   pull back → sway.
   - **Ray avoidance is now consistent for the whole flight**: the whole family of takeover-zone
     exceptions (`repScale`, `steerFade`, the steering hysteresis, the end-game stand-down) is gone.
-    While still navigating (not arrived) the ray layer behaves exactly as in cruise — repulsion,
-    tangential detour, braking and vertical clearing all active. **After arrival** the FULL horizontal
-    avoidance (repulsion + tangential detour + vGo + braking) is still applied, but its lateral budget
-    is tied to the already speed-capped PD velocity (`budgetBase = |velTarget|`, not the cruise floor)
-    so it neither over-pushes when clear nor overshoots the goal. Vertical safety is kept as a floor:
-    `vSafeDown`/`vSafeUp` clearance limits + `crashFloor` + collision handling, and the PD's own
-    vertical speed is also capped at `holdMaxV = 2.0` to stop a fast dive from passing through a side
-    building while descending onto the goal.
-  - **Velocity-loop D term** returns to the reference form: `velKd = useAccFeedforward ? 0 : sfVelKd`
-    (off during cruise to avoid amplifying network feed-forward jumps; on after arrival where
-    `useAccFeedforward = false` and `velKd = sfVelKd = 1.0` provides damping).
+    While still navigating (not arrived) the ray layer behaves as in cruise — repulsion, tangential
+    detour, braking and vertical clearing all active, with the lateral budget based on
+    `max(yopoCruiseMinSpd, commanded speed, detourActive ? yopoDetourSpeedFloor : 0)`; vertical
+    safety (`vSafeDown`/`vSafeUp` clearance limits + `crashFloor` + collision handling) always applies.
+  - **Near-goal 12 m convergence zone and after arrival**: within 12 m horizontally of the goal the
+    `steer` term (`rep + tan`) is zeroed **while the corridor is clear** (`goalClearHyst` is the
+    criterion) and `brake` is forced open to 1.0; `vGo` is also blocked (it additionally requires
+    `distGoalH ≥ 12 m`). The convergence PD then pins the drone onto the goal column, so a goal
+    sitting against a building is not shoved off by the repulsion. **This is "zeroed only when the
+    corridor is clear"** — if the corridor is still blocked (e.g. another wall between the drone and
+    the goal) `rep`/`tan` keep working and the drone keeps detouring instead of being pinned metres
+    short. **After arrival is latched** (`yopoArrived`) `rep`/`tan` are zeroed and `vGo` is off as
+    well; what remains is the brake scaling and the vertical floor (`vSafeDown`/`vSafeUp` +
+    `crashFloor` + collision handling), with the PD's own vertical speed capped at `holdMaxV = 3.0` so
+    a fast dive cannot pass through a side building while descending onto the goal.
+  - **Velocity-loop D term** returns to the reference form:
+    `velKd = (useAccFeedforward || (stickActive && horizActive)) ? 0.0 : sfVelKd` (off during cruise
+    to avoid amplifying network feed-forward jumps, and also off while the sticks are taking over;
+    on after arrival where `useAccFeedforward = false` and `velKd = sfVelKd = 1.0` provides damping).
   - **Removed parameters**: `yopoFinalApproachDist`, `yopoFinalApproachVMax`, `yopoGoalRepSuppressDist`,
     `yopoTakeoverSlew`, `yopoTakeoverSteerEndDist`, `yopoArriveDeadbandM`, `yopoArriveVertH`,
     `yopoArriveAltKp`/`AltVMax` (commented in the constructor).
@@ -445,7 +464,9 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
     = 0.40` floor now covers the `brake = 0` case and the closing gate gains a third release), so the
     drone is not stalled metres short.
 - **Depth availability**: when DA360 depth fails or times out it does **not** fall back to raycasting;
-  the drone hovers in place and keeps retrying until a valid depth map arrives (see "Depth Map").
+  the drone hovers in place and keeps retrying until a valid depth map arrives (see "Depth Map"). The
+  frontend depth request timeout is **6 s**; the server additionally has a depth-age based two-stage
+  protection (`_SA_DEPTH_AGE_WARN = 0.2 s` slows down, `_SA_DEPTH_AGE_STOP = 1.0 s` stops).
   Note: an earlier version had an "abnormal depth" check that hovered when the whole frame was
   surrounded within 2 m; it mistook "many near pixels" for a depth failure in real urban building
   clusters and hovered constantly, so it was removed to match upstream. Depth validity is now left to
@@ -459,8 +480,9 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   vertical channel with a P-converging climb/descent and keeps only 30% of the horizontal command,
   removing large circling; it yields back to the network when the clearance straight above / below is
   insufficient.
-- **Arrival latching**: the server-side 2 m arrival verdict latches in `main.js` (`cmd.arrived` →
-  `yopoArrived`, released only when the goal is more than `YOPO_ARRIVE_RELEASE_M` away); the client
+- **Arrival latching**: the server-side 2 m arrival verdict (`ARRIVE_THRESHOLD = 2.0`, 3D distance)
+  latches in `main.js` (`cmd.arrived` → `yopoArrived`, released only when the goal is more than
+  `YOPO_ARRIVE_RELEASE_M` away — **default 6 m**, overridable with `?yopoArriveReleaseM=`); the client
   additionally has a backstop — within `yopoArriveHoldM = 6.0` m (distance-only, no speed gate — `yopoArriveHoldV` was removed; raised 2.0 -> 6.0 so the takeover engages earlier, before the drone closes in far enough to graze a building with its wing during the final descent) it
   also treats the goal as arrived, avoiding "always one step short" before the asynchronous server verdict
   returns. Once arrived it enters the goal-point position hold described in the arrival-handling section.
@@ -472,47 +494,115 @@ Avoidance has two layers with non-overlapping responsibilities:
 | Layer | Location | Mechanism | Role |
 |-------|----------|-----------|------|
 | Learning-based avoidance | Server `scripts/yopo_server.py` | Network `argmin(score)` trajectory selection (`safety_loss` during training) | Global path planning, steering around large-scale structures |
-| Geometric reactive potential field | Frontend `src/drone.js` | Live 360° ray ring (12 rays, 30° spacing) | Covers sudden near obstacles during the depth replanning gap |
+| Geometric reactive potential field | Frontend `src/drone.js` | Live 360° ray ring (24 rays, 15° spacing) | Covers sudden near obstacles during the depth replanning gap |
 
 How the client-side geometric layer works (see `_avoidanceVelocity`):
 
-- **Probing**: 12 horizontal rays are cast from the body (radius 65 m, 30° spacing); the 3 rays best
+- **Probing**: 24 horizontal rays are cast from the body (radius 65 m, 15° spacing); the 3 rays best
   aligned with the forward direction additionally probe **two layers up and one layer down**
   (`high`/`high2`/`low`, 3 layers in total) for the vertical clearing decision; plus straight
   up/straight down vertical rays.
+- **Components in detail** (`_avoidanceVelocity`):
+  - **rep (radial push-away)**: for every ray with `d < pushRange` a **keep-out-shaped** weight
+    `w = clamp((pushRange − d)/(pushRange − yopoAvoidSideStandoff), 0, 1)` (full strength inside the
+    10 m standoff, decaying linearly to 0 at `pushRange`, which interpolates 36 → 70 m with speed)
+    is accumulated away from the obstacle. The **magnitude is driven by the nearest obstacle, not by
+    the ray count**: the weighted sum only supplies the direction, then it is renormalised to
+    `yopoAvoidRepGain × closeness(dMin)`. This matters because the raw sum effectively "counts rays"
+    — a narrow wall face subtends only 2–4 rays and produced just 2–5 m/s of push-away, which loses
+    against a 10–15 m/s goalward command, so the drone ground along the wall face and clipped a wing.
+    Afterwards it is scaled by `repHold = clamp(dMin/standoff, yopoRepHoldFloor=0.5, 1)` — the floor is
+    **0.5, not 0**, so half of the push is always kept.
+  - **tan (tangential detour)**: reference = the nearest obstacle within a ±90° cone around the goal
+    bearing (`dotG > yopoTanConeCos`), else the forward-threat direction; of the two perpendiculars,
+    the one with the larger projection toward the goal is taken. Strength
+    `t = yopoAvoidTanGain × max(0.5, 1 − tanRefD/repRange)` — the **0.5 floor** gives the detour bite
+    already at 20–30 m instead of only when the obstacle is on top of the drone. Three anti-chatter
+    guards: (1) the direction memory `_avoidLastTan` is honoured when the new tangent differs by
+    >120°, the remembered direction is still clear (`dists[i] > yopoAvoidStop + 2.0`), still leads
+    toward the goal (`ltToGoal > yopoTanAwayCos`) **and** the new tangent is not more goal-directed
+    than the remembered one; (2) a tangent pointing >90° away from the goal is scaled by
+    `yopoTanAwayScale = 0.95`; (3) the memory is cleared once the corridor stayed open for 4 frames
+    (`goalClearStable`) or on release. tan is modulated by `tanHold = max(repHold, 0.85)` — **floored
+    at 85%, i.e. it does NOT decay with `repHold`**, because unlike `rep` it needs *more* authority
+    the closer the obstacle is.
+  - **vRep (vertical clearing)**: triggers only when the forward horizontal corridor really is blocked
+    (`!goalClear` and `dAheadH < yopoAvoidStop + yopoAvoidVBlock` = 26 m) and arrival is not latched
+    (`!yopoArrived`) — there is **no near-goal exception**. The direction is decided by a
+    **commit/hold state machine**: once `heldDir = +1` (fly over) or `−1` (dive under) is latched it is
+    kept until that side is physically sealed (`vUpDist ≤ yopoAvoidStop + 1`, or insufficient
+    clearance below) or the obstacle is genuinely passed (`dAheadH > blockDist × 1.5` = 39 m);
+    direction flips mid-clear are forbidden, which fixed the "climbs a bit, sinks, climbs again"
+    grazing-ray chatter. Fly-over is judged on the straight-up clearance alone
+    (`vUpDist > clearD = yopoAvoidRange × yopoAvoidVClear ≈ 24.7 m`) — no upper *side* layer is
+    required, because an obstacle taller than today's probe layers is exactly the case that needs
+    climbing. Diving under is stricter: low layer `dL > clearD` **and** `groundGap > yopoMinAlt`
+    **and** `vDownDist > yopoMinAlt` (10 m). When both are possible, climbing is preferred. As soon as
+    the corridor stays open for 4 frames the climb **levels off** (`vClimb = 0`) while `clearHold`
+    keeps the altitude until `dAheadH > 39 m` — splitting "stop climbing" from "allow descending" is
+    what prevents dropping onto the obstacle just cleared. The climb/dive command is also slewed with
+    `vTau = 0.15 s` to avoid a ~28 m/s vertical step.
+  - **vGo (detour around a vertical footprint)**: when what is straight below is a *structure* rather
+    than terrain (`vDownDist < yopoAvoidVGoThresh` and `groundGap − vDownDist > 1.5`) or straight
+    above is blocked (`vUpDist < yopoAvoidVGoThresh`), **and** the corridor is not clear
+    (`!goalClear`), **and** arrival is not latched (`!yopoArrived`); the caller additionally requires
+    `distGoalH ≥ 12 m`. It pushes toward the emptiest horizontal direction (preferring the forward
+    hemisphere, else the global `openDir`) so the drone still advances. Strength
+    `strength = yopoAvoidTanGain × (yopoAvoidVGoBase + yopoAvoidVGoSpan × (1 − closeness))`, capped by
+    `vGoSafe = √(2 × yopoAvoidVGoDecel × max(0, vGoClear − yopoAvoidStop))` with
+    `yopoAvoidVGoDecel = 34.0` (a lateral-roll-specific deceleration far above the forward 3.5; note
+    the term is `yopoAvoidStop` = 6.0, **not** `yopoAvoidStopH` = 9.0).
+  - **upPush + vSafeDown (ground / descent safety)** as described below.
 - **Output components**: `rep` (radial push-away) / `tan` (tangential detour) / `brake` (near-obstacle
   braking) / `vRep` (vertical obstacle clearing) / `vGo` (horizontal detour around a vertical
   obstacle footprint) / `upPush` + `vSafeDown` (ground and descent safety).
 - **Braking (the ray layer takes priority over the network)**: the hard kinematic brake
-  `v_safe = √(2·a·(d − standoff))` plans a safe speed (`a` uses the conservative
-  `yopoAvoidBrakeDecel≈6.5 m/s²` to leave margin). When braking fires it (1) **suppresses the YOPO
-  network's acceleration feed-forward** (otherwise the network trajectory's acceleration pushes
-  straight into the obstacle and cancels the braking deceleration), and (2) injects the strongest
-  deceleration feed-forward directly opposite the current velocity (up to
-  `yopoAvoidBrakeAccel≈17.0 m/s²`, matching the 60° tilt ceiling `droneMaxAngle=60`), delivering at
-  least `yopoAvoidBrakeMinFrac=0.85` (≈14.5 m/s²) as soon as braking starts so deceleration is
-  immediate and strong enough. The threat distance `dAhead` takes the **smaller** of the
-  "network-commanded direction" and the "drone's actual heading", so the network cannot turn the
-  command aside and thereby exclude an obstacle straight ahead and skip braking.
+  `v_safe = √(2·a·dEff)` plans a safe speed, with `dEff = brakeClear − standoff − reactionDist` and
+  `a` the conservative `yopoAvoidBrakeDecel = 3.5 m/s²` (6.5 → 4.5 → 3.5; **only ever lower it** — a
+  smaller planned deceleration makes the brake engage earlier and demand a lower target speed; it
+  also drives the closing-speed gate `vCloseMax` and the proximity governor). The reaction distance
+  `reactionDist = spdFwd × reactionSec` subtracts the dead time, with `yopoAvoidBrakeReaction = 0.46 s`
+  base and `yopoAvoidBrakeReactionHi = 1.25 s` at speed — at 15 m/s that is ~15 m of extra lead. When
+  braking fires it (1) **suppresses the YOPO network's acceleration feed-forward** (otherwise the
+  network trajectory's acceleration pushes straight into the obstacle and cancels the braking
+  deceleration), (2) injects the strongest deceleration feed-forward directly opposite the current
+  velocity (up to `yopoAvoidBrakeAccel≈17.0 m/s²`, matching the 60° tilt ceiling
+  `droneMaxAngle=60`), delivering at least `yopoAvoidBrakeMinFrac=0.85` (≈14.5 m/s²) as soon as
+  braking starts, and (3) boosts the attitude-loop gain by `yopoAvoidBrakeAngleGain = 2.2` whenever
+  `brake < yopoAvoidBrakeUrgent = 0.7`, cutting the ~0.28 s needed to slew from the cruise tilt to
+  the braking tilt. The brake value itself is **asymmetrically filtered**: tightening applies
+  instantly, release ramps back with `tau = 0.30 s`, so probe noise cannot turn the speed target into
+  a sawtooth. The threat distance `dAhead` takes the **smaller** of the "network-commanded direction"
+  and the "drone's actual heading", so the network cannot turn the command aside and thereby exclude
+  an obstacle straight ahead and skip braking.
 - **Lateral speed budget**: while detouring, "forward" and "lateral detour" are budgeted separately —
   lateral takes at most 77% of the budget base and forward keeps at least 20%, so the velocity
   vector really tilts tangentially and slides along the obstacle instead of "charging at full speed
-  while grazing it". The budget base is `max(yopoCruiseMinSpd, actual commanded speed)`: the network
-  itself slows its commands when the depth shows obstacles, so keying the budget to the commanded
-  speed alone made the detour collapse exactly when it was needed (commanded 8 m/s → only ~5.4 m/s
-  of steering authority). Also, **tan is NOT decayed by `repHold`** (0.85 floor):
-  `repHold = dMin/standoff` linearly scales the field down close to an obstacle — right for `rep`
-  ("once stopped, do not keep pushing away") but backwards for `tan`, which needs MORE authority the
-  closer the obstacle is.
+  while grazing it". The budget base is
+  `max(yopoCruiseMinSpd, actual commanded speed, detourActive ? yopoDetourSpeedFloor : 0)` — the
+  third term (a detour is in play when `|rep + tan| > 1.5 m/s`) raises the base to 40 m/s so the
+  slide-around is as decisive as flying over; the forward gate is **not** raised by it. Keying the
+  budget to the commanded speed alone made the detour collapse exactly when it was needed (commanded
+  8 m/s → only ~5.4 m/s of steering authority). Also, **tan is NOT decayed by `repHold`**
+  (`tanHold = max(repHold, 0.85)`): `repHold = clamp(dMin/standoff, 0.5, 1)` scales the field down
+  close to an obstacle — right for `rep` ("once stopped, do not keep pushing away") but backwards for
+  `tan`, which needs MORE authority the closer the obstacle is.
 - **Clear straight flight (`goalClear`)**: a corridor is measured along "body → goal" (`dPath`) and
   along the "commanded velocity direction" (`dCmd`) separately, with a corridor half-width of 2.5 m;
   **either** corridor being clear within `reach = min(yopoAvoidRepRange, horizontal distance to the
   goal)` counts as clear (truncating at the goal keeps a wall *behind* the goal from permanently
-  blocking the corridor). Near-goal exception: within `yopoCorridorGuardDist` (12 m) of the goal, if
-  `dPath` is blocked then the `dCmd` escape hatch is refused, so the drone cannot charge straight at
-  an obstacle that is only a few metres away. **When the corridor is clear, `rep`/`tan`/`brake`/`vRep`
-  all go to zero and `vGo` is suppressed**, so the drone flies straight at the goal at full speed,
-  never pushed away or detouring without reason.
+  blocking the corridor). Near-goal exception: within `yopoCorridorGuardDist` (**18 m**) of the goal,
+  if `dPath` is blocked then the `dCmd` escape hatch is refused, so the drone cannot charge straight
+  at an obstacle that is only a few metres away. 18 m (up from 12) is required because it must cover
+  the release threshold `releaseDAhead = standoff + reactionDist + 2.0` (~12 m): otherwise a detour
+  mid-swing with `dPath` hovering around that boundary flaps between "release → charge" and
+  "re-arm → detour", which is the observed left-right sway and never getting around. The verdict is
+  additionally debounced before it may release: `releaseAllowed` needs 2 consecutive clear frames and
+  drops after 3 consecutive blocked frames (the probe refreshes every 40 ms and grazing rays flip the
+  raw verdict frame to frame), and `goalClearStable` (4 frames) drives the tangent-memory drop and
+  the climb level-off. **When the corridor is clear, `rep`/`tan`/`brake`/`vRep` all go to zero and
+  `vGo` is suppressed**, so the drone flies straight at the goal at full speed, never pushed away or
+  detouring without reason.
 
 #### Wing-envelope guard (reserve the wingspan in every direction)
 
@@ -523,7 +613,17 @@ Envelope radius = `yopoAvoidStopH` (9.0 m) + `yopoWingMargin` (3.0 m) = **12 m**
 The guard has two layers (both with hysteresis: asserted only after 2 consecutive occupying frames, cleared only after 3 consecutive clear frames, to avoid probe-noise chatter / crawling):
 
 - **Descent guard (along the goal bearing)**: active only when "not in the near-goal zone (≥ 12 m from goal), actually descending, the goal is below the body (a true vertical approach), and the nearest obstacle `dMin < 12 m`". It takes the nearest obstacle's projection `projN` and lateral offset `latOff` onto the goal bearing; the lateral repulsion is kept only when the obstacle is "ahead of the goal (`projN>0` and `dMin·projN ≤` the goal's horizontal distance)" AND "its lateral offset < `yopoWingMargin`" — i.e. only an obstacle that could actually clip a wing blocks the release. Otherwise (an obstacle far to the side, outside the real span) it is released, avoiding "clear path yet shoved away".
-- **Omnidirectional guard (level / climb / descent, every ray direction)**: it walks all 12 horizontal rays; if ANY direction finds an obstacle inside the 12 m envelope that is NOT beyond the goal (along-goal distance ≤ the goal's horizontal distance — i.e. not the wall the goal sits against) and not clearly behind (`dotG > −0.3`), it sets `_avoidSideKeepOn`, which stops the release logic from zeroing the lateral `rep`. So in level flight, climb or descent alike, the wing position on any side is reserved — the drone does not mis-release just because the body-centre corridor is clear and then graze a wing. The forward-corridor brake is still governed by `dAheadH`, so a side wall only makes the drone hold its offset, never crawl.
+- **Omnidirectional guard (level / climb / descent, every ray direction)**: it walks all **24** horizontal rays; if ANY direction finds an obstacle inside the 12 m envelope that is NOT beyond the goal (along-goal distance ≤ the goal's horizontal distance — i.e. not the wall the goal sits against) and not clearly behind (`dotG > −0.3`), it sets `_avoidSideKeepOn`, which stops the release logic from zeroing the lateral `rep`. So in level flight, climb or descent alike, the wing position on any side is reserved — the drone does not mis-release just because the body-centre corridor is clear and then graze a wing. The forward-corridor brake is still governed by `dAheadH`, so a side wall only makes the drone hold its offset, never crawl.
+- **Two-tier release (Tier 1 / Tier 2)**: with the corridor clear and the wing guard not asserted, the
+  release is **Tier 1** — `rep`/`tan`/`brake`/`vRep` are all zeroed and `vGo` is suppressed, so the
+  drone flies straight at full speed. When the wing envelope still holds an obstacle (guard asserted)
+  it is **Tier 2** — `rep` is **kept** (it holds the lateral offset from the wall) and the brake is
+  opened, while `tan` is kept or zeroed depending on whether that obstacle is **still in front of the
+  drone**: during the envelope scan each obstacle is classified by its along-goal cosine
+  (`dotG > 0.2` = "still ahead", latched with the same 2/3-frame hysteresis as `_avoidSideAheadOn`).
+  Still ahead → keep `tan` so the rounding arc is completed ("detour a bit then stop, never getting
+  around"); abeam or behind → zero `tan`, because keeping it produced "the corridor is completely
+  clear yet it still detours". Both tiers clear the tangent direction memory `_avoidLastTan`.
 
 Inside the 12 m near-goal convergence zone both guards are disengaged: the convergence PD pins the drone to the goal column and `goalClear`'s corridor is authoritative, so the release cannot clip a wing; the wall the goal sits against is judged "beyond the goal" and also released, so the drone can still land on a goal point next to a wall.
 
@@ -534,10 +634,10 @@ Key parameters (all in the `src/drone.js` constructor):
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
 | `yopoAvoidEnabled` | `true` | Master switch of the geometric layer |
-| `yopoAvoidRayCount` | 12 | Number of 360° rays (30° spacing) |
+| `yopoAvoidRayCount` | 24 | Number of 360° rays (15° spacing). **Raised from 12**: at 30° spacing the lateral gap between adjacent rays is `2·d·sin15° ≈ 0.52·d` (~10 m at 20 m, ~15 m at 30 m), so a 10–15 m wide building could sit entirely between two rays, the corridor verdict never saw it and the drone charged straight into it. 15° narrows the gap to ~5 m at 20 m. Only the GPU pick count grows (negligible next to the 200 ms–1 s network inference); drop to 16 if the frame rate suffers |
 | `yopoAvoidFastSpeed` | 6.0 | Speed (m/s) at which the high-speed profile starts (wider repulsion / detour / brake action ranges, denser probe throttle) |
 | `yopoAvoidRefSpeed` | 15.0 | Speed (m/s) at which the high-speed profile is fully applied; interpolates the action ranges (rays are **not** downsampled with speed) |
-| `yopoAvoidStrideHi` | 2 | **Retired** (ray tiering removed): was the high-speed stride; all 12 directions are now probed every cycle |
+| `yopoAvoidStrideHi` | 2 | **Retired** (ray tiering removed): was the high-speed stride; all 24 directions are now probed every cycle |
 | `yopoAvoidCoreDeg` | 25 | **Retired** (ray tiering removed): no core / outer cone split any more |
 | `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 55 | **Retired** (ray tiering removed): the whole ring is probed every cycle |
 | `yopoAvoidSliceMax` | 12 | **Retired** (ray tiering removed): no "not probed this cycle" direction any more |
@@ -545,30 +645,35 @@ Key parameters (all in the `src/drone.js` constructor):
 | `yopoAvoidRepRange` | 28.0 | Repulsion / tangential / braking range (m); also `goalClear`'s clear threshold — do **not** raise |
 | `yopoAvoidRepRangeHi` | 60.0 | The same range at `yopoAvoidRefSpeed` (m) |
 | `yopoAvoidRepGain` | 34.0 | Maximum radial push-away speed (m/s) |
-| `yopoAvoidTanGain` | 104.0 | Tangential detour gain (m/s); higher = more decisive detour |
+| `yopoAvoidTanGain` | 120.0 | Tangential detour gain (m/s); higher = more decisive detour |
 | `yopoTanConeCos` | 0.0 | Only use obstacles within a ±90° cone around the goal bearing as the detour reference, so buildings behind/beside cannot steer it off (widened from 0.17 so obstacles further to the side still trigger a detour) |
-| `yopoTanAwayCos` | -0.2 | Drop the remembered tangent when it points >100° away from the goal, allowing a turn back |
-| `yopoTanAwayScale` | 0.85 | Scale applied to a tangent pointing >90° away from the goal, avoiding being pushed off the goal (raised from 0.78 to keep more detour authority while rounding) |
+| `yopoTanAwayCos` | -0.5 | Drop the remembered tangent only when it points >120° away from the goal, allowing a turn back (loosened from -0.2: the direction memory survives longer mid-detour, so the detour does not switch sides easily) |
+| `yopoTanAwayScale` | 0.95 | Scale applied to a tangent pointing >90° away from the goal, avoiding being pushed off the goal (0.78 → 0.85 → 0.95, keeping more detour authority while rounding a wide obstacle) |
 | `yopoSteerCapFrac` | 0.77 | Fraction of the speed budget the lateral detour may consume (lateral speed cap = budget base x this). Forward budget is decoupled and squeezed, so raising it only enlarges the slide-around authority, never the charge-in. |
 | `yopoDetourSpeedFloor` | 40.0 | Horizontal speed floor (m/s) while a detour is actually in play: raises the decisiveness of the slide-around so the horizontal detour is as strong as the vertical clearing (vRep); the forward gate is NOT raised by this. |
-| `yopoAvoidDecel` | 8.5 | Assumed deceleration used by the *vertical* brake threshold (m/s²) |
-| `yopoAvoidBrakeDecel` | 6.5 | *Horizontal* brake planning deceleration (m/s²): deliberately below the reachable value to leave ~2× margin |
+| `yopoAvoidDecel` | 8.5 | **Inert (kept for config compatibility)**: the real vertical deceleration is `aDecel = min(yopoAvoidVDecel, yopoAccMax) × 0.9 = 9.9`, which is what `vSafeUp` / `vSafeDown` / `upPush` actually use |
+| `yopoAvoidVDecel` | 13.0 | **Vertical** assumed deceleration (m/s²): min'ed with `yopoAccMax` (11) and scaled by 0.9 into the actual `aDecel` (9.9). The thrust axis brakes far harder than the forward tilt axis, hence much higher than `yopoAvoidBrakeDecel` |
+| `yopoAvoidBrakeDecel` | 3.5 | *Horizontal* brake planning deceleration (m/s²): deliberately far below the reachable value to leave ~2× margin (6.5 → 4.5 → 3.5). It drives `vSafe`, the closing-speed gate `vCloseMax` **and** the proximity governor: lower it to brake earlier, never raise it |
 | `yopoAvoidBrakeAccel` | 17.0 | Max *actual* deceleration the ray layer may command while braking (m/s²): matches the 60° tilt ceiling (`droneMaxAngle=60`). It injects a deceleration feed-forward opposing velocity and **suppresses the network's acceleration feed-forward** |
 | `yopoAvoidBrakeMinFrac` | 0.85 | Deliver at least 0.85×`BrakeAccel` (≈14.5 m/s²) as soon as braking starts |
-| `yopoAvoidBrakeReaction` | 0.46 / 0.80 | Brake reaction time (s): base / high-speed (≥ `yopoAvoidRefSpeed`) |
+| `yopoAvoidBrakeReaction` | 0.46 / 1.25 | Brake reaction time (s): base / high-speed (≥ `yopoAvoidRefSpeed`). The high-speed value went 0.80 → 1.00 → 1.25, i.e. ~15 m of extra braking lead at 15 m/s |
 | `yopoAvoidBrakeRange` / `BrakeRangeHi` | 30.0 / 54.0 | Progressive soft-brake zone (m): low / high speed (raised to 30.0 together with `yopoAvoidStopH` 6→7.5→9.0 so the `(brakeClear − standoff×2)` normalisation does not degenerate) |
-| `yopoAvoidBrakeFloor` | 0.85 | Soft-brake speed floor ratio (still decelerates when close, without over-compressing the cruise) |
+| `yopoAvoidBrakeFloor` | 0.78 | Soft-brake speed floor ratio (still decelerates when close, without over-compressing the cruise); lowered from 0.85 so the approach eases off earlier |
+| `yopoAvoidBrakeAngleGain` | 2.2 | Attitude-loop gain multiplier while braking: cuts the ~0.28 s slew from the cruise tilt to the braking tilt to ~0.12 s, so 17 m/s² is actually reached while there is still room |
+| `yopoAvoidBrakeUrgent` | 0.7 | The gain boost above only engages below this `brake` value (a real emergency stop or the closing gate firing), so cruise never gets the extra gain |
+| `yopoRepHoldFloor` | 0.5 | Floor of `repHold = clamp(dMin/standoff, ·, 1)`: close to an obstacle `rep` keeps at least half of its strength instead of going to zero |
+| `yopoAvoidVGoDecel` | 34.0 | vGo's lateral-roll-specific deceleration (m/s²), far above the forward 3.5, so leaving an underfoot/overhead footprint is not throttled to ~3 m/s |
 | `yopoAvoidSideStandoff` | 10.0 | **Lateral** desired clearance (m): the distance held off walls / building faces; the keep-out repulsion runs at full strength within 10 m (reverted from 13.0 to 10.0: prevents the detour from being steered back once abreast of the obstacle) |
 | `yopoAvoidStopH` | 9.0 | **Horizontal** brake safety standoff (m): drives the forward brake standoff and the repulsion decay — keeps further off walls / buildings (raised 6.0 → 7.5 → 9.0 per request) |
 | `yopoWingMargin` | 3.0 | **Wingspan-envelope** extra lateral margin (m): stacked on `yopoAvoidStopH` to form the 12 m wing guard envelope (`StopH + WingMargin`); before releasing, if any ray finds an obstacle inside the envelope that is not beyond the goal, the lateral repulsion is kept to avoid clipping a wingtip |
-| `yopoAvoidStop` | 6.0 | **Vertical UP** safety clearance (m): drives the up-clearance brake (vSafeUp) and the vertical-clearing block distance; deliberately NOT raised with StopH, because a clearance below it would over-restrict climbing / over-head clearance |
+| `yopoAvoidStop` | 6.0 | **Vertical UP** safety clearance (m): drives the up-clearance brake `vSafeUp`, the vertical-clearing block distance and the vGo `vGoSafe` cap. The **downward** direction has its own `yopoAvoidStopDown`. Deliberately NOT raised with StopH, because a clearance below it would over-restrict climbing / over-head clearance |
 | `yopoAvoidStopDown` | 10.0 | **Down (descent)** safety clearance (m), SEPARATE from `yopoAvoidStop`: drives only `vSafeDown` (the descent kinematic brake against an obstacle straight below). Decoupled from `yopoAvoidStop` (lowered 8.0 → 5.0 then raised to 7.0, and widened to 10.0 this change to remove the "skim the rooftop while overflying" window), keeps margin above an obstacle below while descending; does NOT affect the up / over-head clearance nor the horizontal avoidance. |
 | `yopoMinAlt` | 10.0 | Minimum ground/roof clearance (m): below it the upward push engages (2.5 → 3.0 → 4.0 → 8.0 → 10.0). When flying OVER a rooftop the binding clearance is the straight-down ray `vDownDist`: with under 10.0 m to the rooftop below the drone is pushed up, holding ~10 m of vertical margin instead of skimming the rooftop. |
 | `yopoAvoidVClimbScale` | 2.2 | Vertical clearing climb strength |
 | `yopoAvoidVBlock` | 20.0 | Forward clearance below which vertical clearing triggers (m) |
 | `yopoAvoidVGoBase` / `VGoSpan` | 0.85 / 0.60 | Near / far strength of the "leave the footprint" speed (vGo) for an obstacle underfoot |
 | `yopoAvoidVClear` | 0.38 | Fraction above which an upper layer counts as clear; lower = stronger clearing willingness |
-| `yopoCorridorGuardDist` | 12.0 | Near-goal corridor guard (m): within this distance, a blocked goal-bearing corridor forces braking even if the velocity-direction corridor is clear |
+| `yopoCorridorGuardDist` | 18.0 | Near-goal corridor guard (m): within this distance, a blocked goal-bearing corridor forces braking even if the velocity-direction corridor is clear. Raised from 12.0 — it must cover the release threshold `releaseDAhead ≈ 12 m`, or a detour mid-swing flaps between "release → charge" and "re-arm → detour" (the left-right sway, never getting around) |
 | `yopoCruiseMinSpd` | 12.0 | Cruise speed floor (m/s): tops up forward speed along the goal bearing when the path is clear and the goal is far; yields while braking |
 | `yopoCruiseMinDist` | 5.0 | Distance to the goal below which the cruise floor is switched off, respecting the arrival deceleration |
 | `yopoVertFirstEnabled` | `true` | Master switch of the cruise-phase "vertical-first" direct climb/descent |
@@ -592,7 +697,7 @@ cruise speed the drone covers several metres per cycle, so a stale or interpolat
 the braking distance wrong and shows up as "an obstacle is right there, yet it still plans a big speed
 straight into it" (the avoidance layer is bypassed). Therefore:
 
-- **All directions, every cycle, all fresh**: the 12 horizontal rays (`yopoAvoidRayCount`) are each
+- **All directions, every cycle, all fresh**: the 24 horizontal rays (`yopoAvoidRayCount`) are each
   picked for real **every cycle** (`forceFresh=true`, no cache), with no stride downsampling, no
   round-robin rotation and no mirrored neighbour filling.
 - **Vertical layers (high/high2/low) emitted every cycle**: 3 layers along each of the 3 forward-most
@@ -601,9 +706,11 @@ straight into it" (the avoidance layer is bypassed). Therefore:
 - **Straight up / down**: 1 fresh ray each per cycle (ceiling / floor safety cannot tolerate a stale
   value), no longer skipped "every N cycles".
 
-Throttling still lives in `_updateAvoidProbe`: a cycle every **60 ms** at speed (≈16.7 Hz) and every
-**≤400 ms** at rest (≈2.5 Hz); the previous result is reused while the drone has barely moved
-(`moved < 0.4 m` and `|Δy| < 2 m`). That is **cycle-level throttling**, not a ray cache.
+Throttling still lives in `_updateAvoidProbe`: above `yopoAvoidFastSpeed` a cycle every
+**`yopoAvoidQueryMs = 40 ms`** (≈25 Hz), relaxing linearly to **≤400 ms** at rest (≈2.5 Hz); the
+previous result is reused while the drone has barely moved (`moved < 0.4 m` and `|Δy| < 2 m`)
+**and** the previous probe is still within the reuse window (`min(120, 2×queryMs)` ms at speed,
+900 ms at rest). That is **cycle-level throttling**, not a ray cache.
 
 `yopoAvoidStrideHi` / `yopoAvoidCoreDeg` / `yopoAvoidConeDeg` / `ConeDegHi` / `yopoAvoidSliceMax` /
 `yopoAvoidVertEvery` are **all retired** (their assignments are kept only so external / UI overrides
@@ -621,13 +728,14 @@ are still live and now only interpolate the **action ranges** (`repRange` / `bra
 | `yopoAvoidConeDeg` / `ConeDegHi` | 55 / 55 | **Retired** (ray tiering removed): no outer cone concept |
 | `yopoAvoidSliceMax` | 12 | **Retired** (ray tiering removed): no round-robin slices any more |
 | `yopoAvoidRepRangeHi` | 60.0 | Repulsion/detour/brake action range at speed (m) |
-| `yopoAvoidTanGain` | 104.0 | Tangential detour gain (m/s), more decisive than 12 |
+| `yopoAvoidTanGain` | 120.0 | Tangential detour gain (m/s), more decisive than 12 |
 | `yopoAvoidRepGain` | 34.0 | Maximum radial push-away speed (m/s), more decisive than 18 |
 | `yopoAvoidBrakeRangeHi` | 54.0 | Soft-brake start distance at speed (m) |
-| `yopoAvoidBrakeReaction` | 0.80 | Brake reaction time at speed (s): the lag (attitude build-up + control loop) is converted to a reaction distance `spd × reaction` subtracted from the stopping room, so at 15 m/s braking starts ~3 m earlier and still stops inside the standoff |
+| `yopoAvoidBrakeReaction` | 1.25 | Brake reaction time at speed (s): the lag (attitude build-up + control loop) is converted to a reaction distance `spd × reaction` subtracted from the stopping room, so at 15 m/s braking starts ~15 m earlier and still stops inside the standoff (base tier is 0.46 s) |
 
-Measured rays emitted per cycle: **12 horizontal + 9 vertical-layer + 2 straight up/down = 23 rays,
-all of them fresh GPU picks** (there is no longer a "cache hit costs no pick" part).
+Measured rays emitted per cycle: **24 horizontal + 9 vertical-layer + 2 straight up/down = 35 rays,
+all of them fresh GPU picks** (there is no longer a "cache hit costs no pick" part; when `lowOk` is
+false the low layer is not emitted, giving 32).
 `yopoAvoidRepRange` (= `goalClear`'s clear threshold) does **not** scale with speed, so widening the
 high-speed action range does not make "the path is actually clear" get misjudged as blocked. Run
 `__yopoPerf()` in the browser console to read live metrics (`fps` / `probeMsAvg` / `probeHz` /
@@ -654,15 +762,16 @@ editing it needs no image rebuild.
 
 ### Key YOPO Backend Environment Variables
 
-Forwarded into the container by `scripts/start_yopo_api.sh`:
+All variables below except `YOPO_SPEED_CAP` are forwarded into the container by
+`scripts/start_yopo_api.sh` via `docker run -e`:
 
 | Variable | Default / recommended | Description |
 |----------|----------------------|-------------|
 | `YOPO_VELOCITY` | 15.0 (set by `restart_all.sh`) | Network planned cruise speed `vel_max` (m/s), which decides the actual flight speed; falls back to the yaml config when unset |
-| `YOPO_CTRL_TIME_SCALE` | 1.0 | Command "fast forward" factor. `>1` advances at `vel_max × SCALE` (2 gives ≈30 m/s); it is clamped back by `YOPO_SPEED_CAP`, but the planned position runs ahead and the drone lags behind permanently, so keep it at 1 |
-| `YOPO_SPEED_CAP` | 15.0 | Absolute hard ceiling of the commanded speed (m/s), guaranteeing "no speed limit ever goes above 15 m/s" |
+| `YOPO_CTRL_TIME_SCALE` | 1.0 (`restart_all.sh` sets `1`) | Command "fast forward" factor. `>1` advances at `vel_max × SCALE` (2 gives ≈30 m/s); it is clamped back by `YOPO_SPEED_CAP`, but the planned position runs ahead and the drone lags behind permanently, so keep it at 1 |
+| `YOPO_SPEED_CAP` | 15.0 | Absolute hard ceiling of the commanded speed (m/s), guaranteeing "no speed limit ever goes above 15 m/s". **Note: this variable is NOT in `start_yopo_api.sh`'s `docker run -e` list**, so setting it on the host has no effect on the container (the built-in 15.0 in `yopo_server.py` always wins); change it in the server script, or run in local (`--local`) mode |
 | `YOPO_TRAJ_EXTEND_S` | 2.0 | Trajectory tail extrapolation time (s), fixing the command-freeze sawtooth during replan intervals; if replanning still has not happened after that, it falls back to the frozen behaviour to avoid flying blind forever |
-| `YOPO_USE_TRT` | 1 (set by `restart_all.sh`) | TensorRT acceleration switch, see "YOPO TensorRT Acceleration" |
+| `YOPO_USE_TRT` | 1 (set by `restart_all.sh`) | TensorRT acceleration switch, see "YOPO TensorRT Acceleration". Note `yopo_server.py` itself defaults to `0`; the launcher sets it to 1 when the engine exists, and `restart_all.sh` sets it unconditionally |
 
 > The reactive-budget speed governor (which used to cap speed dynamically by the replan interval) was
 > removed: flight speed is decided directly by `YOPO_VELOCITY × YOPO_CTRL_TIME_SCALE` and hard-clamped
@@ -750,8 +859,9 @@ A **Target Map (Top-Down)** minimap is permanently docked in the bottom-left cor
 interface and refreshes live in flight, giving an intuitive view of the drone's position relative to
 the goal:
 
-- **Rendering**: the minimap is drawn by a **separate, second Cesium 3D Tiles viewer** (a top-down
-  orthographic camera looking straight down from above the drone), sharing the same Google Tiles scene
+- **Rendering**: the minimap is drawn by a **separate, second Cesium 3D Tiles viewer** looking almost
+  straight down from above the drone (`camera.setView` with `pitch = -89.9°`; Cesium's default
+  **perspective** camera, not an orthographic frustum), sharing the same Google Tiles scene
   as the main view and the panorama. It is not a screenshot or an external map tile — it genuinely
   loads a second copy of the 3D Tiles world.
 - **Performance (so it does not fight the main view for the GPU)**: the main flight view keeps a
@@ -761,8 +871,9 @@ the goal:
   (half resolution, plenty for a top-down dot map), and is throttled on the frontend to **~15 Hz
   (~every 66 ms)**. Together these cut the second 3D Tiles world's per-second GPU share to roughly a
   quarter.
-- Centred on the drone, it shows the drone's current heading, the goal position and the line between
-  them, projected onto the horizontal plane.
+- Centred on the drone, it shows the drone's current heading and the goal position (two point
+  entities: UAV and TARGET) projected onto the horizontal plane. **Note:** no line is drawn between
+  the drone and the goal.
 - The two text rows below the map give the **target altitude y** (the goal's `y` in the **local
   coordinate system**, i.e. its height above the local origin, in m) and the **Δx/Δy/Δz to target**
   (the goal's east/up/north displacement relative to the drone, in m).
@@ -779,8 +890,9 @@ channel 0 = normalized depth [0,1], channel 1 = validity mask. The acquisition f
 1. DA360 panoramic depth estimation → ERP depth map (metric)
 2. The frontend reprojects/crops it to 384×192 ERP and attaches the validity mask
 3. It is fed straight into the network (the depth values themselves come from DA360 and are never
-   mixed with ray-synthesised geometric depth; only 4 sparse Cesium rays are used for **metric scale
-   calibration**, converting DA360's relative depth into metres)
+   mixed with ray-synthesised geometric depth; only **up to 6** sparse Cesium rays are used for
+   **metric scale calibration** — a forward 2×2 grid plus straight ahead and straight down —
+   converting DA360's relative depth into metres)
 
 **When depth is unavailable (DA360 failure/timeout) it does not fall back to Cesium raycasting** —
 YOPO's network input still requires real depth, so the drone hovers in place and keeps retrying until
