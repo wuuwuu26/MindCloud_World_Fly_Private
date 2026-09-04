@@ -53,14 +53,27 @@ depth map.
 
 ## Requirements
 
-- Docker Engine
+Required:
+
+- Docker Engine (recommended 24+), and the current user must be able to run `docker` (i.e. be in the
+  `docker` group)
+- An NVIDIA GPU + driver (needed by DA360 / YOPO) and the NVIDIA Container Toolkit (for GPU inside
+  containers)
+- Disk ≥80 GB: the three images total ~64 GB (YOPO ≈35 GB, DA360 ≈28 GB, main flight ≈1 GB), plus the
+  1.3 GB DA360 weights
 - A modern browser with WebGL support (to open `http://127.0.0.1:8080` and use the simulator)
-- The browser must be able to reach Cesium Ion and Google 3D Tiles
-- Python 3 for local development mode
-- DA360 depth inference needs an NVIDIA GPU, the NVIDIA Container Toolkit, Python 3 + pip, and
-  network access to the model download URL
-- `git` is required by `scripts/download_da360_model.sh` even when the DA360 source is already
-  vendored — the script aborts early if `git` is missing
+- The browser must be able to reach Cesium Ion, Google 3D Tiles and `cdn.jsdelivr.net` (the PlayCanvas
+  front-end library)
+
+Optional / scenario-specific:
+
+- `curl`: used by `restart_all.sh` to wait for services to be ready (usually present)
+- Local development mode (`./launch.sh --local`) needs Python 3
+- Downloading the DA360 weights needs Python 3 + pip (`gdown`), network access to Google Drive, and
+  `git` (the download script aborts early if `git` is missing)
+
+> Full install commands for first-time deployment are in "Quick Start (First-Time Deployment) → Step 0:
+> Install Prerequisites".
 
 ### Verified Environment
 
@@ -217,7 +230,12 @@ Open `http://127.0.0.1:8080` → click **Start Google 3D Tiles Flight** → pick
 
 ## Daily Start / Partial Restart / Stop
 
+After first-time deployment (see the previous section), daily use is just `./restart_all.sh`. When the
+images already exist they are not rebuilt, so this is the fastest restart; all three services run
+detached in the background by default:
+
 ```bash
+./restart_all.sh                                   # restart everything
 # Restart only part of the services (keep the rest; all three run detached in the background by default)
 ./restart_all.sh --no-da360        # restart YOPO + main flight only
 ./restart_all.sh --no-yopo         # restart DA360 + main flight only
@@ -286,11 +304,16 @@ script (install `gdown` first):
 The project builds three independent containers, each with its own image name, base image and
 rebuild trigger:
 
-| Container | Image | Base image | Dockerfile | Entry script |
-|-----------|-------|-----------|------------|--------------|
-| Main flight process | `google-tiles-flight` | `tumgis/3dcitydb-web-map:alpine-v2.0.0` (bundles Node + Cesium) | `Dockerfile.cesium` | `launch.sh` |
-| YOPO avoidance backend | `mindcloud-yopo` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime` (CUDA) | `Dockerfile.yopo` | `scripts/start_yopo_api.sh` |
-| DA360 depth service | `mindcloud-da360` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime` (CUDA) | `Dockerfile.da360` | `scripts/start_da360_api.sh` |
+| Container | Image | Base image | Measured size | Dockerfile | Entry script |
+|-----------|-------|-----------|---------------|------------|--------------|
+| Main flight process | `google-tiles-flight` | `tumgis/3dcitydb-web-map:alpine-v2.0.0` (bundles Node + Cesium) | ≈1 GB | `Dockerfile.cesium` | `launch.sh` |
+| YOPO avoidance backend | `mindcloud-yopo` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime` (CUDA) | ≈35 GB | `Dockerfile.yopo` | `scripts/start_yopo_api.sh` |
+| DA360 depth service | `mindcloud-da360` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime` (CUDA) | ≈28 GB | `Dockerfile.da360` | `scripts/start_da360_api.sh` |
+
+> Sizes are measured on an RTX 4070 Laptop / Ubuntu 24.04 and are for disk estimation only. Daily
+> `./restart_all.sh` does **not** rebuild the images (a build only happens when an image is missing or
+> `*_FORCE_BUILD=1` is set). For a standalone or forced build, see "Quick Start (First-Time Deployment)
+> → Step 3".
 
 ### Main Flight Process (`Dockerfile.cesium`)
 
@@ -612,12 +635,49 @@ http://127.0.0.1:8080/?da360Url=http://<host>:5688/depth
 YOPO needs a **384×192 ERP panoramic depth map** (its native input format) with two channels:
 channel 0 = normalized depth [0,1], channel 1 = validity mask. The acquisition flow:
 
-1. DA360 panoramic depth estimation → ERP depth map (metric)
+1. DA360 panoramic depth estimation → ERP depth map (DA360 **relative** depth, nearest scene point = 1.0, **not** metric)
 2. The frontend reprojects/crops it to 384×192 ERP and attaches the validity mask
 3. It is fed straight into the network (the depth values themselves come from DA360 and are never
    mixed with ray-synthesised geometric depth; only **up to 6** sparse Cesium rays are used for
    **metric scale calibration** — a forward 2×2 grid plus straight ahead and straight down —
    converting DA360's relative depth into metres)
+
+### Metric Scale Calibration
+
+DA360 outputs **relative_to_nearest** depth (nearest scene point = 1.0), not metric — a global scale
+factor `scale` must be estimated so `metric = rel × scale`. The implementation lives in
+`src/yopo-depth-from-panorama.js`:
+
+1. **Sample calibration points** (`sampleCalibrationPoints`): fire sparse Cesium rays in the forward
+   hemisphere (`world.pickLocalRay`, using the true geometric distance as ground truth).
+   - A forward 2×2 grid + straight ahead `(0,0)` + straight down `(0,-1)`, up to 6 rays; the straight-down
+     ray's ground distance ≈ altitude, the only reliably-hit direction at high altitude.
+   - Calibration rays force `forceFresh=true` for a real GPU pick and **do not** use `pickLocalRay`'s
+     directional bucket cache (a cache hit would bring ≤150 ms / ≤0.5 m drift and contaminate calibration).
+   - At altitude the max ray distance is scaled up adaptively (`calibMaxDist = max(20, |altitude|×1.5 + 20)`)
+     so it still reaches the ground / distant buildings.
+2. **Read the corresponding relative depth** (`_samplePanoramaDepth`): map each ray direction to the
+   panorama depth-map UV using the ERP layout (`yaw=atan2(x,-z)`, `pitch=asin(y)`) and bilinearly sample
+   DA360's relative depth `rel`.
+3. **Estimate the scale** (`estimateScale`):
+   - Per point compute `ratio = true_dist / rel`, **keeping only near/mid-range points with `rel < 40`** —
+     far points / sky can have `rel` in the hundreds, which would crush `scale` to a tiny value (measured
+     0.39) and shrink the whole image into "walls everywhere", so they must be filtered out.
+   - The ERP main path requires **≥ 3 hit points** this calibration before entering scale estimation
+     (`calibrationPoints.length >= 3`); once in, if fewer than 2 valid points remain it falls back to the
+     historical `scale` to avoid a single outlier dominating.
+   - Take the **median** of the ratios, apply a robust MAD (median absolute deviation) filter to keep
+     inliers, and use their mean as `scale`.
+   - Clamp for physical plausibility: `scale ∈ [0.5, 30]`; out of range falls back to the historical value.
+   - **Temporal smoothing**: `scale = lastScale×0.5 + scale×0.5`, suppressing the scale jumps caused by
+     DA360's per-frame relative-depth drift and avoiding network-decision jitter.
+4. **Convert**: after resizing to 384×192, per-pixel `metric = rel × scale`; invalid pixels (NaN/≤0) stay
+   NaN and are flagged by the mask channel (channel 1), which the network ignores the same way as in
+   training.
+
+Calibration runs once per DA360 depth frame (DA360 ≈ 22 Hz < the `pickLocalRay` cache TTL of 150 ms, so
+most calibration rays hit the cache and real GPU picks are rare); "move > 1.5 m forces re-calibration"
+acts as a CPU-side backstop for cache bypassing, at zero extra cost.
 
 **When depth is unavailable (DA360 failure/timeout) it does not fall back to Cesium raycasting** —
 YOPO's network input still requires real depth, so the drone hovers in place and keeps retrying until
