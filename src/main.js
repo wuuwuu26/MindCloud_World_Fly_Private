@@ -1446,7 +1446,6 @@ function enterYOPOTargetSelectMode() {
         world.setNativeCameraControls(true);
     }
     updateYOPOTargetMapCamera();
-    setYOPOTargetAltPanel(true);
     document.getElementById('yopo-status-text').textContent =
         'Status: goal select mode';
     console.log('YOPO target select mode: starting at drone pos', { x, y, z });
@@ -1607,83 +1606,6 @@ function applyYOPOTargetPick(p) {
     }
 }
 
-// ── Target altitude panel (visible only during goal select map mode) ──
-// A placement-like on-screen number input so the altitude can be typed directly while
-// picking, without digging into the Tab settings panel. It stays in sync with the panel's
-// Target Y field (same source of truth) and moves the marker live.
-
-function setYOPOTargetAltPanel(visible) {
-    const panel = document.getElementById('yopo-target-alt-panel');
-    if (!panel) return;
-    panel.classList.toggle('visible', visible);
-    if (visible) {
-        const input = document.getElementById('yopo-target-alt-input');
-        const yInput = document.getElementById('yopo-target-y');
-        if (input && yInput && Number.isFinite(parseFloat(yInput.value))) {
-            input.value = parseFloat(yInput.value).toFixed(1);
-        }
-    }
-}
-
-/** Push the altitude panel value into Target Y and move the marker live. */
-function syncYOPOTargetAltFromPanel() {
-    const input = document.getElementById('yopo-target-alt-input');
-    const yInput = document.getElementById('yopo-target-y');
-    if (!input || !yInput) return;
-    let y = parseFloat(input.value);
-    if (!Number.isFinite(y)) return; // half-typed value ("-"/"") — wait for a valid one
-    yInput.value = y.toFixed(1);
-    const x = parseFloat(document.getElementById('yopo-target-x')?.value);
-    const z = parseFloat(document.getElementById('yopo-target-z')?.value);
-    if (Number.isFinite(x) && Number.isFinite(z)) updateYOPOTargetMarker(x, y, z);
-}
-
-function setupYOPOTargetAltPanel() {
-    const panel = document.getElementById('yopo-target-alt-panel');
-    const input = document.getElementById('yopo-target-alt-input');
-    if (!panel || !input || panel._yopoAltBound) return;
-    panel._yopoAltBound = true;
-    input.addEventListener('input', syncYOPOTargetAltFromPanel);
-    input.addEventListener('change', () => {
-        let y = parseFloat(input.value);
-        if (!Number.isFinite(y)) y = 2;
-        input.value = y.toFixed(1);
-        syncYOPOTargetAltFromPanel();
-    });
-    // Wheel over the panel steps the altitude without zooming the map camera (the event
-    // targets the panel overlay, never the Cesium canvas).
-    panel.addEventListener('wheel', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        let y = parseFloat(input.value);
-        if (!Number.isFinite(y)) y = 2;
-        const step = e.shiftKey ? 5 : 1;
-        input.value = (y + (e.deltaY < 0 ? step : -step)).toFixed(1);
-        syncYOPOTargetAltFromPanel();
-    }, { passive: false });
-
-    // Typing Target X/Y/Z directly in the YOPO menu must also stay live: move the marker
-    // per keystroke (valid values only) and mirror Y into the altitude panel.
-    const mirrorY = () => {
-        const yInput = document.getElementById('yopo-target-y');
-        if (!yInput || !Number.isFinite(parseFloat(yInput.value))) return;
-        input.value = parseFloat(yInput.value).toFixed(1);
-    };
-    for (const id of ['yopo-target-x', 'yopo-target-y', 'yopo-target-z']) {
-        const el = document.getElementById(id);
-        if (!el) continue;
-        el.addEventListener('input', () => {
-            if (id === 'yopo-target-y') mirrorY();
-            const x = parseFloat(document.getElementById('yopo-target-x')?.value);
-            const y = parseFloat(document.getElementById('yopo-target-y')?.value);
-            const z = parseFloat(document.getElementById('yopo-target-z')?.value);
-            if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
-                updateYOPOTargetMarker(x, y, z);
-            }
-        });
-    }
-}
-
 /** Create (or reuse) a Cesium entity marking the YOPO target position. */
 function createYOPOTargetMarker(x, y, z) {
     if (!world || !world.viewer) return;
@@ -1794,9 +1716,6 @@ function handleYOPOKeyDown(e) {
         xInput.value = x.toFixed(1);
         yInput.value = y.toFixed(1);
         zInput.value = z.toFixed(1);
-        // Keep the on-screen altitude panel in sync with numpad-driven Y changes.
-        const altInput = document.getElementById('yopo-target-alt-input');
-        if (altInput) altInput.value = y.toFixed(1);
         // Update marker only; do NOT set drone.yopoNavTarget here —
         // that must only happen in confirmYOPOTarget so the drone
         // doesn't start flying before the user presses Numpad 5.
@@ -1837,7 +1756,6 @@ async function confirmYOPOTarget(x, y, z) {
     // Leave the free map camera: restore the flight default (native controls off, the
     // per-frame follow camera re-pins the view to the drone on the next frame).
     world?.setNativeCameraControls?.(false);
-    setYOPOTargetAltPanel(false);
     document.getElementById('yopo-status-text').textContent =
         `Status: setting goal (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})...`;
 
@@ -1904,7 +1822,6 @@ function cancelYOPOTarget() {
     yopoTargetSelectMode = false;
     // Same camera restore as confirmYOPOTarget.
     world?.setNativeCameraControls?.(false);
-    setYOPOTargetAltPanel(false);
     // Clear the temporary target set during selection (not yet confirmed
     // with the server, so no goal to revoke there).
     drone.yopoNavTarget = null;
@@ -2240,7 +2157,6 @@ function initializeAppShell() {
     setupStartUI();
     setupKeyboard();
     setupSpawnAltitudeControls();
-    setupYOPOTargetAltPanel();
     setProgress('');
     window.googleTilesFlightStart = startTilesMode;
     window.startTilesMode = startTilesMode;

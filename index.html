@@ -589,21 +589,6 @@
             border: 1px solid #4b6bff; border-radius: 4px; padding: 5px 6px;
             font-family: 'Courier New', monospace; font-size: 12px;
         }
-        /* YOPO target selection altitude panel (flight mode, goal select map) */
-        #yopo-target-alt-panel {
-            position: absolute; right: 20px; bottom: 112px; width: min(300px, calc(100vw - 40px));
-            background: rgba(0,0,0,0.72); color: #d9e6ff; padding: 12px 14px;
-            border: 1px solid rgba(255,210,58,0.55); border-radius: 8px;
-            font-family: 'Courier New', monospace; font-size: 12px;
-            pointer-events: auto; display: none; z-index: 12;
-        }
-        #yopo-target-alt-panel.visible { display: block; }
-        .yopo-target-alt-title { color: #ffd23a; font-weight: bold; margin-bottom: 8px; }
-        #yopo-target-alt-input {
-            width: 96px; box-sizing: border-box; background: #111827; color: #fff;
-            border: 1px solid #b39821; border-radius: 4px; padding: 5px 6px;
-            font-family: 'Courier New', monospace; font-size: 12px;
-        }
         #spawn-altitude-hint {
             margin-top: 8px; color: #9fb5ff; line-height: 1.35;
         }
@@ -696,13 +681,6 @@
 
     <!-- Collision flash overlay -->
     <div id="collision-flash"></div>
-
-    <!-- YOPO target selection altitude panel (visible only during goal select map mode) -->
-    <div id="yopo-target-alt-panel">
-        <div class="yopo-target-alt-title">TARGET ALTITUDE y (m)</div>
-        <input type="number" id="yopo-target-alt-input" min="-500" max="5000" step="0.5" value="2" aria-label="YOPO target altitude in metres">
-        <div style="color:#99a;margin-top:6px;">Type a value or scroll = ±1 m (Shift ±5 m). Numpad 9/3 also adjusts. Click the map to set the goal x/z.</div>
-    </div>
 
     <!-- Placement mode overlay -->
 	    <div id="placement-overlay">
