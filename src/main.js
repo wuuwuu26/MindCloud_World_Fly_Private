@@ -452,21 +452,13 @@ function setupCesiumPlacementHandler() {
         }
         // YOPO target selection: left-click places the goal on the top-down map
         // (pickTargetPoint keeps the current local frame, unlike pickSpawn).
+        // Native camera controls are ON during selection; Cesium suppresses LEFT_CLICK
+        // after a drag, so panning does not misplace the goal.
         if (mode === 'flight' && yopoTargetSelectMode) {
             const p = await world.pickTargetPoint(movement.position);
             if (p) applyYOPOTargetPick(p);
         }
     }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
-
-    // Wheel zooms the target-selection map by moving the overhead camera up/down.
-    // Safe to hijack: in flight mode the native camera controls are disabled, so the
-    // wheel has no other meaning on the main canvas.
-    canvas.addEventListener('wheel', (e) => {
-        if (mode !== 'flight' || !yopoTargetSelectMode) return;
-        e.preventDefault();
-        const factor = e.deltaY > 0 ? 1.2 : 1 / 1.2;
-        yopoTargetMapHeight = Math.max(30, Math.min(1500, yopoTargetMapHeight * factor));
-    }, { passive: false });
 }
 
 async function enterPlacementMode(autoPick = false) {
@@ -1282,12 +1274,13 @@ function updateFlight(dt) {
     const cameraTransform = drone.getCameraTransform();
     const bodyTransform = drone.getBodyTransform ? drone.getBodyTransform() : cameraTransform;
     if (yopoTargetSelectMode) {
-        // Target-selection "map mode": a placement-like top-down view that follows the drone.
-        // The aircraft model stays visible as the pick reference; mouse left-click sets the
-        // goal position (see setupCesiumPlacementHandler), wheel zooms, numpad still nudges.
+        // Target-selection "map mode": placement-like free overhead camera. The initial
+        // top-down view is set once in enterYOPOTargetSelectMode; after that the native
+        // camera controls take over (left-drag pan, middle-drag tilt, wheel zoom), so the
+        // camera is NOT re-pinned to the drone here. Only keep the aircraft model visible
+        // as the pick reference.
         world.updateAircraftFromDroneTransform(bodyTransform);
         world.showAircraft(true);
-        updateYOPOTargetMapCamera();
     } else if (cameraMode === 'third') {
         world.updateAircraftFromDroneTransform(bodyTransform);
         world.showAircraft(true);
@@ -1445,8 +1438,17 @@ function enterYOPOTargetSelectMode() {
     document.getElementById('yopo-target-y').value = y.toFixed(1);
     document.getElementById('yopo-target-z').value = z.toFixed(1);
     createYOPOTargetMarker(x, y, z);
+    // Placement-like free camera: set the top-down view once, then let the user pan with
+    // left-drag and tilt/rotate with middle-drag (native Cesium camera controls, same as
+    // placement mode). Click still places the goal -- Cesium only fires LEFT_CLICK when the
+    // mouse-up is within tolerance of the mouse-down, so drags do not misplace the goal.
+    // Controls are restored (disabled) in confirmYOPOTarget / cancelYOPOTarget.
+    if (world && typeof world.setNativeCameraControls === 'function') {
+        world.setNativeCameraControls(true);
+    }
+    updateYOPOTargetMapCamera();
     document.getElementById('yopo-status-text').textContent =
-        'Status: goal select map -- click to place goal, wheel zooms, altitude via Y input / numpad 9/3, numpad fine-tunes, 5 confirm, 0/Esc cancel';
+        'Status: goal select map -- left-drag pan, middle-drag tilt, click to place goal, wheel zooms, altitude via Y input / numpad 9/3, numpad fine-tunes, 5 confirm, 0/Esc cancel';
     console.log('YOPO target select mode: starting at drone pos', { x, y, z });
 }
 
@@ -1563,12 +1565,15 @@ function yopoBodyMoveAxes() {
 }
 
 // ── YOPO target map (top-down pick view) ────────────────────────
-// While target selection is active, the main view switches to a placement-like top-down map
-// that follows the drone. Left-click picks the goal x/z (world.pickTargetPoint -- unlike
-// pickSpawn it keeps the current local frame), the altitude stays in the Y input (editable,
-// also numpad 9/3), and the numpad still nudges the goal relative to the nose. The wheel
-// zooms the map by changing this overhead camera height.
-let yopoTargetMapHeight = 150; // metres above the drone
+// While target selection is active, the main view becomes a placement-like top-down map:
+// enterYOPOTargetSelectMode sets this overhead view once above the drone and enables the
+// native Cesium camera controls, so left-drag pans, middle-drag tilts/rotates and the wheel
+// zooms -- the camera is NOT re-pinned to the drone every frame. Left-click still picks the
+// goal x/z (world.pickTargetPoint -- unlike pickSpawn it keeps the current local frame), the
+// altitude stays in the Y input (editable, also numpad 9/3), and the numpad still nudges the
+// goal relative to the nose. confirmYOPOTarget / cancelYOPOTarget restore the flight camera
+// (native controls off; the per-frame follow camera takes over again).
+let yopoTargetMapHeight = 150; // initial overhead camera height (metres above the drone)
 
 function updateYOPOTargetMapCamera() {
     if (!world || !world.viewer || !drone) return;
@@ -1752,6 +1757,9 @@ function prewarmYOPODepth() {
 /** Confirm the selected target: set goal on server and auto-start nav. */
 async function confirmYOPOTarget(x, y, z) {
     yopoTargetSelectMode = false;
+    // Leave the free map camera: restore the flight default (native controls off, the
+    // per-frame follow camera re-pins the view to the drone on the next frame).
+    world?.setNativeCameraControls?.(false);
     document.getElementById('yopo-status-text').textContent =
         `Status: setting goal (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})...`;
 
@@ -1817,6 +1825,8 @@ async function confirmYOPOTarget(x, y, z) {
 /** Cancel target selection mode. */
 function cancelYOPOTarget() {
     yopoTargetSelectMode = false;
+    // Same camera restore as confirmYOPOTarget.
+    world?.setNativeCameraControls?.(false);
     // Clear the temporary target set during selection (not yet confirmed
     // with the server, so no goal to revoke there).
     drone.yopoNavTarget = null;
