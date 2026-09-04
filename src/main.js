@@ -1605,8 +1605,7 @@ function applyYOPOTargetPick(p) {
     updateYOPOTargetMarker(p.x, y, p.z);
     const statusEl = document.getElementById('yopo-status-text');
     if (statusEl) {
-        statusEl.textContent =
-            `Status: goal picked at (${p.x.toFixed(1)}, ${y.toFixed(1)}, ${p.z.toFixed(1)})`;
+        statusEl.textContent = 'Status: goal picked';
     }
 }
 
@@ -1664,6 +1663,27 @@ function setupYOPOTargetAltPanel() {
         input.value = (y + (e.deltaY < 0 ? step : -step)).toFixed(1);
         syncYOPOTargetAltFromPanel();
     }, { passive: false });
+
+    // Typing Target X/Y/Z directly in the YOPO menu must also stay live: move the marker
+    // per keystroke (valid values only) and mirror Y into the altitude panel.
+    const mirrorY = () => {
+        const yInput = document.getElementById('yopo-target-y');
+        if (!yInput || !Number.isFinite(parseFloat(yInput.value))) return;
+        input.value = parseFloat(yInput.value).toFixed(1);
+    };
+    for (const id of ['yopo-target-x', 'yopo-target-y', 'yopo-target-z']) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.addEventListener('input', () => {
+            if (id === 'yopo-target-y') mirrorY();
+            const x = parseFloat(document.getElementById('yopo-target-x')?.value);
+            const y = parseFloat(document.getElementById('yopo-target-y')?.value);
+            const z = parseFloat(document.getElementById('yopo-target-z')?.value);
+            if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+                updateYOPOTargetMarker(x, y, z);
+            }
+        });
+    }
 }
 
 /** Create (or reuse) a Cesium entity marking the YOPO target position. */
@@ -1776,6 +1796,9 @@ function handleYOPOKeyDown(e) {
         xInput.value = x.toFixed(1);
         yInput.value = y.toFixed(1);
         zInput.value = z.toFixed(1);
+        // Keep the on-screen altitude panel in sync with numpad-driven Y changes.
+        const altInput = document.getElementById('yopo-target-alt-input');
+        if (altInput) altInput.value = y.toFixed(1);
         // Update marker only; do NOT set drone.yopoNavTarget here —
         // that must only happen in confirmYOPOTarget so the drone
         // doesn't start flying before the user presses Numpad 5.
