@@ -78,14 +78,14 @@ export class YOPODepthFromPanorama {
         // DA360, and slow inference plus queuing would actually hurt real-time behaviour.
         // With rate limiting the cache is reused: the depth loop runs at the navigate rate
         // while DA360 updates the cache in the background at <= minInterval.
-        // The faster GPU post-processing made refreshes cheaper: 30 -> 10 -> 5 -> 3 ms,
-        // further raising the real depth rate (in-flight DA360 requests are guarded by the
-        // _refreshing mutex so they never pile up; a shorter interval keeps the cache
-        // fresher and YOPO more real-time).
-        // This value is also the baseline for the "motion command (replan) update rate" --
-        // main.js binds the navigate client-side throttle (_requestInterval) straight to it,
-        // keeping both rates strictly identical and raising them together.
-        this._minRefreshIntervalMs = 3;
+        // Reverted 3 -> 33 ms: at 3 ms the depth loop hammered DA360 ~333x/s, pinning the GPU
+        // (DA360_large alone reserves ~3 GB VRAM + high compute) and starving Cesium's WebGL
+        // render thread, which tanked the in-page frame rate. 33 ms == 30 Hz is more than enough
+        // for navigation and leaves the GPU idle most of the cycle so Cesium can render smoothly.
+        // (This value is also the baseline for the motion-command/replan update rate -- main.js
+        // binds the navigate client-side throttle (_requestInterval) straight to it, keeping both
+        // rates identical and raising them together.)
+        this._minRefreshIntervalMs = 33;
         // ── GPU post-processing (lazy init) ──
         // These per-pixel loops (rawDepth/resize/flip/mask) run on the CPU main thread: at
         // 384x192 that is tens of thousands of interpolations plus a flip every time, a fixed

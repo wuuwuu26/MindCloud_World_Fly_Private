@@ -470,10 +470,9 @@ export class CesiumWorld {
             1.0
         );
         this.flightTileSSE = clampNumber(
-            // RAISED fineness per request: default dropped 20 -> 12 (the finest/slowest
-            // preset). 12 loads extremely fine tiles (measured ~7.6/8.2 GB VRAM on an 8 GB
-            // card) and renders many more triangles per frame, so expect a LOWER frame rate
-            // than at 20 -- revert with ?flightTileSse=16/20 if it stutters. Original was 24.
+            // Default 12. Note: on an 8 GB VRAM card this loads very fine tiles (~7.6/8.2 GB) and can
+            // thrash alongside DA360_large's ~3 GB reserve; if FPS collapses, raise via
+            // ?flightTileSse=20 (or 24/32) without editing code.
             urlNumber('flightTileSse', options.flightTileSSE ?? 12),
             8,
             64,
@@ -489,8 +488,8 @@ export class CesiumWorld {
             16
         );
         this.tileCacheMb = Math.round(clampNumber(
-            // Cache 2 GB: 4096 would let the tile cache fill all VRAM on an 8 GB card
-            // (competing with the map / depth for memory).
+            // Default 2048. On an 8 GB VRAM card this is large; if it forces constant tile
+            // eviction/reload alongside DA360_large (~3 GB), lower live via ?tileCacheMb=1536.
             urlNumber('tileCacheMb', options.tileCacheMb ?? 2048),
             512,
             8192,

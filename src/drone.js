@@ -523,9 +523,11 @@ export class Drone {
                                       // decoupled: this value conservatively governs "promptness",
                                       // while yopoAccMax governs "strength" (the real deceleration /
                                       // manoeuvring acceleration).
-        this.yopoAvoidQueryMs = 20;   // Ray probe throttle (ms): at 18 m/s this refreshes every
-                                      // 0.36 m, so probing is denser -> obstacle info is fresher and
-                                      // avoidance reacts faster.
+        this.yopoAvoidQueryMs = 40;   // Ray probe throttle (ms): raised 20 -> 40 for frame rate. At
+                                      // 18 m/s this still refreshes every 0.72 m -- far finer than the
+                                      // ~10 m braking distance, so obstacle info stays fresh enough and
+                                      // avoidance reacts in time, while halving the forceFresh GPU pick
+                                      // count (~1150 -> ~575 picks/sec). Push to 50/60 for more FPS.
         // ── Speed-adaptive probe budget (high-speed responsiveness) ──
         // A full ring probe used to cast 24 + 9 + 2 = 35 forceFresh scene.pickFromRay calls. Every
         // one of them is a complete GPU render plus a read-back pipeline stall, and they run
@@ -779,12 +781,11 @@ export class Drone {
         // Reaction time at yopoAvoidRefSpeed (s): the faster it flies, the larger the forward tilt it
         // must shed before the deceleration bites, so the lead grows with speed instead of staying
         // constant. Interpolated with the same tFast used by the other high-speed profiles.
-        this.yopoAvoidBrakeReactionHi = 0.80;   // 0.75 -> 0.60 -> 0.48 -> 0.60 -> 0.80. RAISED: the "sometimes
-                                                // braking is not timely enough" cases are almost all at speed, where
-                                                // the drone must first slew out of its forward tilt (~100 deg of
-                                                // rotation) before any deceleration exists. Reserving 0.8 s of dead
-                                                // time at cruise speed gives ~12 m of lead at 15 m/s (vs ~9 m at
-                                                // 0.60), so the brake is commanded early enough to absorb the slew.
+        this.yopoAvoidBrakeReactionHi = 1.00;   // 0.80 -> 1.00 (A: head-on wall hits at speed). More reaction lead
+                                                // (~15 m at 15 m/s) is subtracted from the stopping room, so the
+                                                // kinematic brake is commanded earlier to absorb the forward-tilt
+                                                // slew before deceleration exists. Pairs with yopoAvoidBrakeDecel=4.5
+                                                // so a 15 m/s head-on wall stops ~9 m short instead of overshooting.
         // Planning deceleration used by the *horizontal* kinematic brake. This is deliberately far below
         // the physically reachable aDecel (7.2) -- the previous brake planned with aDecel and therefore
         // assumed the drone can always decelerate at the physical maximum, but the real velocity
@@ -793,10 +794,13 @@ export class Drone {
         // a realistic controller decel, so the commanded target speed is always low enough that the
         // (slower) real deceleration still stops inside the standoff. The physical stop is guaranteed by
         // construction; this only trades a bit of early slowing for never crashing.
-        this.yopoAvoidBrakeDecel = 6.5;   // 3.0 -> 4.5 -> 3.5 -> 5.0 -> 7.0 -> 7.5 -> 6.5: LOWERED back for timely
-                                          // braking. Drives BOTH vSafe and the
-                                          // closing-speed gate vCloseMax -- the single biggest speed lever,
-                                          // and what pinned the cruise at ~11 m/s.
+        this.yopoAvoidBrakeDecel = 4.5;   // 6.5 -> 4.5 (A: head-on wall hits at speed). A smaller planned decel
+                                          // makes vSafe lower at every distance, so the brake starts easing sooner
+                                          // and the 65 m detection radius finally participates in early deceleration
+                                          // instead of allowing full speed until ~40 m. The comment above recommends
+                                          // ~3 m/s^2 for a 2x margin over the real controller decel; 4.5 is a
+                                          // balanced step that fixes "charges the wall, can't stop" without pinning
+                                          // cruise. Drives BOTH vSafe and the closing-speed gate vCloseMax.
                                           // This is the deceleration the brake may PLAN with, and it must stay
                                           // at or below what the velocity loop can actually DELIVER -- which
                                           // lags well behind the 17.0 m/s^2 the airframe holds at max tilt.
@@ -4033,9 +4037,25 @@ export class Drone {
         // Vertical threats (groundGap) are intentionally excluded here -- vSafeDown / vSafeUp still
         // hard-limit the descent / climb, so releasing rep/tan/brake over terrain cannot cause a strike.
         const releaseDAhead = nearGoal ? 0.0 : standoff + reactionDist + 2.0;
-        if (releaseAllowed && (des > 0.3 || this.yopoNavTarget) &&
-            dAheadH > releaseDAhead && wingClear && !this._avoidSideKeepOn) {
-            repX = 0; repZ = 0;          // Horizontal repulsion fully zeroed (no 15% residual push left)
+        // Two-tier exit release. The omnidirectional wing-clearance guard (sideKeepOn) reserves the
+        // wing envelope (yopoAvoidStopH + yopoWingMargin) around the drone in EVERY direction and
+        // keeps the lateral repulsion armed whenever an obstacle sits inside it (even the one just
+        // rounded, now to the side / slightly behind). Its job is to stop the wingtip clipping a
+        // building, so it must NEVER be bypassed by zeroing rep -- doing that made the drone's wing
+        // pass straight through the side building ("wings clip through the obstacle"). Instead:
+        //   Tier 1 (clean): corridor clear AND wing guard clear -> fully zero rep/tan/brake, fly
+        //     straight at full speed (the normal, safe exit).
+        //   Tier 2 (wing-guarded): corridor to the goal is clear but the wing guard is still latched
+        //     on a building inside the wing envelope. We must keep the repulsion (it holds the wing
+        //     offset: in _controlYOPO goalClear scales it to 0.4 and it is purely LATERAL, so it
+        //     makes the drone slide past the building while keeping separation -- it never pushes it
+        //     backward) and only DROP the tangential detour + its direction memory, which is what
+        //     shoved the drone back around the far side ("turns back at the exit"). Brake is forced
+        //     open because the forward corridor (dAheadH) is clear.
+        const canRelease = releaseAllowed && (des > 0.3 || this.yopoNavTarget) &&
+                           dAheadH > releaseDAhead && wingClear;
+        if (canRelease && !this._avoidSideKeepOn) {
+            repX = 0; repZ = 0;          // Horizontal repulsion fully zeroed (no residual push left)
             tanX = 0; tanZ = 0;          // Tangential removed entirely (avoids detouring back to the start)
             brake = 1.0;                 // Clear exit means full speed, not slowed by vertical threats
             vRep = 0;                    // Vertical clearing released too: a clear corridor means no climbing / diving
@@ -4046,6 +4066,14 @@ export class Drone {
             // open there is nothing to steer around, so the memory has served its purpose and the
             // next detour has to be chosen from the current geometry.
             this._avoidLastTan = null;
+        } else if (canRelease && this._avoidSideKeepOn) {
+            // Tier 2: keep the wing-protecting repulsion, only shed the backward detour. The rep is
+            // scaled to 0.4 by goalClear in _controlYOPO and is purely lateral, so it holds the wing
+            // offset without pushing the drone back; the forward command + cruise floor then carry it
+            // straight through the exit while sliding clear of the building.
+            tanX = 0; tanZ = 0;
+            this._avoidLastTan = null;
+            brake = 1.0;
         }
 
         // ---- Horizontal detour around vertical obstacles (B) ----
