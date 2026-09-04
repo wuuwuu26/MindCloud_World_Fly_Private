@@ -21,6 +21,45 @@ then fly with the keyboard, a gamepad or an RC transmitter — or set a goal and
 autonomously. The bottom-right corner shows the nose-mounted 360° ERP panorama RGB and the DA360
 depth map.
 
+
+**Contents**
+
+- [Requirements](#requirements)
+- [Clone the Repository](#clone-the-repository)
+- [Quick Start (Bring Up Every Service at Once)](#quick-start-bring-up-every-service-at-once)
+- [Model Weights](#model-weights)
+- [Docker Build Notes](#docker-build-notes)
+- [Usage Flow](#usage-flow)
+- [How the Panoramic Camera Works](#how-the-panoramic-camera-works)
+- [DA360 Depth Estimation](#da360-depth-estimation)
+- [YOPO Autonomous Navigation](#yopo-autonomous-navigation)
+
+## Requirements
+
+- Docker Engine
+- A modern browser with WebGL support (to open `http://127.0.0.1:8080` and use the simulator)
+- The browser must be able to reach Cesium Ion and Google 3D Tiles
+- Python 3 for local development mode
+- DA360 depth inference needs an NVIDIA GPU, the NVIDIA Container Toolkit, Python 3 + pip, and
+  network access to the model download URL
+- `git` is required by `scripts/download_da360_model.sh` even when the DA360 source is already
+  vendored — the script aborts early if `git` is missing
+
+### Verified Environment
+
+This project has been fully validated on the following machine (DA360 depth + YOPO navigation +
+main flight all brought up together):
+
+| Item | Configuration |
+|------|---------------|
+| GPU | NVIDIA GeForce RTX 4070 Laptop GPU (8 GB VRAM) |
+| Driver / CUDA | 595.84 / 13.2 |
+| DA360 config | `DA360_large` + `DA360_INPUT_SCALE=0.65` (model input 672×336), ~92% usage on a single 8GB card |
+| YOPO config | TensorRT acceleration, `YOPO_VELOCITY=15` |
+
+> On GPUs with less VRAM (6GB or below), lower `DA360_INPUT_SCALE` or `da360UploadScale` to reduce
+> usage; on cards with more headroom you can raise them for better depth accuracy.
+
 ## Clone the Repository
 
 ```bash
@@ -115,32 +154,6 @@ script (install `gdown` first):
 # The script puts the weights at third_party/DA360/checkpoints/DA360_large.pth
 ```
 
-## Requirements
-
-- Docker Engine
-- A modern browser with WebGL support (to open `http://127.0.0.1:8080` and use the simulator)
-- The browser must be able to reach Cesium Ion and Google 3D Tiles
-- Python 3 for local development mode
-- DA360 depth inference needs an NVIDIA GPU, the NVIDIA Container Toolkit, Python 3 + pip, and
-  network access to the model download URL
-- `git` is required by `scripts/download_da360_model.sh` even when the DA360 source is already
-  vendored — the script aborts early if `git` is missing
-
-### Verified Environment
-
-This project has been fully validated on the following machine (DA360 depth + YOPO navigation +
-main flight all brought up together):
-
-| Item | Configuration |
-|------|---------------|
-| GPU | NVIDIA GeForce RTX 4070 Laptop GPU (8 GB VRAM) |
-| Driver / CUDA | 595.84 / 13.2 |
-| DA360 config | `DA360_large` + `DA360_INPUT_SCALE=0.65` (model input 672×336), ~92% usage on a single 8GB card |
-| YOPO config | TensorRT acceleration, `YOPO_VELOCITY=15` |
-
-> On GPUs with less VRAM (6GB or below), lower `DA360_INPUT_SCALE` or `da360UploadScale` to reduce
-> usage; on cards with more headroom you can raise them for better depth accuracy.
-
 ## Docker Build Notes
 
 The project builds three independent containers, each with its own image name, base image and
@@ -226,69 +239,6 @@ rebuild trigger:
 The build context excludes `.git`, `.gitignore`, `node_modules`, `__pycache__`, `*.pyc`, `scene/*`,
 `.DS_Store`, `asset/gate-paths/*.tmp` and `third_party/DA360/checkpoints` (the DA360 weights), keeping
 unrelated / large files out of the image; the DA360 source still ships inside the image.
-
-## DA360 Depth Estimation
-
-The DA360 depth service is brought up by `restart_all.sh` (using the `large` model by default). The
-DA360 **source** ships with the repository, but the **weights** (`DA360_large.pth`, ~1.3GB, over
-GitHub's 100MB limit) do not — **downloading the weights is all you need before the first run**
-(there is no source to fetch before building the image):
-
-```bash
-python3 -m pip install --user gdown
-./scripts/download_da360_model.sh
-# The script puts the weights at third_party/DA360/checkpoints/DA360_large.pth
-```
-
-Heartbeat self-check after startup:
-
-```text
-curl http://127.0.0.1:5688/health
-```
-
-To stop or restart DA360, just rerun `restart_all.sh` (or `docker rm -fv mindcloud-da360-api`).
-
-Note that `DA360_large` is used by default and `scripts/start_da360_api.sh` starts its container with
-`DA360_INPUT_SCALE=0.65`, giving a model input of about `672x336` (checkpoint baseline 1036×518 ×
-0.65; verified stable on an RTX 4070 Laptop GPU 8GB; `da360_server.py`'s own default is `1.0`, i.e.
-inference at the checkpoint's native resolution).
-
-The panorama RGB is captured at `384x192` ERP by default, and that raw size is exactly what the
-bottom-right preview shows. This size is identical to what DA360 outputs and what YOPO consumes, so
-`da360UploadScale` defaults to `1.0` — uploaded as-is with no scaling; the server resizes it to the
-`672x336` model input, infers, and maps the depth back onto `384x192`. The frontend defaults to
-`depthMs=33` (minimum ~30Hz interval between depth requests) and never queues up requests while
-inference is still running.
-
-Switching models is not recommended by default; in experiments the fast tier of `DA360_large`
-preserves better depth ordering and edge consistency than `DA360_small`. Only override the model
-name when VRAM, power or deployment size is constrained:
-
-```bash
-DA360_MODEL=<large|base|small> ./scripts/download_da360_model.sh
-DA360_MODEL=<large|base|small> ./scripts/start_da360_api.sh
-```
-
-To actively change the DA360 server-side model input size, set the inference scale or specify the
-model input width/height; too low a `DA360_INPUT_SCALE` can make the large model output banded
-depth, so values below `0.46` are discouraged. The resample filter has **different defaults in two
-places**: `da360_server.py` itself defaults to `bilinear`, while `scripts/start_da360_api.sh`
-overrides it with `bicubic` and forwards it into the container (so `bicubic` is what actually takes
-effect when you use the one-shot launcher):
-
-```bash
-DA360_INPUT_SCALE=1.0 ./scripts/start_da360_api.sh
-DA360_INPUT_SCALE=0.46 ./scripts/start_da360_api.sh
-DA360_INPUT_WIDTH=476 ./scripts/start_da360_api.sh
-DA360_INPUT_WIDTH=672 DA360_INPUT_HEIGHT=336 ./scripts/start_da360_api.sh
-DA360_RESAMPLE=bilinear ./scripts/start_da360_api.sh
-```
-
-When the inference service does not run on this machine:
-
-```text
-http://127.0.0.1:8080/?da360Url=http://<host>:5688/depth
-```
 
 ## Usage Flow
 
@@ -385,6 +335,69 @@ http://127.0.0.1:8080/?panoTopPoleGuard=0&panoBottomPoleGuard=0
 # panoWidth instead of the upload scale
 http://127.0.0.1:8080/?da360UploadScale=0.5
 http://127.0.0.1:8080/?da360UploadWidth=512
+```
+
+## DA360 Depth Estimation
+
+The DA360 depth service is brought up by `restart_all.sh` (using the `large` model by default). The
+DA360 **source** ships with the repository, but the **weights** (`DA360_large.pth`, ~1.3GB, over
+GitHub's 100MB limit) do not — **downloading the weights is all you need before the first run**
+(there is no source to fetch before building the image):
+
+```bash
+python3 -m pip install --user gdown
+./scripts/download_da360_model.sh
+# The script puts the weights at third_party/DA360/checkpoints/DA360_large.pth
+```
+
+Heartbeat self-check after startup:
+
+```text
+curl http://127.0.0.1:5688/health
+```
+
+To stop or restart DA360, just rerun `restart_all.sh` (or `docker rm -fv mindcloud-da360-api`).
+
+Note that `DA360_large` is used by default and `scripts/start_da360_api.sh` starts its container with
+`DA360_INPUT_SCALE=0.65`, giving a model input of about `672x336` (checkpoint baseline 1036×518 ×
+0.65; verified stable on an RTX 4070 Laptop GPU 8GB; `da360_server.py`'s own default is `1.0`, i.e.
+inference at the checkpoint's native resolution).
+
+The panorama RGB is captured at `384x192` ERP by default, and that raw size is exactly what the
+bottom-right preview shows. This size is identical to what DA360 outputs and what YOPO consumes, so
+`da360UploadScale` defaults to `1.0` — uploaded as-is with no scaling; the server resizes it to the
+`672x336` model input, infers, and maps the depth back onto `384x192`. The frontend defaults to
+`depthMs=33` (minimum ~30Hz interval between depth requests) and never queues up requests while
+inference is still running.
+
+Switching models is not recommended by default; in experiments the fast tier of `DA360_large`
+preserves better depth ordering and edge consistency than `DA360_small`. Only override the model
+name when VRAM, power or deployment size is constrained:
+
+```bash
+DA360_MODEL=<large|base|small> ./scripts/download_da360_model.sh
+DA360_MODEL=<large|base|small> ./scripts/start_da360_api.sh
+```
+
+To actively change the DA360 server-side model input size, set the inference scale or specify the
+model input width/height; too low a `DA360_INPUT_SCALE` can make the large model output banded
+depth, so values below `0.46` are discouraged. The resample filter has **different defaults in two
+places**: `da360_server.py` itself defaults to `bilinear`, while `scripts/start_da360_api.sh`
+overrides it with `bicubic` and forwards it into the container (so `bicubic` is what actually takes
+effect when you use the one-shot launcher):
+
+```bash
+DA360_INPUT_SCALE=1.0 ./scripts/start_da360_api.sh
+DA360_INPUT_SCALE=0.46 ./scripts/start_da360_api.sh
+DA360_INPUT_WIDTH=476 ./scripts/start_da360_api.sh
+DA360_INPUT_WIDTH=672 DA360_INPUT_HEIGHT=336 ./scripts/start_da360_api.sh
+DA360_RESAMPLE=bilinear ./scripts/start_da360_api.sh
+```
+
+When the inference service does not run on this machine:
+
+```text
+http://127.0.0.1:8080/?da360Url=http://<host>:5688/depth
 ```
 
 ## YOPO Autonomous Navigation
