@@ -34,6 +34,23 @@ depth map.
 - [DA360 Depth Estimation](#da360-depth-estimation)
 - [YOPO Autonomous Navigation](#yopo-autonomous-navigation)
 
+
+**Contents**
+
+- [Requirements](#requirements)
+- [Quick Start (First-Time Deployment)](#quick-start-first-time-deployment)
+- [Daily Start / Partial Restart / Stop](#daily-start-partial-restart-stop)
+- [Model Weights](#model-weights)
+- [Docker Build Notes](#docker-build-notes)
+- [Usage Flow](#usage-flow)
+- [Top-Down Minimap (Target Map)](#top-down-minimap-target-map)
+- [Coordinate Systems](#coordinate-systems)
+- [How the Panoramic Camera Works](#how-the-panoramic-camera-works)
+- [DA360 Depth Estimation](#da360-depth-estimation)
+- [Depth Map Fed to YOPO](#depth-map-fed-to-yopo)
+- [YOPO Autonomous Navigation](#yopo-autonomous-navigation)
+
+
 ## Requirements
 
 - Docker Engine
@@ -60,7 +77,10 @@ main flight all brought up together):
 > On GPUs with less VRAM (6GB or below), lower `DA360_INPUT_SCALE` or `da360UploadScale` to reduce
 > usage; on cards with more headroom you can raise them for better depth accuracy.
 
-## Clone the Repository
+
+## Quick Start (First-Time Deployment)
+
+### Clone the Repository
 
 ```bash
 git clone https://github.com/wuuwuu26/MindCloud_World_Fly_Private.git
@@ -74,7 +94,6 @@ cd MindCloud_World_Fly_Private
 > **weights** (`DA360_large.pth`, ~1.3GB, over GitHub's 100MB limit) are not in the repository —
 > download them before running the depth service.
 
-## Quick Start (Bring Up Every Service at Once)
 
 `restart_all.sh` is the recommended way to start the main process, DA360 and YOPO in one shot:
 
@@ -91,6 +110,8 @@ you can now fly with the keyboard.
 > ships with the repository). `restart_all.sh` sets `YOPO_USE_TRT=1` **unconditionally**, so no extra
 > step is needed; if the engine is missing it only prints a WARN and `scripts/start_yopo_api.sh`
 > builds the engine with the GPU inside the YOPO container. See "YOPO TensorRT Acceleration".
+
+## Daily Start / Partial Restart / Stop
 
 ```bash
 # Restart only part of the services (keep the rest; all three run detached in the background by default)
@@ -126,6 +147,7 @@ the main process alone:
 ./launch.sh
 ```
 
+
 ## Model Weights
 
 | Model | Shipped with the repo | How to obtain |
@@ -153,6 +175,7 @@ script (install `gdown` first):
 ./scripts/download_da360_model.sh
 # The script puts the weights at third_party/DA360/checkpoints/DA360_large.pth
 ```
+
 
 ## Docker Build Notes
 
@@ -240,6 +263,7 @@ The build context excludes `.git`, `.gitignore`, `node_modules`, `__pycache__`, 
 `.DS_Store`, `asset/gate-paths/*.tmp` and `third_party/DA360/checkpoints` (the DA360 weights), keeping
 unrelated / large files out of the image; the DA360 source still ships inside the image.
 
+
 ## Usage Flow
 
 1. Click **Start Google 3D Tiles Flight**.
@@ -273,6 +297,83 @@ connected from the settings panel; to check Linux input permissions:
 ./launch.sh --input-status
 ./launch.sh --setup-input
 ```
+
+### Goal Selection and Navigation
+
+1. In flight mode, press **`T`** to enter goal selection: the main view switches to a **top-down
+   map** with placement-like free camera controls (left-drag pans, middle-drag tilts, wheel zooms).
+   The YOPO menu (bottom-left) and the **TARGET ALTITUDE** panel (bottom-right) appear.
+2. **Left-click anywhere on the map** to place the goal (click again to adjust); set the altitude by
+   typing in the bottom-right panel or scrolling over it (±1 m, Shift ±5 m).
+3. Fine-tune with the **numpad** (directions are relative to the **drone's current nose heading**);
+   the Target X/Y/Z inputs stay in sync with the marker live:
+   - `Numpad 8 / 2`: forward / backward along the nose
+   - `Numpad 4 / 6`: strafe **right / left**, perpendicular to the nose (numlock layout is inverted:
+     4 = the drone's right side, 6 = its left; see `handleYOPOKeyDown` in `src/main.js`)
+   - `Numpad 9 / 3`: ascend / descend
+4. **`Numpad 5`**: confirm the goal and **start navigation automatically** (the follow camera is
+   restored).
+5. **`Numpad 0`** or **`Esc`**: cancel the selection.
+
+During navigation:
+- The drone follows the path with YOPO trajectory commands plus velocity feed-forward
+- Moving the sticks temporarily switches to manual control (navigation resumes when released)
+- **Avoidance (server-side learning-based + client-side geometric reactive, two layers)**: the
+  server strictly follows YOPO and selects the trajectory by `argmin(score)` (learning-based
+  avoidance); while tracking the commands, the client additionally stacks a geometric reactive
+  potential field (360° ray ring: radial push-away, tangential detour, near-obstacle braking,
+  vertical obstacle clearing, detour around vertical obstacle footprints) to cover sudden near
+  obstacles during the depth replanning gap. When the horizontal corridor toward the goal is clear
+  this geometric layer goes to zero and does not interfere with navigation — see "Avoidance
+  Architecture and Tuning".
+- Arrival has two layers: the server flags arrival within 2 m of the goal (`ARRIVE_THRESHOLD`); the
+  client additionally latches arrival within 6.0 m (distance-only, no speed gate; raised 2.0 -> 6.0 so the takeover engages earlier, before the drone closes in far enough to graze a building with its wing during the final descent), so the asynchronous server reply
+  cannot leave it "always one step short"
+- Press **`X`** to end navigation
+
+The flight key list lives in the Tab settings panel under **Flight Controls**; the YOPO menu (goal
+coordinate inputs, key cheat-sheet, navigation status) stays above the bottom-left target map.
+
+
+## Top-Down Minimap (Target Map)
+
+A **Target Map (Top-Down)** minimap is permanently docked in the bottom-left corner of the main
+interface and refreshes live in flight, giving an intuitive view of the drone's position relative to
+the goal:
+
+- **Rendering**: the minimap is drawn by a **separate, second Cesium 3D Tiles viewer** looking almost
+  straight down from above the drone (`camera.setView` with `pitch = -89.9°`; Cesium's default
+  **perspective** camera, not an orthographic frustum), sharing the same Google Tiles scene
+  as the main view and the panorama. It is not a screenshot or an external map tile — it genuinely
+  loads a second copy of the 3D Tiles world.
+- **Performance (so it does not fight the main view for the GPU)**: the main flight view keeps a
+  continuous 60 fps loop (`requestRenderMode: false`); the minimap viewer instead renders on demand —
+  it uses `requestRenderMode: true` (it only issues one `requestRender()` per frame after an entity
+  position or camera change, instead of redrawing every frame), sets `resolutionScale` to `0.5`
+  (half resolution, plenty for a top-down dot map), and is throttled on the frontend to **~15 Hz
+  (~every 66 ms)**. Together these cut the second 3D Tiles world's per-second GPU share to roughly a
+  quarter.
+- Centred on the drone, it shows the drone's current heading and the goal position (two point
+  entities: UAV and TARGET) projected onto the horizontal plane. **Note:** no line is drawn between
+  the drone and the goal.
+- The two text rows below the map give the **target altitude y** (the goal's `y` in the **local
+  coordinate system**, i.e. its height above the local origin, in m) and the **Δx/Δy/Δz to target**
+  (the goal's east/up/north displacement relative to the drone, in m).
+- After entering goal selection mode (press `T`), the map updates in sync with numpad movements of
+  the goal, making it easy to align the goal in space.
+- The minimap carries no data-attribution watermark; it is drawn purely on the frontend and depends
+  on no external map service.
+
+
+## Coordinate Systems
+
+| Coordinate system | x | y | z | Forward |
+|-------------------|---|---|---|---------|
+| MindCloud / Cesium | East | Up | North | -z |
+| YOPO / ROS FLU | Forward | Left | Up | +x |
+
+Goals are set in the MindCloud coordinate system and converted automatically by the server.
+
 
 ## How the Panoramic Camera Works
 
@@ -337,6 +438,7 @@ http://127.0.0.1:8080/?da360UploadScale=0.5
 http://127.0.0.1:8080/?da360UploadWidth=512
 ```
 
+
 ## DA360 Depth Estimation
 
 The DA360 depth service is brought up by `restart_all.sh` (using the `large` model by default). The
@@ -399,6 +501,28 @@ When the inference service does not run on this machine:
 ```text
 http://127.0.0.1:8080/?da360Url=http://<host>:5688/depth
 ```
+
+
+## Depth Map Fed to YOPO
+
+YOPO needs a **384×192 ERP panoramic depth map** (its native input format) with two channels:
+channel 0 = normalized depth [0,1], channel 1 = validity mask. The acquisition flow:
+
+1. DA360 panoramic depth estimation → ERP depth map (metric)
+2. The frontend reprojects/crops it to 384×192 ERP and attaches the validity mask
+3. It is fed straight into the network (the depth values themselves come from DA360 and are never
+   mixed with ray-synthesised geometric depth; only **up to 6** sparse Cesium rays are used for
+   **metric scale calibration** — a forward 2×2 grid plus straight ahead and straight down —
+   converting DA360's relative depth into metres)
+
+**When depth is unavailable (DA360 failure/timeout) it does not fall back to Cesium raycasting** —
+YOPO's network input still requires real depth, so the drone hovers in place and keeps retrying until
+a valid depth map arrives and navigation resumes.
+
+> This does not conflict with the client-side geometric reactive avoidance: the latter (see
+> "Avoidance Architecture and Tuning") is an independent safety backstop layer that probes live with a
+> Cesium ray ring, depends on no DA360 depth, and does not take part in the network input.
+
 
 ## YOPO Autonomous Navigation
 
@@ -833,97 +957,3 @@ replanning more frequent, the blind-flight segments shorter and avoidance smooth
   12.1 runtime and `yopo_server`'s TRT 8 load API); the TRT 8.6 pip package ships no cuDNN, so the
   cuDNN8 bundled with torch inside the image provides `libcudnn.so.8` (see `LD_LIBRARY_PATH` in
   `Dockerfile.yopo`).
-
-### Goal Selection and Navigation
-
-1. In flight mode, press **`T`** to enter goal selection: the main view switches to a **top-down
-   map** with placement-like free camera controls (left-drag pans, middle-drag tilts, wheel zooms).
-   The YOPO menu (bottom-left) and the **TARGET ALTITUDE** panel (bottom-right) appear.
-2. **Left-click anywhere on the map** to place the goal (click again to adjust); set the altitude by
-   typing in the bottom-right panel or scrolling over it (±1 m, Shift ±5 m).
-3. Fine-tune with the **numpad** (directions are relative to the **drone's current nose heading**);
-   the Target X/Y/Z inputs stay in sync with the marker live:
-   - `Numpad 8 / 2`: forward / backward along the nose
-   - `Numpad 4 / 6`: strafe **right / left**, perpendicular to the nose (numlock layout is inverted:
-     4 = the drone's right side, 6 = its left; see `handleYOPOKeyDown` in `src/main.js`)
-   - `Numpad 9 / 3`: ascend / descend
-4. **`Numpad 5`**: confirm the goal and **start navigation automatically** (the follow camera is
-   restored).
-5. **`Numpad 0`** or **`Esc`**: cancel the selection.
-
-During navigation:
-- The drone follows the path with YOPO trajectory commands plus velocity feed-forward
-- Moving the sticks temporarily switches to manual control (navigation resumes when released)
-- **Avoidance (server-side learning-based + client-side geometric reactive, two layers)**: the
-  server strictly follows YOPO and selects the trajectory by `argmin(score)` (learning-based
-  avoidance); while tracking the commands, the client additionally stacks a geometric reactive
-  potential field (360° ray ring: radial push-away, tangential detour, near-obstacle braking,
-  vertical obstacle clearing, detour around vertical obstacle footprints) to cover sudden near
-  obstacles during the depth replanning gap. When the horizontal corridor toward the goal is clear
-  this geometric layer goes to zero and does not interfere with navigation — see "Avoidance
-  Architecture and Tuning".
-- Arrival has two layers: the server flags arrival within 2 m of the goal (`ARRIVE_THRESHOLD`); the
-  client additionally latches arrival within 6.0 m (distance-only, no speed gate; raised 2.0 -> 6.0 so the takeover engages earlier, before the drone closes in far enough to graze a building with its wing during the final descent), so the asynchronous server reply
-  cannot leave it "always one step short"
-- Press **`X`** to end navigation
-
-The flight key list lives in the Tab settings panel under **Flight Controls**; the YOPO menu (goal
-coordinate inputs, key cheat-sheet, navigation status) stays above the bottom-left target map.
-
-### Top-Down Minimap (Target Map)
-
-A **Target Map (Top-Down)** minimap is permanently docked in the bottom-left corner of the main
-interface and refreshes live in flight, giving an intuitive view of the drone's position relative to
-the goal:
-
-- **Rendering**: the minimap is drawn by a **separate, second Cesium 3D Tiles viewer** looking almost
-  straight down from above the drone (`camera.setView` with `pitch = -89.9°`; Cesium's default
-  **perspective** camera, not an orthographic frustum), sharing the same Google Tiles scene
-  as the main view and the panorama. It is not a screenshot or an external map tile — it genuinely
-  loads a second copy of the 3D Tiles world.
-- **Performance (so it does not fight the main view for the GPU)**: the main flight view keeps a
-  continuous 60 fps loop (`requestRenderMode: false`); the minimap viewer instead renders on demand —
-  it uses `requestRenderMode: true` (it only issues one `requestRender()` per frame after an entity
-  position or camera change, instead of redrawing every frame), sets `resolutionScale` to `0.5`
-  (half resolution, plenty for a top-down dot map), and is throttled on the frontend to **~15 Hz
-  (~every 66 ms)**. Together these cut the second 3D Tiles world's per-second GPU share to roughly a
-  quarter.
-- Centred on the drone, it shows the drone's current heading and the goal position (two point
-  entities: UAV and TARGET) projected onto the horizontal plane. **Note:** no line is drawn between
-  the drone and the goal.
-- The two text rows below the map give the **target altitude y** (the goal's `y` in the **local
-  coordinate system**, i.e. its height above the local origin, in m) and the **Δx/Δy/Δz to target**
-  (the goal's east/up/north displacement relative to the drone, in m).
-- After entering goal selection mode (press `T`), the map updates in sync with numpad movements of
-  the goal, making it easy to align the goal in space.
-- The minimap carries no data-attribution watermark; it is drawn purely on the frontend and depends
-  on no external map service.
-
-### Depth Map
-
-YOPO needs a **384×192 ERP panoramic depth map** (its native input format) with two channels:
-channel 0 = normalized depth [0,1], channel 1 = validity mask. The acquisition flow:
-
-1. DA360 panoramic depth estimation → ERP depth map (metric)
-2. The frontend reprojects/crops it to 384×192 ERP and attaches the validity mask
-3. It is fed straight into the network (the depth values themselves come from DA360 and are never
-   mixed with ray-synthesised geometric depth; only **up to 6** sparse Cesium rays are used for
-   **metric scale calibration** — a forward 2×2 grid plus straight ahead and straight down —
-   converting DA360's relative depth into metres)
-
-**When depth is unavailable (DA360 failure/timeout) it does not fall back to Cesium raycasting** —
-YOPO's network input still requires real depth, so the drone hovers in place and keeps retrying until
-a valid depth map arrives and navigation resumes.
-
-> This does not conflict with the client-side geometric reactive avoidance: the latter (see
-> "Avoidance Architecture and Tuning") is an independent safety backstop layer that probes live with a
-> Cesium ray ring, depends on no DA360 depth, and does not take part in the network input.
-
-### Coordinate Systems
-
-| Coordinate system | x | y | z | Forward |
-|-------------------|---|---|---|---------|
-| MindCloud / Cesium | East | Up | North | -z |
-| YOPO / ROS FLU | Forward | Left | Up | +x |
-
-Goals are set in the MindCloud coordinate system and converted automatically by the server.
