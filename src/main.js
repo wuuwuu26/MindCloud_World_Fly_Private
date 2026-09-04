@@ -1449,7 +1449,7 @@ function enterYOPOTargetSelectMode() {
     updateYOPOTargetMapCamera();
     setYOPOTargetAltPanel(true);
     document.getElementById('yopo-status-text').textContent =
-        'Status: goal select map -- left-drag pan, middle-drag tilt, click to place goal, altitude panel bottom-right / numpad 9/3, numpad fine-tunes, 5 confirm, 0/Esc cancel';
+        'Status: goal select mode';
     console.log('YOPO target select mode: starting at drone pos', { x, y, z });
 }
 
@@ -1606,8 +1606,7 @@ function applyYOPOTargetPick(p) {
     const statusEl = document.getElementById('yopo-status-text');
     if (statusEl) {
         statusEl.textContent =
-            `Status: goal picked at (${p.x.toFixed(1)}, ${y.toFixed(1)}, ${p.z.toFixed(1)}) ` +
-            '-- set altitude in the panel / Y input, numpad 5 confirm, Esc cancel';
+            `Status: goal picked at (${p.x.toFixed(1)}, ${y.toFixed(1)}, ${p.z.toFixed(1)})`;
     }
 }
 
