@@ -290,16 +290,21 @@ export class Drone {
         // yopoVertFirstVMax / yopoVertFirstDecel / the descent standoff have NO effect (observed: the
         // descent speed did not move across all three). The old gate (vfH < 20 AND |dy| > 1.2*vfH)
         // only opened almost directly above the goal column, so most descents never took over.
-        this.yopoVertFirstHDist = 35.0;   // Max horizontal distance to the goal for this mode (m):
-                                          // 20 -> 35 so a descent starts being client-driven earlier.
+        this.yopoVertFirstHDist = 50.0;   // Max horizontal distance to the goal for this mode (m):
+                                          // 20 -> 35 -> 50: a descent starts being client-driven even
+                                          // earlier, so the drone climbs / descends onto the goal altitude
+                                          // instead of cruising straight PAST the goal column (the "flies
+                                          // past the goal" overshoot).
                                           // Wider = straight altitude changes start earlier (and the
                                           // cruise floor stands down over a wider area), narrower =
                                           // the network keeps cruising longer first
-        this.yopoVertFirstMinDY = 4.0;    // Min |height error| to engage (m); released below 0.6x of it
-        this.yopoVertFirstRatio = 0.9;    // The height error must also exceed this multiple of the
+        this.yopoVertFirstMinDY = 3.0;    // Min |height error| to engage (m); released below 0.6x of it.
+                                          // 4.0 -> 3.0: take over the vertical channel a touch sooner.
+        this.yopoVertFirstRatio = 0.7;    // The height error must also exceed this multiple of the
                                           // horizontal offset, so a far-away goal keeps cruising.
-                                          // 1.2 -> 0.9: the old value required the drone to be nearly
-                                          // overhead before the descent override opened at all.
+                                          // 1.2 -> 0.9 -> 0.7: open the descent override while the height
+                                          // error still clearly dominates, so it engages before the cruise
+                                          // floor pushes the drone past the goal column.
         this.yopoVertFirstKp = 1.5;       // P gain on the height error -> climb / descent speed
         this.yopoVertFirstVMax = 10.0;    // Hard cap on that speed (m/s): 6.0 -> 10.0. This is the climb /
                                           // descent speed held while going straight up / down onto the goal
@@ -339,7 +344,7 @@ export class Drone {
         // (low layer while descending, high layer while climbing) into the lateral repulsion, so it
         // shifts sideways before arriving. 1.0 = as strong as a ring obstacle; lower it if the drone
         // drifts sideways too eagerly while changing altitude.
-        this.yopoVertLookWeight = 0.9;
+        this.yopoVertLookWeight = 1.4;   // RAISED 0.9 -> 1.4: stronger side-shift away from a lower/upper-side obstacle, so the drone moves aside BEFORE reaching that altitude (fixes "below avoidance not timely").
         this.yopoVertFirstHScale = 0.3;   // Fraction of the horizontal command kept: it still creeps
                                           // onto the goal column instead of hovering in place
         this.yopoVertFirstMinV = 1.0;     // If the clearance only allows less than this (m/s), stand
@@ -3148,15 +3153,19 @@ export class Drone {
             ringAge[i] = 0;
             distsHigh[i] = dists[i];
             distsHigh2[i] = dists[i];
-            distsLow[i] = dists[i];
+            // Probe the LOW layer on EVERY ray (not just the forward-most 3): a lower-SIDE obstacle
+            // in any direction is then anticipated by the vertical look-ahead repulsion, not only
+            // one dead ahead. This is the core fix for "below avoidance reacts too late while
+            // descending / climbing" -- the drone now shifts aside before reaching that altitude.
+            distsLow[i] = lowOk ? rayDist(dirs[i], yLow) : dists[i];
         }
-        // Vertical over/under layers along the forward-most rays: every cycle, fresh.
+        // Vertical OVER layers along the forward-most rays: every cycle, fresh. (The low layer is
+        // already probed on all rays in the main loop above, so it is not repeated here.)
         // Gating these on the PREVIOUS cycle's "forward corridor blocked" verdict made vertical
         // clearing depend on a one-cycle-old decision, so it could miss the gap and never trigger.
         for (const i of vProbeIdx) {
             distsHigh[i] = rayDist(dirs[i], yHigh);
             distsHigh2[i] = rayDist(dirs[i], yHigh2);
-            distsLow[i] = lowOk ? rayDist(dirs[i], yLow) : dists[i];
         }
 
 
@@ -3395,8 +3404,11 @@ export class Drone {
         // before it gets there. vSafeDown / vSafeUp only guard the clearance STRAIGHT below / above,
         // so a lower-SIDE obstacle was previously not covered by anything at all.
         {
-            const lookDown = velTargetY < -0.5;
-            const lookUp = velTargetY > 0.5;
+            // Engage the vertical look-ahead as soon as there is ANY descent / ascent intent, not
+            // only past 0.5 m/s. A slow descent still dives into a lower-side obstacle, so
+            // anticipating it earlier removes the "below avoidance too late" lag.
+            const lookDown = velTargetY < -0.15;
+            const lookUp = velTargetY > 0.15;
             // distsLow is only a real low-layer ray when lowOk holds (otherwise it is a copy of the
             // current layer, which would double-count the ring repulsion); distsHigh is only real on
             // the indices that actually got a high probe.
