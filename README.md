@@ -10,7 +10,7 @@
 
 > **YOPO 导航界面展示**：右下角为机头 360° ERP 全景 RGB 与 DA360 深度图，左下角为 Target Map 俯视小地图（无人机与目标点的相对位置），右侧面板用于选取目标点、开始/停止导航，并显示导航状态、到目标距离与推理计数。
 
-[🎬 点击观看完整功能演示（303MB 高清）](https://wuuwuu26.github.io/MindCloud_World_Fly_Private/video.html)
+[🎬 点击观看完整功能演示（247MB 高清）](https://wuuwuu26.github.io/MindCloud_World_Fly_Private/video.html)
 
 浏览器中的 Google Photorealistic 3D Tiles 穿越机驾驶器，集成 YOPO 端到端神经网络自主导航（3D 避障）。进入页面后选择城市、放置出生点，然后用键盘、手柄或 RC 遥控器飞行，或设置目标点让 YOPO 自主导航。右下角可显示机头 360 ERP 全景 RGB 和 DA360 深度。
 
