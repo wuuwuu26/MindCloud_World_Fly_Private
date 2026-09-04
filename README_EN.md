@@ -27,9 +27,9 @@ depth map.
 - [Requirements](#requirements)
 - [Clone the Repository](#clone-the-repository)
 - [Quick Start (Bring Up Every Service at Once)](#quick-start-bring-up-every-service-at-once)
+- [Usage Flow](#usage-flow)
 - [Model Weights](#model-weights)
 - [Docker Build Notes](#docker-build-notes)
-- [Usage Flow](#usage-flow)
 - [How the Panoramic Camera Works](#how-the-panoramic-camera-works)
 - [DA360 Depth Estimation](#da360-depth-estimation)
 - [YOPO Autonomous Navigation](#yopo-autonomous-navigation)
@@ -40,9 +40,9 @@ depth map.
 - [Requirements](#requirements)
 - [Quick Start (First-Time Deployment)](#quick-start-first-time-deployment)
 - [Daily Start / Partial Restart / Stop](#daily-start-partial-restart-stop)
+- [Usage Flow](#usage-flow)
 - [Model Weights](#model-weights)
 - [Docker Build Notes](#docker-build-notes)
-- [Usage Flow](#usage-flow)
 - [Top-Down Minimap (Target Map)](#top-down-minimap-target-map)
 - [Coordinate Systems](#coordinate-systems)
 - [How the Panoramic Camera Works](#how-the-panoramic-camera-works)
@@ -270,6 +270,76 @@ the main process alone:
 ```
 
 
+## Usage Flow
+
+1. Click **Start Google 3D Tiles Flight**.
+2. Wait for the page to enter **PLACEMENT MODE**.
+3. Search for a city or place with the Cesium search box.
+4. Hold `I` and click a building, road or the ground to set the spawn point.
+5. Fine-tune the horizontal position with `W/A/S/D`; hold `Shift` to speed up the adjustment.
+6. Set **SPAWN ALTITUDE (m)**.
+7. Press `O` to confirm the spawn point.
+8. Choose **First Person** or **Third Person** to start flying.
+
+Common keys:
+
+```text
+↑ / ↓       forward / backward
+← / →       strafe left / right
+W / S       ascend / descend
+A / D       yaw left / right
+Shift       boost
+R           reset
+V           cycle view
+P           back to placement mode
+Tab         settings panel
+```
+
+The keyboard works out of the box; gamepads are supported too (but the mapping is yours to tune) and
+are usually detected automatically by Chrome's Gamepad API. RC transmitters or WebHID devices can be
+connected from the settings panel; to check Linux input permissions:
+
+```bash
+./launch.sh --input-status
+./launch.sh --setup-input
+```
+
+### Goal Selection and Navigation
+
+1. In flight mode, press **`T`** to enter goal selection: the main view switches to a **top-down
+   map** with placement-like free camera controls (left-drag pans, middle-drag tilts, wheel zooms).
+   The YOPO menu (bottom-left) appears.
+2. **Left-click anywhere on the map** to place the goal (click again to adjust).
+3. Fine-tune with the **numpad** (directions are relative to the **drone's current nose heading**);
+   the Target X/Y/Z inputs stay in sync with the marker live:
+   - `Numpad 8 / 2`: forward / backward along the nose
+   - `Numpad 4 / 6`: strafe **right / left**, perpendicular to the nose (numlock layout is inverted:
+     4 = the drone's right side, 6 = its left; see `handleYOPOKeyDown` in `src/main.js`)
+   - `Numpad 9 / 3`: ascend / descend
+4. **`Numpad 5`**: confirm the goal and **start navigation automatically** (the follow camera is
+   restored).
+5. **`Numpad 0`** or **`Esc`**: cancel the selection.
+
+During navigation:
+- The drone follows the path with YOPO trajectory commands plus velocity feed-forward
+- Moving the sticks temporarily switches to manual control (navigation resumes when released)
+- **Avoidance (server-side learning-based + client-side geometric reactive, two layers)**: the
+  server strictly follows YOPO and selects the trajectory by `argmin(score)` (learning-based
+  avoidance); while tracking the commands, the client additionally stacks a geometric reactive
+  potential field (360° ray ring: radial push-away, tangential detour, near-obstacle braking,
+  vertical obstacle clearing, detour around vertical obstacle footprints) to cover sudden near
+  obstacles during the depth replanning gap. When the horizontal corridor toward the goal is clear
+  this geometric layer goes to zero and does not interfere with navigation — see "Avoidance
+  Architecture and Tuning".
+- Arrival has two layers: the server flags arrival within 2 m of the goal (`ARRIVE_THRESHOLD`); the
+  client additionally latches arrival within 6.0 m (distance-only, no speed gate; raised 2.0 -> 6.0 so the takeover engages earlier, before the drone closes in far enough to graze a building with its wing during the final descent), so the asynchronous server reply
+  cannot leave it "always one step short"
+- Press **`X`** to end navigation
+
+The flight key list lives in the Tab settings panel under **Flight Controls**; the YOPO menu (goal
+coordinate inputs, key cheat-sheet, navigation status) stays above the bottom-left target map.
+
+
 ## Model Weights
 
 | Model | Shipped with the repo | How to obtain |
@@ -389,76 +459,6 @@ rebuild trigger:
 The build context excludes `.git`, `.gitignore`, `node_modules`, `__pycache__`, `*.pyc`, `scene/*`,
 `.DS_Store`, `asset/gate-paths/*.tmp` and `third_party/DA360/checkpoints` (the DA360 weights), keeping
 unrelated / large files out of the image; the DA360 source still ships inside the image.
-
-
-## Usage Flow
-
-1. Click **Start Google 3D Tiles Flight**.
-2. Wait for the page to enter **PLACEMENT MODE**.
-3. Search for a city or place with the Cesium search box.
-4. Hold `I` and click a building, road or the ground to set the spawn point.
-5. Fine-tune the horizontal position with `W/A/S/D`; hold `Shift` to speed up the adjustment.
-6. Set **SPAWN ALTITUDE (m)**.
-7. Press `O` to confirm the spawn point.
-8. Choose **First Person** or **Third Person** to start flying.
-
-Common keys:
-
-```text
-↑ / ↓       forward / backward
-← / →       strafe left / right
-W / S       ascend / descend
-A / D       yaw left / right
-Shift       boost
-R           reset
-V           cycle view
-P           back to placement mode
-Tab         settings panel
-```
-
-The keyboard works out of the box; gamepads are supported too (but the mapping is yours to tune) and
-are usually detected automatically by Chrome's Gamepad API. RC transmitters or WebHID devices can be
-connected from the settings panel; to check Linux input permissions:
-
-```bash
-./launch.sh --input-status
-./launch.sh --setup-input
-```
-
-### Goal Selection and Navigation
-
-1. In flight mode, press **`T`** to enter goal selection: the main view switches to a **top-down
-   map** with placement-like free camera controls (left-drag pans, middle-drag tilts, wheel zooms).
-   The YOPO menu (bottom-left) appears.
-2. **Left-click anywhere on the map** to place the goal (click again to adjust).
-3. Fine-tune with the **numpad** (directions are relative to the **drone's current nose heading**);
-   the Target X/Y/Z inputs stay in sync with the marker live:
-   - `Numpad 8 / 2`: forward / backward along the nose
-   - `Numpad 4 / 6`: strafe **right / left**, perpendicular to the nose (numlock layout is inverted:
-     4 = the drone's right side, 6 = its left; see `handleYOPOKeyDown` in `src/main.js`)
-   - `Numpad 9 / 3`: ascend / descend
-4. **`Numpad 5`**: confirm the goal and **start navigation automatically** (the follow camera is
-   restored).
-5. **`Numpad 0`** or **`Esc`**: cancel the selection.
-
-During navigation:
-- The drone follows the path with YOPO trajectory commands plus velocity feed-forward
-- Moving the sticks temporarily switches to manual control (navigation resumes when released)
-- **Avoidance (server-side learning-based + client-side geometric reactive, two layers)**: the
-  server strictly follows YOPO and selects the trajectory by `argmin(score)` (learning-based
-  avoidance); while tracking the commands, the client additionally stacks a geometric reactive
-  potential field (360° ray ring: radial push-away, tangential detour, near-obstacle braking,
-  vertical obstacle clearing, detour around vertical obstacle footprints) to cover sudden near
-  obstacles during the depth replanning gap. When the horizontal corridor toward the goal is clear
-  this geometric layer goes to zero and does not interfere with navigation — see "Avoidance
-  Architecture and Tuning".
-- Arrival has two layers: the server flags arrival within 2 m of the goal (`ARRIVE_THRESHOLD`); the
-  client additionally latches arrival within 6.0 m (distance-only, no speed gate; raised 2.0 -> 6.0 so the takeover engages earlier, before the drone closes in far enough to graze a building with its wing during the final descent), so the asynchronous server reply
-  cannot leave it "always one step short"
-- Press **`X`** to end navigation
-
-The flight key list lives in the Tab settings panel under **Flight Controls**; the YOPO menu (goal
-coordinate inputs, key cheat-sheet, navigation status) stays above the bottom-left target map.
 
 
 ## Top-Down Minimap (Target Map)
