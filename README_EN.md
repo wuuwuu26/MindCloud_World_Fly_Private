@@ -13,7 +13,7 @@
 > drone's position relative to the goal), and the panel on the right picks the goal, starts/stops
 > navigation, and displays navigation status, distance to the goal and the inference count.
 
-[🎬 Watch the full demo (209MB HD)](https://wuuwuu26.github.io/MindCloud_World_Fly_Private/video_en.html)
+[🎬 Watch the demos (continuous avoidance 170MB + escape 70MB HD)](https://wuuwuu26.github.io/MindCloud_World_Fly_Private/video_en.html)
 
 A browser-based FPV drone flying through Google Photorealistic 3D Tiles, with YOPO end-to-end
 neural-network autonomous navigation (3D obstacle avoidance). Pick a city, place a spawn point,
@@ -823,16 +823,20 @@ replanning more frequent, the blind-flight segments shorter and avoidance smooth
 
 ### Goal Selection and Navigation
 
-1. In flight mode, press **`T`** (or click **"Pick Target"** in the YOPO panel on the right) to start
-   setting the goal.
-2. The goal starts at the drone's current position; move it with the **numpad** (directions are
-   relative to the **drone's current nose heading**):
+1. In flight mode, press **`T`** to enter goal selection: the main view switches to a **top-down
+   map** with placement-like free camera controls (left-drag pans, middle-drag tilts, wheel zooms).
+   The YOPO menu (bottom-left) and the **TARGET ALTITUDE** panel (bottom-right) appear.
+2. **Left-click anywhere on the map** to place the goal (click again to adjust); set the altitude by
+   typing in the bottom-right panel or scrolling over it (±1 m, Shift ±5 m).
+3. Fine-tune with the **numpad** (directions are relative to the **drone's current nose heading**);
+   the Target X/Y/Z inputs stay in sync with the marker live:
    - `Numpad 8 / 2`: forward / backward along the nose
    - `Numpad 4 / 6`: strafe **right / left**, perpendicular to the nose (numlock layout is inverted:
      4 = the drone's right side, 6 = its left; see `handleYOPOKeyDown` in `src/main.js`)
    - `Numpad 9 / 3`: ascend / descend
-3. **`Numpad 5`**: confirm the goal and **start navigation automatically**.
-4. **`Numpad 0`** or **`Esc`**: cancel the selection.
+4. **`Numpad 5`**: confirm the goal and **start navigation automatically** (the follow camera is
+   restored).
+5. **`Numpad 0`** or **`Esc`**: cancel the selection.
 
 During navigation:
 - The drone follows the path with YOPO trajectory commands plus velocity feed-forward
@@ -848,10 +852,10 @@ During navigation:
 - Arrival has two layers: the server flags arrival within 2 m of the goal (`ARRIVE_THRESHOLD`); the
   client additionally latches arrival within 6.0 m (distance-only, no speed gate; raised 2.0 -> 6.0 so the takeover engages earlier, before the drone closes in far enough to graze a building with its wing during the final descent), so the asynchronous server reply
   cannot leave it "always one step short"
-- Press **`X`** (or click **"Stop Nav"**) to end navigation
+- Press **`X`** to end navigation
 
-The goal marker stays visible while navigating, after arrival and after stopping, until you pick a
-new goal or cancel it, so you can still see the goal position on the second navigation.
+The flight key list lives in the Tab settings panel under **Flight Controls**; the YOPO menu (goal
+coordinate inputs, key cheat-sheet, navigation status) stays above the bottom-left target map.
 
 ### Top-Down Minimap (Target Map)
 
