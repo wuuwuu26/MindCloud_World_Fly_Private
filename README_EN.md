@@ -39,7 +39,7 @@ depth map.
 
 - [Requirements](#requirements)
 - [Quick Start (First-Time Deployment)](#quick-start-first-time-deployment)
-- [Daily Start / Partial Restart / Stop](#daily-start-partial-restart-stop)
+- [How to Stop](#how-to-stop)
 - [Usage Flow](#usage-flow)
 - [Model Weights](#model-weights)
 - [Docker Build Notes](#docker-build-notes)
@@ -228,47 +228,13 @@ Open `http://127.0.0.1:8080` → click **Start Google 3D Tiles Flight** → pick
 | DA360 stays not-ready for a long time | check `/tmp/restart_da360.log`; if weights are missing the script auto-calls `download_da360_model.sh`; slowness is usually the Google Drive download |
 | YOPO first start is slow | with TensorRT enabled but `asset/yopo-trt/yopo_trt.pth` absent, the engine is baked in-container with the GPU and written back to that dir, then loaded directly afterwards |
 
-## Daily Start / Partial Restart / Stop
+## How to Stop
 
-After first-time deployment (see the previous section), daily use is just `./restart_all.sh`. When the
-images already exist they are not rebuilt, so this is the fastest restart; all three services run
-detached in the background by default:
+Stop all background containers (same stop logic as restart_all.sh, -v cleans anonymous volumes):
 
 ```bash
-./restart_all.sh                                   # restart everything
-# Restart only part of the services (keep the rest; all three run detached in the background by default)
-./restart_all.sh --no-da360        # restart YOPO + main flight only
-./restart_all.sh --no-yopo         # restart DA360 + main flight only
-./restart_all.sh --no-main         # restart DA360 + YOPO only
-
-# Follow one service's log (container names are in the table below)
-docker logs -f mindcloud-yopo-api
-
-# Stop all background containers (same stop logic as restart_all.sh, -v cleans anonymous volumes)
 docker rm -fv google-tiles-flight mindcloud-da360-api mindcloud-yopo-api
 ```
-
-The three container names are defined by `MAIN_NAME` / `DA360_NAME` / `YOPO_NAME` near the top of
-[restart_all.sh](restart_all.sh) (matching the defaults of each entry script):
-
-| Container | Purpose | Defined in |
-|-----------|---------|------------|
-| `google-tiles-flight` | Main flight process (`http://127.0.0.1:8080`) | `launch.sh`, `NAME="${NAME:-google-tiles-flight}"` |
-| `mindcloud-da360-api` | DA360 depth service (`http://127.0.0.1:5688`) | `scripts/start_da360_api.sh`, `DA360_CONTAINER_NAME` |
-| `mindcloud-yopo-api` | YOPO avoidance backend (`http://127.0.0.1:5689`) | `scripts/start_yopo_api.sh`, `YOPO_CONTAINER_NAME` |
-
-The container names in `restart_all.sh` are **hard-coded assignments** (`DA360_NAME=` / `YOPO_NAME=` /
-`MAIN_NAME=`), which **do not accept environment-variable overrides** — `DA360_CONTAINER_NAME=my-da360
-./restart_all.sh` has no effect. To rename them, edit those three variables; or call the individual
-entry scripts, which do honour `DA360_CONTAINER_NAME` / `YOPO_CONTAINER_NAME` / `NAME`.
-
-If you only want to fly first (pure keyboard/gamepad/RC, no sub-services needed), you can also run
-the main process alone:
-
-```bash
-./launch.sh
-```
-
 
 ## Usage Flow
 

@@ -19,7 +19,7 @@
 
 - [环境要求](#环境要求)
 - [从零开始（首次部署）](#从零开始首次部署)
-- [日常启动 / 部分重启 / 停止](#日常启动-部分重启-停止)
+- [如何停止](#如何停止)
 - [使用流程说明](#使用流程说明)
 - [模型权重](#模型权重)
 - [Docker 构建说明](#docker-构建说明)
@@ -177,36 +177,12 @@ curl http://127.0.0.1:5689/yopo/status   # YOPO：服务状态
 | DA360 长时间不 ready | 看 `/tmp/restart_da360.log`；权重缺失时脚本会自动调用 `download_da360_model.sh`，慢通常是 Google Drive 下载慢 |
 | YOPO 首次启动较慢 | 启用 TensorRT 但 `asset/yopo-trt/yopo_trt.pth` 不存在时，会在容器内用 GPU 现场固化引擎并写回该目录，之后直接加载 |
 
-## 日常启动 / 部分重启 / 停止
+## 如何停止
 
-首次部署完成后（见上一节），日常只需 `./restart_all.sh`。镜像已存在时不会重建，所以这是最快的重启方式；三个服务默认都以后台 detach 方式运行：
+停止全部后台容器（与 restart_all.sh 的停止逻辑一致，带 -v 清理匿名卷）：
 
 ```bash
-./restart_all.sh                 # 全部重启
-./restart_all.sh --no-da360      # 只重启 YOPO + 主飞行（DA360 保留）
-./restart_all.sh --no-yopo       # 只重启 DA360 + 主飞行（YOPO 保留）
-./restart_all.sh --no-main       # 只重启 DA360 + YOPO（主飞行保留）
-
-docker logs -f mindcloud-yopo-api   # 查看某服务日志
-
-# 停止全部后台容器（与 restart_all.sh 的停止逻辑一致，带 -v 清理匿名卷）
 docker rm -fv google-tiles-flight mindcloud-da360-api mindcloud-yopo-api
-```
-
-容器名由 [restart_all.sh](restart_all.sh) 顶部的 `MAIN_NAME` / `DA360_NAME` / `YOPO_NAME` 定义（与各入口脚本的默认容器名一致）：
-
-| 容器名 | 用途 | 定义处 |
-|--------|------|--------|
-| `google-tiles-flight` | 主飞行进程（`http://127.0.0.1:8080`） | `launch.sh` 的 `NAME="${NAME:-google-tiles-flight}"` |
-| `mindcloud-da360-api` | DA360 深度服务（`http://127.0.0.1:5688`） | `scripts/start_da360_api.sh` 的 `DA360_CONTAINER_NAME` |
-| `mindcloud-yopo-api` | YOPO 避障后端（`http://127.0.0.1:5689`） | `scripts/start_yopo_api.sh` 的 `YOPO_CONTAINER_NAME` |
-
-容器名在 `restart_all.sh` 里是**硬编码赋值**（`DA360_NAME=` / `YOPO_NAME=` / `MAIN_NAME=`），**不接受环境变量覆盖**——`DA360_CONTAINER_NAME=my-da360 ./restart_all.sh` 不会生效。要改名请直接改这三个变量；或者单独调用对应的入口脚本，那三个脚本支持 `DA360_CONTAINER_NAME` / `YOPO_CONTAINER_NAME` / `NAME` 环境变量。
-
-若只想先飞（纯键盘/手柄/RC，不依赖子服务），也可单独运行主进程：
-
-```bash
-./launch.sh
 ```
 
 ## 使用流程说明
