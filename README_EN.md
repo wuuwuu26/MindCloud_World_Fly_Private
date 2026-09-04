@@ -25,19 +25,6 @@ depth map.
 **Contents**
 
 - [Requirements](#requirements)
-- [Clone the Repository](#clone-the-repository)
-- [Quick Start (Bring Up Every Service at Once)](#quick-start-bring-up-every-service-at-once)
-- [Usage Flow](#usage-flow)
-- [Model Weights](#model-weights)
-- [Docker Build Notes](#docker-build-notes)
-- [How the Panoramic Camera Works](#how-the-panoramic-camera-works)
-- [DA360 Depth Estimation](#da360-depth-estimation)
-- [YOPO Autonomous Navigation](#yopo-autonomous-navigation)
-
-
-**Contents**
-
-- [Requirements](#requirements)
 - [Quick Start (First-Time Deployment)](#quick-start-first-time-deployment)
 - [How to Stop](#how-to-stop)
 - [Usage Flow](#usage-flow)
