@@ -98,7 +98,7 @@ flowchart TD
         Probe -->|是| Near{⑫ 距目标 < 12 m 且水平通道畅通？}
         Near -->|是| Converge["⑬ 收敛模式：方向性绕行归零（rep/tan/vGo）<br/>刹车全开、不再限速，仅留垂直安全 vSafe + 碰撞兜底<br/>由跟踪指令直接向目标收敛"]
         Near -->|否| Field["⑭ 几何反应式修正（优先于 YOPO 前馈）<br/>rep 推离 · tan 绕行 · vGo 足迹绕行<br/>vRep 越障 · upPush 抬升 · 垂直安全底线 vSafe<br/>刹车 brake + close-gate 限速"]
-        Probe -->|否| Zero["⑮ 该层输出归零，沿用 YOPO 跟踪后的 velTarget（不打扰主航线）"]
+        Probe -->|否| Zero["⑮ 修正归零（rep/tan/brake 不输出），沿用 YOPO 跟踪后的 velTarget<br/>但畅通分支并非纯直通，仍保留两组目标向整形：<br/>巡航速度地板——朝目标分量补足至 ≥ 12 m/s（yopoCruiseMinSpd，距目标 > 5 m 且未到达）<br/>末段进近限速——√(2·decel·(d−6)) 随距离收敛，防冲过目标"]
         Converge --> Synth[⑯ 合成修正后的速度指令 = velTarget + 射线修正]
         Field --> Synth
         Zero --> Synth

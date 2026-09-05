@@ -119,7 +119,7 @@ flowchart TD
         Probe -->|yes| Near{⑫ Within 12 m of goal AND the horizontal corridor is clear?}
         Near -->|yes| Converge["⑬ Convergence mode: directional detour zeroed (rep/tan/vGo)<br/>brake fully open (no speed limit), only vertical safety vSafe + collision backstop remain<br/>the tracked command converges straight onto the goal"]
         Near -->|no| Field["⑭ Geometric reactive correction (overrides YOPO feed-forward)<br/>rep push-away · tan detour · vGo footprint detour<br/>vRep clearing · upPush lift · vertical safety floor vSafe<br/>brake + close-gate speed limit"]
-        Probe -->|no| Zero["⑮ Layer outputs zero; uses the YOPO-tracked velTarget (no interference)"]
+        Probe -->|no| Zero["⑮ Correction zeroed (rep/tan/brake output nothing); uses the YOPO-tracked velTarget<br/>but the clear branch is NOT a pure pass-through — two goalward shapers remain:<br/>cruise speed floor — goalward component topped up to ≥ 12 m/s (yopoCruiseMinSpd, > 5 m from goal, not arrived)<br/>final-approach governor — √(2·decel·(d−6)) converges with distance, preventing overshoot"]
         Converge --> Synth[⑯ Compose corrected command = velTarget + ray correction]
         Field --> Synth
         Zero --> Synth
