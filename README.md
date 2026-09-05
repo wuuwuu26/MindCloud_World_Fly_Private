@@ -18,6 +18,7 @@
 **目录**
 
 - [环境要求](#环境要求)
+- [导航总览（YOPO 与射线避障如何分工）](#导航总览yopo-与射线避障如何分工)
 - [从零开始（首次部署）](#从零开始首次部署)
 - [如何停止](#如何停止)
 - [使用流程说明](#使用流程说明)
@@ -60,6 +61,42 @@
 | YOPO 配置 | TensorRT 加速，`YOPO_VELOCITY=15` |
 
 > 显存更小（如 6GB 及以下）的 GPU 可下调前端 `da360UploadScale` / `panoWidth` 来降低上传与推理尺寸（从而降低占用）；显存更充裕的卡可上调以提升深度精度。注意 `DA360_INPUT_SCALE` 等服务端变量对推理分辨率无效，详见「DA360 深度估计」。
+
+## 导航总览（YOPO 与射线避障如何分工）
+
+下图说明一次自主导航里，YOPO（服务端·学习型路径规划）与射线避障（客户端·几何反应式兜底）各自负责什么、如何协同：
+
+```mermaid
+flowchart TD
+    Start([用户设定目标点]) --> Depth[DA360 全景深度估计]
+    Depth --> Calib[稀疏射线米制标定，输出 384×192 ERP 深度图]
+    Calib --> YIN
+
+    subgraph YOPO["YOPO 的角色 · 服务端 · 学习型路径规划"]
+        YIN[接收 ERP 深度 + 里程计 + 目标点]
+        YIN --> Cands[网络输出 72 条候选轨迹及 score]
+        Cands --> Argmin[argmin score 选最优轨迹，学习式避障]
+        Argmin --> Final[距目标 12 m 内由服务端几何多项式接管进近]
+    end
+
+    Final --> Exec[客户端级联 PID 跟踪轨迹指令]
+
+    subgraph RAY["射线避障的角色 · 客户端 · 几何反应式兜底"]
+        Exec --> Probe{"Cesium 射线环探测到近障？"}
+        Probe -->|是| Field[几何反应式势场：rep 推离 / tan 绕行 / brake 刹车 / vRep 越障 / vGo 足迹绕行 / 垂直安全底线]
+        Probe -->|否| Zero[该层完全归零，不干扰 YOPO 规划]
+        Field --> Exec
+        Zero --> Exec
+    end
+
+    Exec --> Arrive{"到达目标 2 m 内？"}
+    Arrive -->|否| YIN
+    Arrive -->|是| End([目标点悬停，按 X 结束])
+
+    Note["协同：YOPO 负责主航线规划与学习式避障；射线层在深度重规划间隙约 70 ms 兜底突发近障，路径畅通时自动关闭"]
+    Note -.-> YOPO
+    Note -.-> RAY
+```
 
 ## 从零开始（首次部署）
 
@@ -465,46 +502,6 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 ## YOPO 自主导航
 
 基于 YOPO 端到端导航网络，无人机可自主飞行到指定目标点。YOPO 接收 ERP 全景深度图、里程计和目标点，输出位置/速度/加速度/偏航指令，通过 SimpleFlight 级联 PID 控制器驱动无人机。
-
-整体流程一览（下文按这条主干线逐段展开）：
-
-```mermaid
-mindmap
-  root((YOPO 自主导航))
-    设定目标
-      按 T 进入选取模式
-      左键点击地图放置
-      数字键盘微调
-      Numpad 5 确认并开始
-      Numpad 0 或 Esc 取消
-    深度输入
-      DA360 全景深度估计
-      推理尺寸随上传图
-      稀疏射线米制标定
-      输出 384x192 ERP
-    服务端决策
-      网络推理 72 条候选
-      argmin score 选最优
-      学习式避障
-      最后 12m 几何接管
-      五阶多项式 50Hz
-    客户端执行
-      级联 PID 跟踪指令
-      几何反应式势场
-        rep 径向推离
-        tan 切向绕行
-        brake 近障刹车
-        vRep 竖直越障
-        vGo 足迹绕行
-        垂直安全底线
-      走廊畅通则归零
-      机翼包络守卫 12m
-    到达与结束
-      服务端 2m 到达
-      客户端 6m 兜底
-      目标点位置悬停
-      按 X 结束导航
-```
 
 ### 导航架构（对齐 YOPO 原版）
 

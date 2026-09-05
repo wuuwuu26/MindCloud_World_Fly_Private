@@ -25,6 +25,7 @@ depth map.
 **Contents**
 
 - [Requirements](#requirements)
+- [Navigation Overview (How YOPO and Ray-Based Avoidance Divide the Work)](#navigation-overview-how-yopo-and-ray-based-avoidance-divide-the-work)
 - [Quick Start (First-Time Deployment)](#quick-start-first-time-deployment)
 - [How to Stop](#how-to-stop)
 - [Usage Flow](#usage-flow)
@@ -79,6 +80,44 @@ main flight all brought up together):
 > depth accuracy. Note that `DA360_INPUT_SCALE` and friends have no effect on the inference resolution
 > — see "DA360 Depth Estimation".
 
+
+## Navigation Overview (How YOPO and Ray-Based Avoidance Divide the Work)
+
+The diagram below shows, for one autonomous flight, what YOPO (server-side, learning-based
+path planning) and ray-based avoidance (client-side, geometric reactive backstop) are each
+responsible for, and how they cooperate:
+
+```mermaid
+flowchart TD
+    Start([User sets the goal]) --> Depth[DA360 panoramic depth estimation]
+    Depth --> Calib[Sparse-ray metric calibration, outputs 384×192 ERP depth map]
+    Calib --> YIN
+
+    subgraph YOPO["YOPO's role · server-side · learning-based path planning"]
+        YIN[Receives ERP depth + odometry + goal]
+        YIN --> Cands[Network outputs 72 candidate trajectories and their scores]
+        Cands --> Argmin[argmin score selects the best trajectory, learning-based avoidance]
+        Argmin --> Final[Within 12 m of the goal, server-side geometric polynomial takes over the final approach]
+    end
+
+    Final --> Exec[Client-side cascaded PID tracks the trajectory command]
+
+    subgraph RAY["Ray-based avoidance's role · client-side · geometric reactive backstop"]
+        Exec --> Probe{"Cesium ray-ring detects a near obstacle?"}
+        Probe -->|yes| Field[Geometric reactive field: rep push-away / tan detour / brake / vRep clearing / vGo footprint detour / vertical safety floor]
+        Probe -->|no| Zero[This layer is fully zeroed, does not disturb YOPO's plan]
+        Field --> Exec
+        Zero --> Exec
+    end
+
+    Exec --> Arrive{"Within 2 m of the goal?"}
+    Arrive -->|no| YIN
+    Arrive -->|yes| End([Hold at the goal, press X to end])
+
+    Note["Cooperation: YOPO owns the main route and learning-based avoidance; the ray layer backstops sudden obstacles during the ~70 ms depth-replanning gap, and auto-disables when the corridor is clear"]
+    Note -.-> YOPO
+    Note -.-> RAY
+```
 
 ## Quick Start (First-Time Deployment)
 
@@ -663,46 +702,6 @@ a valid depth map arrives and navigation resumes.
 Powered by the YOPO end-to-end navigation network, the drone can fly autonomously to a given goal.
 YOPO takes the ERP panoramic depth map, odometry and the goal, outputs position/velocity/
 acceleration/yaw commands, and drives the drone through the SimpleFlight cascaded PID controller.
-
-The whole flow at a glance (the sections below expand it stage by stage):
-
-```mermaid
-mindmap
-  root((YOPO Autonomous Navigation))
-    Set the goal
-      Press T for goal mode
-      Left-click to place
-      Numpad fine-tuning
-      Numpad 5 confirms and starts
-      Numpad 0 or Esc cancels
-    Depth input
-      DA360 panoramic depth
-      Inference size follows upload
-      Sparse-ray metric calibration
-      384x192 ERP output
-    Server-side decision
-      72 candidate trajectories
-      argmin score selection
-      Learning-based avoidance
-      Final 12 m geometric takeover
-      Quintic polynomial at 50 Hz
-    Client-side execution
-      Cascaded PID tracking
-      Geometric reactive field
-        rep radial push-away
-        tan tangential detour
-        brake near-obstacle braking
-        vRep vertical clearing
-        vGo footprint detour
-        Vertical safety floor
-      Zeroed when corridor is clear
-      12 m wing-envelope guard
-    Arrival and exit
-      Server 2 m arrival
-      Client 6 m backstop
-      Hold at the goal
-      Press X to end
-```
 
 ### Navigation Architecture (Aligned with Upstream YOPO)
 
