@@ -89,34 +89,43 @@ responsible for, and how they cooperate:
 
 ```mermaid
 flowchart TD
-    Start([User sets the goal]) --> Depth[DA360 panoramic depth estimation]
-    Depth --> Calib[Sparse-ray metric calibration, outputs 384×192 ERP depth map]
+    classDef yopo fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a;
+    classDef ray fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d;
+    classDef dec fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12;
+    classDef term fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95;
+
+    Start([① User sets the goal]) --> Depth[② DA360 panoramic depth estimation]
+    Depth --> Calib[③ Sparse-ray metric calibration → 384×192 ERP depth map]
     Calib --> YIN
 
-    subgraph YOPO["YOPO's role · server-side · learning-based path planning"]
-        YIN[Receives ERP depth + odometry + goal]
-        YIN --> Cands[Network outputs 72 candidate trajectories and their scores]
-        Cands --> Argmin[argmin score selects the best trajectory, learning-based avoidance]
-        Argmin --> Final[Within 12 m of the goal, server-side geometric polynomial takes over the final approach]
+    subgraph YOPO["YOPO · server-side · learning-based path planning"]
+        direction LR
+        YIN[④ Receives ERP depth + odometry + goal]
+        YIN --> Cands[⑤ Network inference: 72 candidate trajectories + score]
+        Cands --> Argmin[⑥ argmin score selects best trajectory · learning-based avoidance]
+        Argmin --> Final[⑦ Within 12 m of goal, server-side geometric polynomial takes over]
     end
+    class YIN,Cands,Argmin,Final yopo;
 
-    Final --> Exec[Client-side cascaded PID tracks the trajectory command]
+    Final --> Exec[⑧ Client-side cascaded PID tracks the command]
 
-    subgraph RAY["Ray-based avoidance's role · client-side · geometric reactive backstop"]
-        Exec --> Probe{"Cesium ray-ring detects a near obstacle?"}
-        Probe -->|yes| Field[Geometric reactive field: rep push-away / tan detour / brake / vRep clearing / vGo footprint detour / vertical safety floor]
-        Probe -->|no| Zero[This layer is fully zeroed, does not disturb YOPO's plan]
-        Field --> Exec
-        Zero --> Exec
+    subgraph RAY["Ray-based avoidance · client-side · geometric reactive backstop"]
+        direction LR
+        Exec --> Probe{"⑨ Cesium ray-ring detects a near obstacle?"}
+        Probe -->|yes| Field["⑩ Geometric reactive field<br/>rep push-away · tan detour · brake<br/>vRep clearing · vGo footprint detour · vertical safety floor"]
+        Probe -->|no| Straight["⑪ Layer fully zeroed, flies straight per YOPO command"]
+        Field --> Resume[⑫ Compose the corrected velocity command]
+        Straight --> Resume
     end
+    class Exec,Probe,Field,Straight,Resume ray;
 
-    Exec --> Arrive{"Within 2 m of the goal?"}
+    Resume --> Arrive{"⑬ Within 2 m of the goal?"}
     Arrive -->|no| YIN
-    Arrive -->|yes| End([Hold at the goal, press X to end])
+    Arrive -->|yes| End([⑭ Hold at the goal, press X to end])
+    class Arrive dec;
+    class Start,End term;
 
-    Note["Cooperation: YOPO owns the main route and learning-based avoidance; the ray layer backstops sudden obstacles during the ~70 ms depth-replanning gap, and auto-disables when the corridor is clear"]
-    Note -.-> YOPO
-    Note -.-> RAY
+    Note["Cooperation: YOPO owns the main route and learning-based avoidance; the ray layer backstops sudden obstacles during the ~70 ms depth-replanning gap and auto-disables when the corridor is clear"]
 ```
 
 ## Quick Start (First-Time Deployment)

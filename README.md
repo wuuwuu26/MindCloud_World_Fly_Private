@@ -68,34 +68,43 @@
 
 ```mermaid
 flowchart TD
-    Start([用户设定目标点]) --> Depth[DA360 全景深度估计]
-    Depth --> Calib[稀疏射线米制标定，输出 384×192 ERP 深度图]
+    classDef yopo fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a;
+    classDef ray fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d;
+    classDef dec fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12;
+    classDef term fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95;
+
+    Start([① 用户设定目标点]) --> Depth[② DA360 全景深度估计]
+    Depth --> Calib[③ 稀疏射线米制标定 → 384×192 ERP 深度图]
     Calib --> YIN
 
-    subgraph YOPO["YOPO 的角色 · 服务端 · 学习型路径规划"]
-        YIN[接收 ERP 深度 + 里程计 + 目标点]
-        YIN --> Cands[网络输出 72 条候选轨迹及 score]
-        Cands --> Argmin[argmin score 选最优轨迹，学习式避障]
-        Argmin --> Final[距目标 12 m 内由服务端几何多项式接管进近]
+    subgraph YOPO["YOPO · 服务端 · 学习型路径规划"]
+        direction LR
+        YIN[④ 接收 ERP 深度 + 里程计 + 目标点]
+        YIN --> Cands[⑤ 网络推理：72 条候选轨迹 + score]
+        Cands --> Argmin[⑥ argmin score 选最优轨迹 · 学习式避障]
+        Argmin --> Final[⑦ 距目标 12 m 内由服务端几何多项式接管进近]
     end
+    class YIN,Cands,Argmin,Final yopo;
 
-    Final --> Exec[客户端级联 PID 跟踪轨迹指令]
+    Final --> Exec[⑧ 客户端级联 PID 跟踪轨迹指令]
 
-    subgraph RAY["射线避障的角色 · 客户端 · 几何反应式兜底"]
-        Exec --> Probe{"Cesium 射线环探测到近障？"}
-        Probe -->|是| Field[几何反应式势场：rep 推离 / tan 绕行 / brake 刹车 / vRep 越障 / vGo 足迹绕行 / 垂直安全底线]
-        Probe -->|否| Zero[该层完全归零，不干扰 YOPO 规划]
-        Field --> Exec
-        Zero --> Exec
+    subgraph RAY["射线避障 · 客户端 · 几何反应式兜底"]
+        direction LR
+        Exec --> Probe{"⑨ Cesium 射线环探测到近障？"}
+        Probe -->|是| Field["⑩ 几何反应式势场<br/>rep 推离 · tan 绕行 · brake 刹车<br/>vRep 越障 · vGo 足迹绕行 · 垂直安全底线"]
+        Probe -->|否| Straight["⑪ 该层完全归零，沿 YOPO 指令直飞"]
+        Field --> Resume[⑫ 合成修正后的速度指令]
+        Straight --> Resume
     end
+    class Exec,Probe,Field,Straight,Resume ray;
 
-    Exec --> Arrive{"到达目标 2 m 内？"}
+    Resume --> Arrive{"⑬ 到达目标 2 m 内？"}
     Arrive -->|否| YIN
-    Arrive -->|是| End([目标点悬停，按 X 结束])
+    Arrive -->|是| End([⑭ 目标点悬停，按 X 结束])
+    class Arrive dec;
+    class Start,End term;
 
-    Note["协同：YOPO 负责主航线规划与学习式避障；射线层在深度重规划间隙约 70 ms 兜底突发近障，路径畅通时自动关闭"]
-    Note -.-> YOPO
-    Note -.-> RAY
+    Note["协同：YOPO 负责主航线规划与学习式避障；射线层在深度重规划间隙（约 70 ms）兜底突发近障，路径畅通时自动关闭"]
 ```
 
 ## 从零开始（首次部署）
