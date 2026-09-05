@@ -126,9 +126,9 @@ flowchart TD
     end
     class Probe,Near,Converge,Field,Zero,Synth ray;
 
-    Synth --> Arrive{"⑰ Arrival latched? (client-side distance-only pre-lock at < 6 m, no speed gate — the only arrival verdict; the server's 2 m flag is internal only and never sent back to the client)"}
+    Synth --> Arrive{"⑰ Arrival latched (yopoArrived)? (the server's 2 m verdict cmd.arrived is latched in main.js, released only when > 6 m from the goal; the client additionally pre-locks at < 6 m distance-only — either one latches)"}
     Arrive -->|no| YIN
-    Arrive -->|yes| End([⑱ Hold at the goal: client-side position-hold PD; the ray layer keeps backstopping (directional push zeroed, passive brake + vSafe still active)])
+    Arrive -->|yes| End([⑱ Hold at the goal: client-side position-hold PD, YOPO replanning stops, the ray layer keeps backstopping (directional push zeroed, passive brake + vSafe still active)])
     class Arrive dec;
     class Start,End term;
 ```

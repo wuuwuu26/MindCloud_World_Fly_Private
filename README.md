@@ -105,9 +105,9 @@ flowchart TD
     end
     class Probe,Near,Converge,Field,Zero,Synth ray;
 
-    Synth --> Arrive{"⑰ 到达锁定？（客户端距目标 < 6 m 距离预锁，无速度门——唯一的到达判定；服务端 2 m 判定仅内部标记，不回传客户端）"}
+    Synth --> Arrive{"⑰ 到达锁存 yopoArrived？（服务端 2 m 判定 cmd.arrived 在 main.js 锁存，离目标 > 6 m 才释放；客户端另有 < 6 m 距离预锁兜底——任一触发即锁存）"}
     Arrive -->|否| YIN
-    Arrive -->|是| End([⑱ 目标点悬停：客户端位置保持 PD，射线层仍兜底（方向性推力归零，被动刹车 + vSafe 生效）])
+    Arrive -->|是| End([⑱ 目标点悬停：客户端位置保持 PD，YOPO 重规划停止，射线层仍兜底（方向性推力归零，被动刹车 + vSafe 生效）])
     class Arrive dec;
     class Start,End term;
 ```
