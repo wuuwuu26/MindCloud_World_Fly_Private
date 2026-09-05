@@ -71,11 +71,13 @@ main flight all brought up together):
 |------|---------------|
 | GPU | NVIDIA GeForce RTX 4070 Laptop GPU (8 GB VRAM) |
 | Driver / CUDA | 595.84 / 13.2 |
-| DA360 config | `DA360_large` + `DA360_INPUT_SCALE=0.65` (model input 672×336), ~92% usage on a single 8GB card |
+| DA360 config | `DA360_large`, inference size = the uploaded image's native size snapped to a multiple of 14 (default 384×192 → 378×196), ~92% usage on a single 8GB card |
 | YOPO config | TensorRT acceleration, `YOPO_VELOCITY=15` |
 
-> On GPUs with less VRAM (6GB or below), lower `DA360_INPUT_SCALE` or `da360UploadScale` to reduce
-> usage; on cards with more headroom you can raise them for better depth accuracy.
+> On GPUs with less VRAM (6GB or below), lower the frontend `da360UploadScale` / `panoWidth` to shrink
+> the upload (and hence the inference) size; on cards with more headroom you can raise them for better
+> depth accuracy. Note that `DA360_INPUT_SCALE` and friends have no effect on the inference resolution
+> — see "DA360 Depth Estimation".
 
 
 ## Quick Start (First-Time Deployment)
@@ -330,7 +332,7 @@ rebuild trigger:
 | Container | Image | Base image | Measured size | Dockerfile | Entry script |
 |-----------|-------|-----------|---------------|------------|--------------|
 | Main flight process | `google-tiles-flight` | `tumgis/3dcitydb-web-map:alpine-v2.0.0` (bundles Node + Cesium) | ≈1 GB | `Dockerfile.cesium` | `launch.sh` |
-| YOPO avoidance backend | `mindcloud-yopo` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime` (CUDA) | ≈35 GB | `Dockerfile.yopo` | `scripts/start_yopo_api.sh` |
+| YOPO avoidance backend | `mindcloud-yopo-api` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime` (CUDA) | ≈35 GB | `Dockerfile.yopo` | `scripts/start_yopo_api.sh` |
 | DA360 depth service | `mindcloud-da360` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime` (CUDA) | ≈28 GB | `Dockerfile.da360` | `scripts/start_da360_api.sh` |
 
 > Sizes are measured on an RTX 4070 Laptop / Ubuntu 24.04 and are for disk estimation only. Daily
@@ -539,17 +541,27 @@ curl http://127.0.0.1:5688/health
 
 To stop or restart DA360, just rerun `restart_all.sh` (or `docker rm -fv mindcloud-da360-api`).
 
-Note that `DA360_large` is used by default and `scripts/start_da360_api.sh` starts its container with
-`DA360_INPUT_SCALE=0.65`, giving a model input of about `672x336` (checkpoint baseline 1036×518 ×
-0.65; verified stable on an RTX 4070 Laptop GPU 8GB; `da360_server.py`'s own default is `1.0`, i.e.
-inference at the checkpoint's native resolution).
+Note that `DA360_large` is used by default. **The inference resolution is decided by the uploaded
+image**: `infer()` performs no scaling and simply snaps the upload size to a multiple of
+`PATCH_SIZE=14` — with the default `384x192` ERP upload the real model input is `378x196`
+(`round(384/14)=27 → 378`, `round(192/14)=14 → 196`). `/health` reports this explicitly as
+`"infer_mode": "native (request resolution, no downscale)"`.
+
+Consequently **`DA360_INPUT_SCALE` / `DA360_INPUT_WIDTH` / `DA360_INPUT_HEIGHT` have no effect on the
+inference resolution**: they are only echoed by `/health` and were once used for the startup warm-up
+(whose single call site hard-codes the scale to `1.0`) — and the one-shot launcher `restart_all.sh`
+sets `DA360_NO_WARMUP=1`, so even that warm-up does not run. `scripts/start_da360_api.sh` still
+starts the container with `DA360_INPUT_SCALE=0.65` (a legacy setting; the checkpoint baseline is
+1036×518), but it does not change the real inference size; `da360_server.py`'s own default for that
+value is `1.0`.
 
 The panorama RGB is captured at `384x192` ERP by default, and that raw size is exactly what the
 bottom-right preview shows. This size is identical to what DA360 outputs and what YOPO consumes, so
-`da360UploadScale` defaults to `1.0` — uploaded as-is with no scaling; the server resizes it to the
-`672x336` model input, infers, and maps the depth back onto `384x192`. The frontend defaults to
-`depthMs=33` (minimum ~30Hz interval between depth requests) and never queues up requests while
-inference is still running.
+`da360UploadScale` defaults to `1.0` — uploaded as-is with no scaling; the server snaps it to
+`378x196` as described above, infers, and maps the depth back onto `384x192` (a difference of only a
+few pixels from the snap). On an RTX 4070 Laptop GPU (8GB) a single DA360 inference takes about
+**45 ms (≈22 Hz)**; the frontend defaults to `depthMs=33` (minimum ~30Hz interval between depth
+requests) and never queues up requests while inference is still running.
 
 Switching models is not recommended by default; in experiments the fast tier of `DA360_large`
 preserves better depth ordering and edge consistency than `DA360_small`. Only override the model
@@ -560,18 +572,22 @@ DA360_MODEL=<large|base|small> ./scripts/download_da360_model.sh
 DA360_MODEL=<large|base|small> ./scripts/start_da360_api.sh
 ```
 
-To actively change the DA360 server-side model input size, set the inference scale or specify the
-model input width/height; too low a `DA360_INPUT_SCALE` can make the large model output banded
-depth, so values below `0.46` are discouraged. The resample filter has **different defaults in two
-places**: `da360_server.py` itself defaults to `bilinear`, while `scripts/start_da360_api.sh`
-overrides it with `bicubic` and forwards it into the container (so `bicubic` is what actually takes
-effect when you use the one-shot launcher):
+To actually change the inference resolution, change the frontend upload size (the server-side
+inference size follows the uploaded image):
 
 ```bash
-DA360_INPUT_SCALE=1.0 ./scripts/start_da360_api.sh
-DA360_INPUT_SCALE=0.46 ./scripts/start_da360_api.sh
-DA360_INPUT_WIDTH=476 ./scripts/start_da360_api.sh
-DA360_INPUT_WIDTH=672 DA360_INPUT_HEIGHT=336 ./scripts/start_da360_api.sh
+# Lower the upload size -> the inference size drops with it (0.5 -> 192×96 -> model input 196×98)
+http://127.0.0.1:8080/?da360UploadScale=0.5
+# Or raise the panorama capture resolution (upload and inference size rise together)
+http://127.0.0.1:8080/?panoWidth=896&panoFace=224
+```
+
+The resample filter has **different defaults in two places**: `da360_server.py` itself defaults to
+`bilinear`, while `scripts/start_da360_api.sh` overrides it with `bicubic` and forwards it into the
+container (so `bicubic` is what actually takes effect when you use the one-shot launcher). This
+filter is what snaps the upload to a multiple of 14:
+
+```bash
 DA360_RESAMPLE=bilinear ./scripts/start_da360_api.sh
 ```
 
@@ -627,9 +643,11 @@ factor `scale` must be estimated so `metric = rel × scale`. The implementation 
    NaN and are flagged by the mask channel (channel 1), which the network ignores the same way as in
    training.
 
-Calibration runs once per DA360 depth frame (DA360 ≈ 22 Hz < the `pickLocalRay` cache TTL of 150 ms, so
-most calibration rays hit the cache and real GPU picks are rare); "move > 1.5 m forces re-calibration"
-acts as a CPU-side backstop for cache bypassing, at zero extra cost.
+Calibration is attempted once per DA360 depth frame (DA360 ≈ 22 Hz < the `pickLocalRay` cache TTL of
+150 ms, so most calibration rays hit the cache and real GPU picks are rare); it enters the calibration
+branch every frame but only updates `scale` when ≥ 3 points hit this frame, otherwise the previous
+frame's `scale` is reused (only a "moved > 1.5 m forces re-calibration" comment remains in the code —
+there is no such implementation).
 
 **When depth is unavailable (DA360 failure/timeout) it does not fall back to Cesium raycasting** —
 YOPO's network input still requires real depth, so the drone hovers in place and keeps retrying until
@@ -672,8 +690,13 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
   the network natively points at the goal.
 - **3D navigation**: no projection onto the horizontal plane; vertical avoidance is decided by the
   network-predicted z terminal state.
-- **Trajectory generation**: three-axis quintic polynomial (Poly5Solver) starting from the last
-  commanded state (`plan_from_reference=True`), so trajectories are continuous and never backtrack.
+- **Trajectory generation**: three-axis quintic polynomial (Poly5Solver). The start point is the
+  **true odometry state extrapolated to "now"** (C0 position / C1 velocity continuous), with C2 taken
+  from the last commanded acceleration — when inference is slow `desire_*` freezes at the tail of the
+  old trajectory, and starting from it would yank the command back and cause a jump at the join, so it
+  is deliberately not used. The `PLAN_FROM_REFERENCE` constant is still there but no longer takes part
+  in any computation (it is only printed in the startup log). Trajectories are continuous and never
+  backtrack.
 - **Control output**: the polynomial is evaluated at 50 Hz → position / velocity / acceleration +
   yaw → tracked by the frontend cascaded PID.
 - **Arrival handling**: the drone tracks the YOPO network trajectory all the way in; only **after arrival is latched** does it switch to a position hold on the goal:
@@ -718,9 +741,10 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
     drone is not stalled metres short.
 - **Depth availability**: when DA360 depth fails or times out it does **not** fall back to raycasting;
   the drone hovers in place and keeps retrying until a valid depth map arrives (see "Depth Map"). The
-  frontend depth request timeout is **6 s**; the server additionally has a depth-age based two-stage
-  protection (`_SA_DEPTH_AGE_WARN = 0.2 s` slows down, `_SA_DEPTH_AGE_STOP = 1.0 s` stops).
-  Note: an earlier version had an "abnormal depth" check that hovered when the whole frame was
+  frontend depth request timeout on the YOPO navigation path is **6 s**. Note: `yopo_server.py` still
+  defines the `_SA_*` constants (`_SA_DEPTH_AGE_WARN = 0.2 s`, `_SA_DEPTH_AGE_STOP = 1.0 s`, ...) but
+  **nothing references them**, so the "depth-age based two-stage slow-down / stop" is not implemented.
+  Separately, an earlier version had an "abnormal depth" check that hovered when the whole frame was
   surrounded within 2 m; it mistook "many near pixels" for a depth failure in real urban building
   clusters and hovered constantly, so it was removed to match upstream. Depth validity is now left to
   the mask channel and the network itself.
@@ -752,8 +776,8 @@ Avoidance has two layers with non-overlapping responsibilities:
 How the client-side geometric layer works (see `_avoidanceVelocity`):
 
 - **Probing**: 24 horizontal rays are cast from the body (radius 65 m, 15° spacing); the 3 rays best
-  aligned with the forward direction additionally probe **two layers up and one layer down**
-  (`high`/`high2`/`low`, 3 layers in total) for the vertical clearing decision; plus straight
+  aligned with the forward direction additionally probe **two layers up** (`high`/`high2`) for the
+  vertical clearing decision; the `low` layer is probed on **all 24 directions**; plus straight
   up/straight down vertical rays.
 - **Components in detail** (`_avoidanceVelocity`):
   - **rep (radial push-away)**: for every ray with `d < pushRange` a **keep-out-shaped** weight
@@ -809,13 +833,18 @@ How the client-side geometric layer works (see `_avoidanceVelocity`):
 - **Output components**: `rep` (radial push-away) / `tan` (tangential detour) / `brake` (near-obstacle
   braking) / `vRep` (vertical obstacle clearing) / `vGo` (horizontal detour around a vertical
   obstacle footprint) / `upPush` + `vSafeDown` (ground and descent safety).
-- **Braking (the ray layer takes priority over the network)**: the hard kinematic brake
+- **Braking (the ray layer takes priority over the network)**: forward speed is the larger of the
+  commanded speed and the drone's actual speed. The hard kinematic brake
   `v_safe = √(2·a·dEff)` plans a safe speed, with `dEff = brakeClear − standoff − reactionDist` and
   `a` the conservative `yopoAvoidBrakeDecel = 3.5 m/s²` (6.5 → 4.5 → 3.5; **only ever lower it** — a
   smaller planned deceleration makes the brake engage earlier and demand a lower target speed; it
   also drives the closing-speed gate `vCloseMax` and the proximity governor). The reaction distance
   `reactionDist = spdFwd × reactionSec` subtracts the dead time, with `yopoAvoidBrakeReaction = 0.46 s`
-  base and `yopoAvoidBrakeReactionHi = 1.25 s` at speed — at 15 m/s that is ~15 m of extra lead. When
+  base and `yopoAvoidBrakeReactionHi = 1.25 s` at speed — at 15 m/s that is ~15 m of extra lead. A
+  **progressive soft brake** runs in parallel, easing the speed down with distance inside `brakeRange`
+  to the `yopoAvoidBrakeFloor = 0.78` floor, and the more conservative of the two layers wins; an
+  obstacle *behind* the goal (`dAhead > distGoalH`) only keeps `yopoAvoidGoalBrakeFloor`, so the final
+  approach is not braked. When
   braking fires it (1) **suppresses the YOPO network's acceleration feed-forward** (otherwise the
   network trajectory's acceleration pushes straight into the obstacle and cancels the braking
   deceleration), (2) injects the strongest deceleration feed-forward directly opposite the current
@@ -823,7 +852,9 @@ How the client-side geometric layer works (see `_avoidanceVelocity`):
   `droneMaxAngle=60`), delivering at least `yopoAvoidBrakeMinFrac=0.85` (≈14.5 m/s²) as soon as
   braking starts, and (3) boosts the attitude-loop gain by `yopoAvoidBrakeAngleGain = 2.2` whenever
   `brake < yopoAvoidBrakeUrgent = 0.7`, cutting the ~0.28 s needed to slew from the cruise tilt to
-  the braking tilt. The brake value itself is **asymmetrically filtered**: tightening applies
+  the braking tilt. The resulting speed is additionally hard-capped along the threat direction by
+  `vCloseMax = √(2·BrakeDecel·dGate)`, so the drone can still stop after `rep`/`tan`/`vGo` are stacked
+  on top. The brake value itself is **asymmetrically filtered**: tightening applies
   instantly, release ramps back with `tau = 0.30 s`, so probe noise cannot turn the speed target into
   a sawtooth. The threat distance `dAhead` takes the **smaller** of the "network-commanded direction"
   and the "drone's actual heading", so the network cannot turn the command aside and thereby exclude
@@ -953,9 +984,12 @@ straight into it" (the avoidance layer is bypassed). Therefore:
 - **All directions, every cycle, all fresh**: the 24 horizontal rays (`yopoAvoidRayCount`) are each
   picked for real **every cycle** (`forceFresh=true`, no cache), with no stride downsampling, no
   round-robin rotation and no mirrored neighbour filling.
-- **Vertical layers (high/high2/low) emitted every cycle**: 3 layers along each of the 3 forward-most
-  rays (+9 rays), and no longer gated by the previous cycle's "corridor blocked" verdict — that
-  one-cycle-old gate used to stop vertical clearing from ever triggering.
+- **Vertical layers emitted every cycle**: the `low` layer is emitted on **all 24 directions**
+  (+24 rays; when `lowOk` is false it degrades to reusing this layer's distance and is not emitted),
+  so a lower-side obstacle in any direction is anticipated by the vertical look-ahead; the `high` /
+  `high2` layers run along the 3 forward-most rays (+6 rays), and are no longer gated by the previous
+  cycle's "corridor blocked" verdict — that one-cycle-old gate used to stop vertical clearing from
+  ever triggering.
 - **Straight up / down**: 1 fresh ray each per cycle (ceiling / floor safety cannot tolerate a stale
   value), no longer skipped "every N cycles".
 
@@ -986,9 +1020,9 @@ are still live and now only interpolate the **action ranges** (`repRange` / `bra
 | `yopoAvoidBrakeRangeHi` | 54.0 | Soft-brake start distance at speed (m) |
 | `yopoAvoidBrakeReaction` | 1.25 | Brake reaction time at speed (s): the lag (attitude build-up + control loop) is converted to a reaction distance `spd × reaction` subtracted from the stopping room, so at 15 m/s braking starts ~15 m earlier and still stops inside the standoff (base tier is 0.46 s) |
 
-Measured rays emitted per cycle: **24 horizontal + 9 vertical-layer + 2 straight up/down = 35 rays,
-all of them fresh GPU picks** (there is no longer a "cache hit costs no pick" part; when `lowOk` is
-false the low layer is not emitted, giving 32).
+Measured rays emitted per cycle: **24 horizontal + 24 low-layer + 6 high-layer (high/high2) + 2
+straight up/down = 56 rays, all of them fresh GPU picks** (there is no longer a "cache hit costs no
+pick" part; when `lowOk` is false the low layer is not emitted, giving 32).
 `yopoAvoidRepRange` (= `goalClear`'s clear threshold) does **not** scale with speed, so widening the
 high-speed action range does not make "the path is actually clear" get misjudged as blocked. Run
 `__yopoPerf()` in the browser console to read live metrics (`fps` / `probeMsAvg` / `probeHz` /

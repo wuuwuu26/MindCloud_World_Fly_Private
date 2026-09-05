@@ -44,7 +44,7 @@
 
 - `curl`：`restart_all.sh` 用它等待服务就绪（一般系统自带）
 - 本地开发模式（`./launch.sh --local`）需要 Python 3
-- 下载 DA360 权重需要 Python 3 + pip（`gdown`）以及可访问 Google Drive 的网络
+- 下载 DA360 权重需要 Python 3 + pip（`gdown`）、`git`（下载脚本缺少 `git` 时会提前中止）以及可访问 Google Drive 的网络
 
 > 首次部署的完整安装命令见「从零开始（首次部署）→ 第 0 步：安装前置软件」。
 
@@ -56,10 +56,10 @@
 |------|------|
 | GPU | NVIDIA GeForce RTX 4070 Laptop GPU（8 GB 显存） |
 | 驱动 / CUDA | 595.84 / 13.2 |
-| DA360 配置 | `DA360_large` + `DA360_INPUT_SCALE=0.65`（模型输入 672×336），单卡 8GB 下约 92% 占用 |
+| DA360 配置 | `DA360_large`，推理尺寸 = 上传图原生尺寸对齐到 14 的倍数（默认 384×192 → 378×196），单卡 8GB 下约 92% 占用 |
 | YOPO 配置 | TensorRT 加速，`YOPO_VELOCITY=15` |
 
-> 显存更小（如 6GB 及以下）的 GPU 可下调 `DA360_INPUT_SCALE` 或 `da360UploadScale` 降低占用；显存更充裕的卡可上调以提升深度精度。
+> 显存更小（如 6GB 及以下）的 GPU 可下调前端 `da360UploadScale` / `panoWidth` 来降低上传与推理尺寸（从而降低占用）；显存更充裕的卡可上调以提升深度精度。注意 `DA360_INPUT_SCALE` 等服务端变量对推理分辨率无效，详见「DA360 深度估计」。
 
 ## 从零开始（首次部署）
 
@@ -276,7 +276,7 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 | 容器 | 镜像 | 基础镜像 | 实测体积 | Dockerfile | 入口脚本 |
 |------|------|----------|----------|------------|----------|
 | 主飞行进程 | `google-tiles-flight` | `tumgis/3dcitydb-web-map:alpine-v2.0.0`（自带 Node + Cesium） | ≈1 GB | `Dockerfile.cesium` | `launch.sh` |
-| YOPO 避障后端 | `mindcloud-yopo` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime`（CUDA） | ≈35 GB | `Dockerfile.yopo` | `scripts/start_yopo_api.sh` |
+| YOPO 避障后端 | `mindcloud-yopo-api` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime`（CUDA） | ≈35 GB | `Dockerfile.yopo` | `scripts/start_yopo_api.sh` |
 | DA360 深度服务 | `mindcloud-da360` | `pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime`（CUDA） | ≈28 GB | `Dockerfile.da360` | `scripts/start_da360_api.sh` |
 
 > 体积为 RTX 4070 Laptop / Ubuntu 24.04 上的实测值，仅供评估磁盘用。日常 `./restart_all.sh` **不会**重建镜像（只有镜像缺失或显式 `*_FORCE_BUILD=1` 才构建）。需要单独构建或强制重建时见「从零开始（首次部署）→ 第 4 步」。
@@ -301,7 +301,7 @@ YOPO_MODEL_PATH=/abs/path/to/your_yopo.pth ./scripts/start_yopo_api.sh
 ### DA360 深度服务（`Dockerfile.da360`）
 
 - Python 依赖：`numpy<2`、`flask`、`flask-cors`、`opencv-python-headless`、`pillow`、`timm`、`tqdm`、`xformers`。
-- `COPY third_party/DA360` 进镜像：DA360 **源码**已随仓库提供（`.gitignore` 与 `.dockerignore` 对 DA360 都只排除权重目录 `third_party/DA360/checkpoints/`，完整排除清单见仓库根目录 `.dockerignore`），构建时无需先拉源码；**权重** `checkpoints/DA360_large.pth` 不入镜像，由 `scripts/start_da360_api.sh` 在运行前下载（或挂载本地权重）后通过 `--model-path` 指定。
+- `COPY third_party/DA360` 进镜像：DA360 **源码**已随仓库提供（`.dockerignore` 对 DA360 只排除权重目录 `third_party/DA360/checkpoints/`，完整排除清单见仓库根目录 `.dockerignore`；`.gitignore` 额外还排除 `third_party/DA360/data/images/Thumbs.db`），构建时无需先拉源码；**权重** `checkpoints/DA360_large.pth` 不入镜像，由 `scripts/start_da360_api.sh` 在运行前下载（或挂载本地权重）后通过 `--model-path` 指定。
 - `scripts/start_da360_api.sh` 构建/运行要点：
   - 构建网络与代理转发同 YOPO（`DA360_BUILD_NETWORK`；额外从 `git config` 探测宿主机代理 `DA360_BUILD_PROXY`）。
   - 会给镜像打 `mindcloud.da360.server_sha` label。跳过重建有两条路径：默认 `DA360_MOUNT_SERVER=1` 时**只要镜像存在就无条件跳过**（不比较 SHA，因为脚本会被只读挂载进去覆盖同名文件）；设 `DA360_MOUNT_SERVER=0` 后才改为比较 SHA——已有镜像且 server 脚本 SHA 一致时跳过，`DA360_FORCE_BUILD=1` 或脚本内容变化才重建。
@@ -381,9 +381,27 @@ http://127.0.0.1:8080/?da360UploadWidth=512
 
 ## DA360 深度估计
 
-注意，默认使用 `DA360_large`，`scripts/start_da360_api.sh` 以 `DA360_INPUT_SCALE=0.65` 启动其容器，模型输入约为 `672x336`（checkpoint 基准 1036×518 × 0.65；已在本机 RTX 4070 Laptop GPU 8GB 上验证可稳定运行；`da360_server.py` 自身的默认值是 `1.0`，即按 checkpoint 原分辨率推理）。
+DA360 深度服务由 `restart_all.sh` 拉起（默认 `large` 模型）。DA360 **源码**已随仓库提供，但**权重**（`DA360_large.pth`，约 1.3GB，超 GitHub 100MB 限制）没有——**首次运行前只需下载权重**（构建镜像前无需拉取源码）：
 
-全景 RGB 默认就采集 `384x192` ERP，右下角显示即此原始尺寸；这个尺寸与 DA360 输出、YOPO 消费的尺寸完全一致，因此 `da360UploadScale` 默认为 `1.0`——原样上传、不再缩放，服务端 resize 到 `672x336` 模型输入，推理后把深度贴回 `384x192`。在本机 RTX 4070 Laptop GPU（8GB）上，单次 DA360 深度推理约 **50ms（≈20Hz）**；前端默认 `depthMs=33`（深度请求最小间隔 ≈30Hz，略高于推理耗时）以保证推理不会堆积请求。
+```bash
+python3 -m pip install --user gdown
+./scripts/download_da360_model.sh
+# 脚本会将权重放到 third_party/DA360/checkpoints/DA360_large.pth
+```
+
+启动后心跳自检：
+
+```text
+curl http://127.0.0.1:5688/health
+```
+
+停止或重启 DA360，重跑 `restart_all.sh` 即可（或 `docker rm -fv mindcloud-da360-api`）。
+
+注意，默认使用 `DA360_large`。**推理分辨率由上传图像决定**：服务端 `infer()` 不做缩放，直接把上传图尺寸对齐到 `PATCH_SIZE=14` 的整数倍作为模型输入——默认上传 `384x192` ERP 时，实际模型输入为 `378x196`（`round(384/14)=27 → 378`、`round(192/14)=14 → 196`）；`/health` 的返回里也写明 `"infer_mode": "native (request resolution, no downscale)"`。
+
+因此 **`DA360_INPUT_SCALE` / `DA360_INPUT_WIDTH` / `DA360_INPUT_HEIGHT` 对推理分辨率无效**：它们只在 `/health` 中回显，并曾用于启动时的 warmup（唯一调用点把 scale 硬编码为 `1.0`），而一键启动 `restart_all.sh` 会设 `DA360_NO_WARMUP=1`，连这次 warmup 也不会执行。`scripts/start_da360_api.sh` 仍会以 `DA360_INPUT_SCALE=0.65` 启动容器（沿用历史配置，checkpoint 基准为 1036×518），但不改变实际推理尺寸；`da360_server.py` 自身该值默认为 `1.0`。
+
+全景 RGB 默认就采集 `384x192` ERP，右下角显示即此原始尺寸；这个尺寸与 DA360 输出、YOPO 消费的尺寸完全一致，因此 `da360UploadScale` 默认为 `1.0`——原样上传、不再缩放，服务端按上述规则对齐到 `378x196` 推理，再把深度贴回 `384x192`（仅几像素 snap 差异）。在本机 RTX 4070 Laptop GPU（8GB）上，单次 DA360 深度推理约 **45ms（≈22Hz）**；前端默认 `depthMs=33`（深度请求最小间隔 ≈30Hz）以保证推理不会堆积请求。
 
 默认不建议换模型；实验中 `DA360_large` 的 fast 档比 `DA360_small` 保留了更好的深度排序和边缘一致性。只有显存、功耗或部署体积受限时，再自行覆盖模型名：
 
@@ -392,13 +410,18 @@ DA360_MODEL=<large|base|small> ./scripts/download_da360_model.sh
 DA360_MODEL=<large|base|small> ./scripts/start_da360_api.sh
 ```
 
-如需主动调整 DA360 服务端模型输入尺寸，可设置推理 scale 或指定模型输入宽高；过低的 `DA360_INPUT_SCALE` 可能让 large 模型输出条带化深度，不建议低于 `0.46`。resize 采样方式在两处默认值不同：`da360_server.py` 自身默认 `bilinear`，而 `scripts/start_da360_api.sh` 默认用 `bicubic` 覆盖它并传入容器（即走一键启动时实际生效的是 `bicubic`）：
+要真正调整推理分辨率，请调前端上传尺寸（服务端推理尺寸跟随上传图）：
 
 ```bash
-DA360_INPUT_SCALE=1.0 ./scripts/start_da360_api.sh
-DA360_INPUT_SCALE=0.46 ./scripts/start_da360_api.sh
-DA360_INPUT_WIDTH=476 ./scripts/start_da360_api.sh
-DA360_INPUT_WIDTH=672 DA360_INPUT_HEIGHT=336 ./scripts/start_da360_api.sh
+# 降低上传尺寸 → 推理尺寸随之降低（0.5 → 192×96 → 模型输入 196×98）
+http://127.0.0.1:8080/?da360UploadScale=0.5
+# 或提高全景采集分辨率（上传与推理尺寸同步提高）
+http://127.0.0.1:8080/?panoWidth=896&panoFace=224
+```
+
+resize 采样方式在两处默认值不同：`da360_server.py` 自身默认 `bilinear`，而 `scripts/start_da360_api.sh` 默认用 `bicubic` 覆盖它并传入容器（即走一键启动时实际生效的是 `bicubic`）——该采样方式即用于把上传图对齐到 14 的整数倍：
+
+```bash
 DA360_RESAMPLE=bilinear ./scripts/start_da360_api.sh
 ```
 
@@ -433,7 +456,7 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
    - **时间平滑**：`scale = lastScale×0.5 + scale×0.5`，抑制 DA360 逐帧相对深度漂移导致的尺度跳变，避免网络决策抖动。
 4. **换算**：resize 到 384×192 后逐像素 `metric = rel × scale`；无效像素（NaN/≤0）保持 NaN，由 mask 通道（通道 1）标识，网络按训练一致方式忽略。
 
-标定对**每帧 DA360 深度图**都执行一次（DA360 约 22 Hz < `pickLocalRay` 缓存 TTL 150 ms，多数标定射线命中缓存，真实 GPU pick 很少）；"移动 > 1.5 m 强制重新标定"作为缓存穿透的 CPU 端兜底，零额外开销。
+标定对**每帧 DA360 深度图**都尝试一次（DA360 约 22 Hz < `pickLocalRay` 缓存 TTL 150 ms，多数标定射线命中缓存，真实 GPU pick 很少）；每帧都会进入标定分支，但只有本次命中点 ≥ 3 才真正更新 `scale`，否则沿用上一帧的历史 `scale`（代码中仅残留一句"移动 > 1.5 m 强制重新标定"的注释，并无对应实现）。
 
 **深度不可用时（DA360 失败/超时）不回退 Cesium 射线检测**——YOPO 的网络输入仍要求真实深度，此时无人机原地悬停并持续重试，直到拿到有效深度图才恢复导航。
 
@@ -451,7 +474,7 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 - **客户端反应式安全层（几何势场）**：在服务端轨迹之上，前端 `src/drone.js` 额外叠加一层基于 Cesium 射线环的几何反应式避障，用于兜住深度重规划（约 70 ms/次）间隙内的突发近障。路径畅通时该层自动完全归零、不干扰网络规划，详见「避障架构与调参」。
 - **目标引导**：score 内已含目标方向代价（训练时 `wg=0.15`），网络原生指向目标。
 - **3D 导航**：不做水平面投影，垂直避障由网络预测的 z 终端状态决定。
-- **轨迹生成**：三轴五阶多项式（Poly5Solver），从上次指令状态出发（`plan_from_reference=True`），轨迹连续、无往复。
+- **轨迹生成**：三轴五阶多项式（Poly5Solver）。轨迹起点取自**真实里程计外推到当前时刻**的状态（C0 位置 / C1 速度连续），C2 加速度取上次指令加速度——推理较慢时 `desire_*` 会冻结在旧轨迹末端，若从它出发会在衔接处产生跳变，故刻意不用它；`PLAN_FROM_REFERENCE` 常量仍保留但已不参与计算（仅在启动日志中打印）。轨迹连续、无往复。
 - **控制输出**：50Hz 评估多项式 → 位置/速度/加速度 + 偏航 → 前端级联 PID 跟踪。
 - **到达处理**：全程跟随 YOPO 网络轨迹，只有**到达锁定后**才切到目标点位置悬停：
   ```
@@ -467,7 +490,7 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
   - **速度环 D 项**回到参考实现：`velKd = (useAccFeedforward || (stickActive && horizActive)) ? 0.0 : sfVelKd`（巡航关 D 以避免放大网络前馈跳变；摇杆接管且有水平输入时同样关 D；到达后走位置环、`useAccFeedforward=false`，`velKd = sfVelKd = 1.0` 提供阻尼）。
   - **已删除的旧接管参数**：`yopoFinalApproachDist`、`yopoFinalApproachVMax`、`yopoGoalRepSuppressDist`、`yopoTakeoverSlew`、`yopoTakeoverSteerEndDist`、`yopoArriveDeadbandM`、`yopoArriveVertH`、`yopoArriveAltKp`/`AltVMax`（注释中留有说明）。
   - **贴墙目标不再被钉在半路**（仍保留）：目标贴墙时前向射线测得 `dAhead ≈ distGoalH`，`yopoAvoidGoalGateMargin = 1.0` 让目标 1 m 容差内的威胁按 beyond-goal 处理（`yopoAvoidGoalBrakeFloor = 0.40` 下限覆盖 `brake = 0` 情形，closing gate 第三条放行），避免被钉在数米外。
-- **深度可用性**：DA360 深度失败/超时时**不回退射线检测**，无人机原地悬停并持续重试，直到拿到有效深度图才恢复导航（前端深度请求超时为 **6 s**；服务端另有按深度图年龄的 `_SA_DEPTH_AGE_WARN = 0.2 s` / `_SA_DEPTH_AGE_STOP = 1.0 s` 两级减速/停车保护）。注：早期版本曾有"整帧被 2 m 内包围即判定深度异常并悬停"的检测，因在城市楼群中会把"近处像素多"误判为深度失效而频繁悬停，已按上游实现移除；深度有效性现交由 mask 通道与网络自身判断。
+- **深度可用性**：DA360 深度失败/超时时**不回退射线检测**，无人机原地悬停并持续重试，直到拿到有效深度图才恢复导航（前端 YOPO 导航链路的深度请求超时为 **6 s**）。注：服务端 `yopo_server.py` 里仍留有 `_SA_DEPTH_AGE_WARN = 0.2 s` / `_SA_DEPTH_AGE_STOP = 1.0 s` 等 `_SA_*` 常量，但当前**没有任何代码引用它们**，所谓"按深度图年龄的两级减速/停车"并未实现。另注：早期版本曾有"整帧被 2 m 内包围即判定深度异常并悬停"的检测，因在城市楼群中会把"近处像素多"误判为深度失效而频繁悬停，已按上游实现移除；深度有效性现交由 mask 通道与网络自身判断。
 - **巡航速度地板（`yopoCruiseMinSpd=12`）**：路径畅通且目标较远时，沿目标方位补齐前进速度，避免网络把速度压到爬行；避障刹车时自动让位，距目标 < `yopoCruiseMinDist=5` m 时关闭，尊重接管/到达减速。
 - **垂直优先直升降（`yopoVertFirst*`）**：当高度差占主导（水平距离 < 35 m 且 |Δh| > 4 m 且 > 0.9× 水平偏移）时，直接接管垂直通道做 P 收敛升降、水平只留 30%，消除大幅盘旋；正上/正下净空不足时让位回网络。
 - **到达判定**：服务端 2 m 到达判据（`ARRIVE_THRESHOLD = 2.0`，3D 距离）在 `main.js` 中锁存（`cmd.arrived` → `yopoArrived`，离目标超过 `YOPO_ARRIVE_RELEASE_M` 才释放，该值默认是 **6 m**，可用 `?yopoArriveReleaseM=` 覆盖）；客户端另有兜底：距目标 < `yopoArriveHoldM = 6.0` m（**仅按距离，无速度门**——`yopoArriveHoldV` 已移除）即判定到达，避免服务端异步判据回来前"总差一步"（`yopoArriveHoldM` 已从 2.0 上调到 6.0：更早接管，避免贴近建筑下降时擦翼；距目标 < 6 m 即按距离锁定兜底，服务端 2 m 判据异步回来前不悬在半路）。到达后即进入上面的目标点位置悬停。
@@ -494,7 +517,6 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 
 - **tan（切向绕行）**：参考方向取"目标方位宽锥内（`dotG > yopoTanConeCos`，约 ±90°）最近障碍"，否则取前向威胁方向；取该方向的两条垂直切向中"朝目标侧投影更大"的一条（贴着障碍滑向目标）。强度 `t = yopoAvoidTanGain·max(0.5, 1 − tanRefD/repRange)`（默认 TanGain 120 m/s，**下限 0.5**：障碍还在 20~30 m 外时切向就有咬合力，不必临到跟前才起绕）。三道防抖：① 方向迟滞记忆 `_avoidLastTan`——与上一帧切向夹角 >120°、上一帧方向仍畅通（`dists[i] > yopoAvoidStop + 2.0`）、仍指向目标侧（`ltToGoal > yopoTanAwayCos`）、**且新切向不比记忆中的更朝向目标**（`newTanToGoal < ltToGoal`）时保留上一帧，防止经过障碍中心时合力翻转导致来回绕；② 切向偏离目标方位 >90°（`fToGoal < 0`）时乘 `yopoTanAwayScale=0.95` 衰减，让目标吸引项夺回主导；③ 记忆会在"走廊连续 4 帧畅通（`goalClearStable`）"或触发释放时清空，避免把上一个障碍的绕行方向带进下一个。tan 经 `tanHold = max(repHold, 0.85)` 调制——**保底 85%，不随 `repHold` 同步衰减**：`repHold` 贴近障碍时压低力场对 rep（"停住后不再推离"）是对的，对 tan 是反的，越近越需要绕行力度。
 
-- **brake（近障刹车）**：前向速度取"指令速度"与"机体实际速度"较大者；威胁距离 `dAhead` 同时按指令方向与机体实际航向取较小值（防止网络把指令拐向旁边、机体却仍冲墙时不刹车）。反应距离 `reactionDist = spdFwd·reactionSec`（基础 `yopoAvoidBrakeReaction = 0.46 s`，高速档 `yopoAvoidBrakeReactionHi = 1.25 s` 更大）从可刹车距离中扣除，使高速时提前约 15 m 起步、并在 standoff 内停住。双层减速取较保守者：① 硬运动学刹车 `vSafe = √(2·yopoAvoidBrakeDecel·dEff)`（`dEff = brakeClear − standoff − reactionDist`，`yopoAvoidBrakeDecel = 3.5` 远低于物理可达，留 ~2× 余量；**该值越小刹车越早、要求的目标速度越低，只可下调不可上调**）；② 渐进软刹车在 `brakeRange` 内随距离平滑缩速、地板 `yopoAvoidBrakeFloor = 0.78`。目标背后障碍（`dAhead > distGoalH`）只保留 `yopoAvoidGoalBrakeFloor`，不刹最终进近。触发刹车时调用点**压制 YOPO 加速度前馈**并沿速度反方向注入最强减速前馈（最高 `yopoAvoidBrakeAccel≈17`，对应 60° 倾转 `droneMaxAngle=60`，至少交付 `yopoAvoidBrakeMinFrac=0.85`）；合成速度再沿威胁方向由 `vCloseMax = √(2·BrakeDecel·dGate)` 硬性限速，确保 rep/tan/vGo 叠加后仍能停下。刹车值本身经**非对称滤波**：收紧立即生效、松开按 0.30 s 斜坡回弹，避免探测噪声把速度目标抖动成锯齿。
 
 - **vRep（竖直越障）**：仅当"前向水平走廊真正被挡"（`!goalClear` 且 `dAheadH < yopoAvoidStop + yopoAvoidVBlock`，即 26 m）**且尚未到达锁定**（`!yopoArrived`）时触发；这里没有"近目标区"例外，目标在近处同样可以越障。方向由**提交/保持状态机**决定（不再逐帧重判）：进入后方向被锁存为 `heldDir = +1`（爬越）或 `-1`（下钻），直到该方向被物理封死（`vUpDist ≤ yopoAvoidStop + 1` / 下方净空不足）或真正飞过障碍（`dAheadH > blockDist × 1.5 = 39 m`）才释放，中途禁止换向——掠射射线在楼顶边缘的距离抖动曾让 vRep 在 `±e` 与 0 之间跳变，表现为"爬一点、沉一点、再爬"。判定：正上方净空 `vUpDist > clearD (= yopoAvoidRange × yopoAvoidVClear ≈ 24.7 m)` 即判为**可越顶**（`upClear`）——不要求侧向高层射线也畅通，因为障碍顶部高于当前探测层恰恰就是"必须往上爬"的情形；下钻更保守：要求低层 `dL > clearD` 且 `groundGap > yopoMinAlt` 且 `vDownDist > yopoMinAlt`（10 m）。两者皆可优先上爬，只上通则上爬（`vRep = yopoAvoidGain·yopoAvoidVClimbScale`），只下达则下钻（取负）。走廊一旦畅通（连续 4 帧 `goalClearStable`）即**拉平**（`vClimb = 0`）停止继续爬高，但仍保持 `clearHold` 锁住高度、平飞越过障碍，直到 `dAheadH > 39 m` 才允许下降——把"停止爬升"与"允许下降"拆成两个判据，正是修复"越障完立刻掉高度砸回障碍"的关键。爬升/下钻指令再经 `vTau = 0.15 s` 斜坡滤波，避免约 28 m/s 的阶跃造成竖直抽搐。
 
@@ -503,7 +525,7 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 - **upPush + vSafeDown（地面与下降安全）**：`upPush` 在 `groundGap < yopoMinAlt`（头顶/脚下净空不足）时 `= (yopoMinAlt − groundGap)·yopoAvoidGain·0.5`（下降净空不足时用 0.6 系数取较大者）向上推；头顶净空不足时用 `vSafeUp = √(2·aDecel·(vUpDist − standoff))` 限制上推，避免撞顶。`vSafeDown` 取正下方净空 `downGap = min(groundGap, vDownDist)`：若 `≤ yopoAvoidStopDown`（**独立的下方 standoff = 10.0 m，与 `yopoAvoidStop` 解耦，曾由 8.0 下调到 5.0 再回调到 7.0，本次为消除"飞越楼顶贴顶飞"窗口再放大到 10.0**）则禁止下降（=0），否则 `vSafeDown = √(2·aDecel·(downGap − yopoAvoidStopDown))`，调用点把它作为"下降速度硬上限"直接夹住 `velTargetY`。竖向威胁不写入 `dAhead`（无水平方向），故不会误刹前向巡航——地面/天花板安全完全由这两项独立处理。
 
 
-- **刹车（射线层优先于网络）**：运动学硬刹车 `v_safe = √(2·a·dEff)` 规划安全速度（`dEff = brakeClear − standoff − reactionDist`，`a` 用保守的 `yopoAvoidBrakeDecel = 3.5 m/s²` 留足余量）。触发刹车时：①**压制 YOPO 网络的加速度前馈**（否则网络轨迹加速度会正顶着障碍、与刹车减速相互抵消）；②沿当前速度反方向直接注入最强减速前馈（最高 `yopoAvoidBrakeAccel≈17.0 m/s²`，对应 60° 倾转上限 `droneMaxAngle=60`），且进入刹车即至少交付 `yopoAvoidBrakeMinFrac=0.85`（≈14.5 m/s²）让减速一踩就猛、够及时；③姿态环增益临时放大 `yopoAvoidBrakeAngleGain = 2.2`（`brake < yopoAvoidBrakeUrgent = 0.7` 时），压缩从巡航前倾转到刹车倾角所需的约 0.28 s 死区。威胁距离 `dAhead` 同时按"网络指令方向"与"无人机实际航向"取较小值，避免网络把指令拐向旁边就把正前方障碍排除、导致不刹车。
+- **刹车（射线层优先于网络）**：前向速度取"指令速度"与"机体实际速度"较大者；威胁距离 `dAhead` 同时按"网络指令方向"与"无人机实际航向"取较小值（防止网络把指令拐向旁边、机体却仍冲墙时不刹车）。反应距离 `reactionDist = spdFwd·reactionSec`（基础 `yopoAvoidBrakeReaction = 0.46 s`，高速档 `1.25 s`）从可刹车距离中扣除，使 15 m/s 时提前约 15 m 起步、并在 standoff 内停住。运动学硬刹车 `vSafe = √(2·yopoAvoidBrakeDecel·dEff)`（`dEff = brakeClear − standoff − reactionDist`，`a` 用保守的 `yopoAvoidBrakeDecel = 3.5 m/s²` 留 ~2× 余量；**该值越小刹车越早、要求的目标速度越低，只可下调不可上调**；它同时驱动关速门 `vCloseMax` 与近距限速器）。与之并行的**渐进软刹车**在 `brakeRange` 内随距离平滑缩速、地板 `yopoAvoidBrakeFloor = 0.78`，双层减速取较保守者；目标背后的障碍（`dAhead > distGoalH`）只保留 `yopoAvoidGoalBrakeFloor`，不刹最终进近。触发刹车时：①**压制 YOPO 网络的加速度前馈**（否则网络轨迹加速度会正顶着障碍、与刹车减速相互抵消）；②沿当前速度反方向直接注入最强减速前馈（最高 `yopoAvoidBrakeAccel≈17.0 m/s²`，对应 60° 倾转上限 `droneMaxAngle=60`），且进入刹车即至少交付 `yopoAvoidBrakeMinFrac=0.85`（≈14.5 m/s²）让减速一踩就猛、够及时；③姿态环增益临时放大 `yopoAvoidBrakeAngleGain = 2.2`（`brake < yopoAvoidBrakeUrgent = 0.7` 时），压缩从巡航前倾转到刹车倾角所需的约 0.28 s 死区。合成速度再沿威胁方向由 `vCloseMax = √(2·BrakeDecel·dGate)` 硬性限速，确保 rep/tan/vGo 叠加后仍能停下。刹车值本身经**非对称滤波**：收紧立即生效、松开按 0.30 s 斜坡回弹，避免探测噪声把速度目标抖动成锯齿。
 - **侧向速度预算**：绕行时把"前进"与"侧向绕行"拆开预算——侧向最多占预算基准的 77%、前向至少保留 20%，让速度矢量真正偏向切向、贴着障碍滑过，而不是"边全速前冲边轻蹭"。预算基准取 `max(yopoCruiseMinSpd, 实际指令速度, 绕行生效 ? yopoDetourSpeedFloor : 0)`（绕行生效指 `|rep+tan| > 1.5 m/s`，此时基准被抬到 40 m/s，使水平绕行与竖直越障同等果断；**前向门不受此抬升**）：网络在深度见障时会自行放慢指令，若只按指令速度算预算，绕行会在最需要时塌掉（指令 8 m/s → 只剩 ~5.4 m/s 侧向力）。另外 **tan 不随 `repHold` 近障衰减**（`tanHold = max(repHold, 0.85)`，保底 85%）：`repHold = clamp(dMin/standoff, 0.5, 1)` 在贴近障碍时压低力场，对"停住后不再推离"的 rep 是对的，对 tan 是反的——越近越需要绕行力度。
 - **畅通直飞（`goalClear`）**：分别沿"机体→目标"（`dPath`）和"命令速度方向"（`dCmd`）各算一次走廊，走廊半宽 2.5 m，**任一**走廊在 `reach = min(yopoAvoidRepRange, 到目标的水平距离)` 内无障即判定畅通（截断到目标距离是为了让"目标背后的墙"不会把走廊永久判为被挡）。近距例外：若距目标 < `yopoCorridorGuardDist`（**18 m**）且 `dPath` 被挡，则封掉 `dCmd` 这条逃生通道，避免贴着障碍直冲——该值必须覆盖释放阈值 `releaseDAhead = standoff + reactionDist + 2.0`（约 12 m），否则绕行甩头时 `dPath` 恰好落在阈值附近会反复"释放全速直冲 → 重新探测到 → 再避障"，表现为左右摇摆。判定再经两级滞后才真正放行：连续 2 帧畅通才置位 `releaseAllowed`、连续 3 帧被挡才解除（探测刷新 40 ms、掠射射线会逐帧翻转原始 `goalClear`）；连续 4 帧畅通另有 `goalClearStable`（用于清空切向记忆与拉平爬升）。**通道畅通时 `rep`/`tan`/`brake`/`vRep` 全部归零、`vGo` 被抑制**，无人机全速直飞目标，不会被无谓推离或莫名绕行。
 
@@ -590,7 +612,7 @@ GPU 场景渲染 + 回读同步，且**同步跑在渲染帧循环里**。为压
 
 - **全量、每周期、全 fresh**：24 条水平射线（`yopoAvoidRayCount`）**逐条每周期**真实 GPU pick
   （`forceFresh=true`，不走缓存），无跨步降采样、无 round-robin 轮换、也不用邻居方向镜像填充。
-- **竖直层（high/high2/low）每周期发射**：沿最朝前的 3 条射线各探 3 层（+9 条），且不再由上一
+- **竖直层每周期发射**：`low` 层在**全部 24 个方向**发射（+24 条，`lowOk` 为假时退化为复用本层距离、不再发射），使任意方向的下方侧向障碍都能被竖直前瞻提前感知；`high` / `high2` 两层沿最朝前的 3 条射线发射（+6 条），且不再由上一
   周期"走廊被挡"的判定来门控——那层滞后一拍的门控曾让竖直越障始终不触发。
 - **正上 / 正下**：每周期各 1 条 fresh（天花板 / 地面安全不接受过期值），不再"每 N 周期"跳过。
 
@@ -618,8 +640,8 @@ GPU 场景渲染 + 回读同步，且**同步跑在渲染帧循环里**。为压
 | `yopoAvoidBrakeRangeHi` | 54.0 | 高速时软刹车起始距离 (m) |
 | `yopoAvoidBrakeReaction` | 1.25 | 高速档刹车反应时间 (s)：姿态建立+控制环延迟，折算成反应距离 `spd×反应时间` 从可刹车距离中扣除，使 15 m/s 下提前约 15 m 开始减速、并在 standoff 内稳稳停住（基础档 0.46 s） |
 
-实测每轮发射射线数：**24 水平 + 9 竖直层 + 2 正上下 = 35 条，全部为 fresh GPU pick**（不再存在
-"cached 命中不计 pick"的部分；`lowOk` 为假时低层不发射，为 32 条）。`yopoAvoidRepRange`（= `goalClear` 的畅通阈值）**不随速度变化**，
+实测每轮发射射线数：**24 水平 + 24 低层 + 6 高层（high/high2）+ 2 正上下 = 56 条，全部为 fresh GPU pick**（不再存在
+"cached 命中不计 pick"的部分；`lowOk` 为假时不发低层，为 32 条）。`yopoAvoidRepRange`（= `goalClear` 的畅通阈值）**不随速度变化**，
 因此加大高速作用距离不会让"路径其实畅通"被误判为被挡。
 
 浏览器控制台执行 `__yopoPerf()` 可查看实测指标（`fps` / `probeMsAvg` / `probeHz` / `depthHz` /
