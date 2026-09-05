@@ -101,17 +101,17 @@ flowchart TD
     subgraph YOPO["YOPO · server-side · learning-based planning (replans ~every 250 ms by default, tunable via ?yopoReplanMs=)"]
         direction LR
         YIN[④ Receives ERP depth + odometry + goal]
-        YIN --> Dist{⑤ Within 12 m (3D) of goal?}
+        YIN --> Dist{"⑤ Within 12 m (3D) of goal?"}
         Dist -->|no| Cands[⑥ Network inference: 72 candidate trajectories + score]
         Cands --> Argmin[⑦ argmin score selects best trajectory · learning-based avoidance]
-        Dist -->|yes| Poly[⑧ Geometric polynomial straight to goal<br/>(skip network inference, _plan_final_approach)]
-        Argmin --> Cmd[⑨ Outputs trajectory command cmdPos/Vel/Acc (desired state, not final velocity)]
+        Dist -->|yes| Poly["⑧ Geometric polynomial straight to goal<br/>(skip network inference, _plan_final_approach)"]
+        Argmin --> Cmd["⑨ Outputs trajectory command cmdPos/Vel/Acc (desired state, not final velocity)"]
         Poly --> Cmd
-        Cmd -->|replan every ~250 ms (default)| YIN
+        Cmd -->|"replan every ~250 ms (default)"| YIN
     end
     class YIN,Dist,Cands,Argmin,Poly,Cmd yopo;
 
-    Cmd --> Track[⑩ Client cascaded PID tracking: position-loop Kp·error + vel/acc feed-forward → base velocity command velTarget]
+    Cmd --> Track["⑩ Client cascaded PID tracking: position-loop Kp·error + vel/acc feed-forward → base velocity command velTarget"]
 
     subgraph RAY["Ray-based avoidance · client-side · geometric reactive backstop (runs every 60 Hz control tick)"]
         direction LR
@@ -128,7 +128,7 @@ flowchart TD
 
     Synth --> Arrive{"⑰ Arrival latched (yopoArrived)? (the server's 2 m verdict cmd.arrived is latched in main.js, released only when > 6 m from the goal; the client additionally pre-locks at < 6 m distance-only — either one latches)"}
     Arrive -->|no| YIN
-    Arrive -->|yes| End([⑱ Hold at the goal: client-side position-hold PD, YOPO replanning stops, the ray layer keeps backstopping (directional push zeroed, passive brake + vSafe still active)])
+    Arrive -->|yes| End(["⑱ Hold at the goal: client-side position-hold PD, YOPO replanning stops, the ray layer keeps backstopping (directional push zeroed, passive brake + vSafe still active)"])
     class Arrive dec;
     class Start,End term;
 ```
