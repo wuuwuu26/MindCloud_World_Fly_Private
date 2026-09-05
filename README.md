@@ -86,6 +86,7 @@ flowchart TD
         Dist -->|是| Poly[⑧ 几何多项式直连目标<br/>（跳过网络推理，_plan_final_approach）]
         Argmin --> Cmd[⑨ 输出轨迹指令 cmdPos/Vel/Acc（期望状态，非最终速度）]
         Poly --> Cmd
+        Cmd -->|每 ~70 ms 重规划| YIN
     end
     class YIN,Dist,Cands,Argmin,Poly,Cmd yopo;
 

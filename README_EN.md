@@ -107,6 +107,7 @@ flowchart TD
         Dist -->|yes| Poly[⑧ Geometric polynomial straight to goal<br/>(skip network inference, _plan_final_approach)]
         Argmin --> Cmd[⑨ Outputs trajectory command cmdPos/Vel/Acc (desired state, not final velocity)]
         Poly --> Cmd
+        Cmd -->|replan every ~70 ms| YIN
     end
     class YIN,Dist,Cands,Argmin,Poly,Cmd yopo;
 
