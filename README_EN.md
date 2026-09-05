@@ -918,7 +918,7 @@ Key parameters (all in the `src/drone.js` constructor):
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
 | `yopoAvoidEnabled` | `true` | Master switch of the geometric layer |
-| `yopoAvoidRayCount` | 24 | Number of 360° rays (15° spacing). **Raised from 12**: at 30° spacing the lateral gap between adjacent rays is `2·d·sin15° ≈ 0.52·d` (~10 m at 20 m, ~15 m at 30 m), so a 10–15 m wide building could sit entirely between two rays, the corridor verdict never saw it and the drone charged straight into it. 15° narrows the gap to ~5 m at 20 m. Only the GPU pick count grows (negligible next to the 200 ms–1 s network inference); drop to 16 if the frame rate suffers |
+| `yopoAvoidRayCount` | 24 | Number of 360° rays (15° spacing). **Raised from 12**: at 30° spacing the lateral gap between adjacent rays is `2·d·sin15° ≈ 0.52·d` (about 10 m at 20 m, about 15 m at 30 m), so a 10–15 m wide building could sit entirely between two rays, the corridor verdict never saw it and the drone charged straight into it. 15° narrows the gap to about 5 m at 20 m. Only the GPU pick count grows (negligible next to the 200 ms–1 s network inference); drop to 16 if the frame rate suffers |
 | `yopoAvoidFastSpeed` | 6.0 | Speed (m/s) at which the high-speed profile starts (wider repulsion / detour / brake action ranges, denser probe throttle) |
 | `yopoAvoidRefSpeed` | 15.0 | Speed (m/s) at which the high-speed profile is fully applied; interpolates the action ranges (rays are **not** downsampled with speed) |
 | `yopoAvoidStrideHi` | 2 | **Retired** (ray tiering removed): was the high-speed stride; all 24 directions are now probed every cycle |
@@ -943,7 +943,7 @@ Key parameters (all in the `src/drone.js` constructor):
 | `yopoAvoidBrakeReaction` | 0.46 / 1.25 | Brake reaction time (s): base / high-speed (≥ `yopoAvoidRefSpeed`). The high-speed value went 0.80 → 1.00 → 1.25, i.e. ~15 m of extra braking lead at 15 m/s |
 | `yopoAvoidBrakeRange` / `BrakeRangeHi` | 30.0 / 54.0 | Progressive soft-brake zone (m): low / high speed (raised to 30.0 together with `yopoAvoidStopH` 6→7.5→9.0 so the `(brakeClear − standoff×2)` normalisation does not degenerate) |
 | `yopoAvoidBrakeFloor` | 0.78 | Soft-brake speed floor ratio (still decelerates when close, without over-compressing the cruise); lowered from 0.85 so the approach eases off earlier |
-| `yopoAvoidBrakeAngleGain` | 2.2 | Attitude-loop gain multiplier while braking: cuts the ~0.28 s slew from the cruise tilt to the braking tilt to ~0.12 s, so 17 m/s² is actually reached while there is still room |
+| `yopoAvoidBrakeAngleGain` | 2.2 | Attitude-loop gain multiplier while braking: cuts the ~0.28 s slew from the cruise tilt to the braking tilt to about 0.12 s, so 17 m/s² is actually reached while there is still room |
 | `yopoAvoidBrakeUrgent` | 0.7 | The gain boost above only engages below this `brake` value (a real emergency stop or the closing gate firing), so cruise never gets the extra gain |
 | `yopoRepHoldFloor` | 0.5 | Floor of `repHold = clamp(dMin/standoff, ·, 1)`: close to an obstacle `rep` keeps at least half of its strength instead of going to zero |
 | `yopoAvoidVGoDecel` | 34.0 | vGo's lateral-roll-specific deceleration (m/s²), far above the forward 3.5, so leaving an underfoot/overhead footprint is not throttled to ~3 m/s |

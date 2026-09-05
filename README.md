@@ -513,7 +513,7 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 
 输入：24 条水平射线距离 `dists[i]`（半径 `yopoAvoidRange`，15° 间隔），以及最对齐前进方向的 3 层竖直探测（`distsHigh` / `distsHigh2` / `distsLow`）与正上/正下净空（`vUpDist` / `vDownDist` / `groundGap`）。作用距离随速度自适应：`repRange` 在 `yopoAvoidRepRange`(28) 与 `yopoAvoidRepRangeHi`(60) 间按 `tFast` 插值；侧向 keep-out 另有独立的 `pushRange`（在 `yopoAvoidPushRange`(36) 与 `yopoAvoidPushRangeHi`(70) 间插值，驱动排斥权重）。`goalClear` 的畅通阈值仍用固定的 `yopoAvoidRepRange`，所以放大作用距离不会让"路径其实畅通"被误判为被挡。
 
-- **rep（径向推离）**：遍历每条水平射线，若 `d < pushRange` 则按 **keep-out 形状**权重 `w = clamp((pushRange − d)/(pushRange − yopoAvoidSideStandoff), 0, 1)`（10 m standoff 内满力、到 `pushRange` 线性衰减为 0）沿"障碍→机体"反方向累加 `repX/Z −= dir·w`。**幅值不由射线条数决定，而是由最近障碍距离驱动**：先取方向（加权和，指向背离墙面的合成方向），再把幅值重定为 `yopoAvoidRepGain × closeness(dMin)`，其中 `closeness` 与上面的 `w` 同式、代入 `dMin`（任意方向最近障碍）。这一步是必要的——加权和本质是"数射线"，窄墙只扫到 2~4 条射线时合力仅 2~5 m/s，顶不住 10~15 m/s 的前压，会让无人机贴着墙面磨蹭、擦翼穿模；改为距离驱动后，窄墙也能拿到满额 34 m/s 推离。最后整体乘 `repHold = clamp(dMin/standoff, yopoRepHoldFloor, 1)`（**地板 `yopoRepHoldFloor = 0.5`，不是 0**）：`dMin` 贴近 standoff 时 rep 至少保留一半（已停住不再后推，但仍守住间距），随距离恢复满力。
+- **rep（径向推离）**：遍历每条水平射线，若 `d < pushRange` 则按 **keep-out 形状**权重 `w = clamp((pushRange − d)/(pushRange − yopoAvoidSideStandoff), 0, 1)`（10 m standoff 内满力、到 `pushRange` 线性衰减为 0）沿"障碍→机体"反方向累加 `repX/Z −= dir·w`。**幅值不由射线条数决定，而是由最近障碍距离驱动**：先取方向（加权和，指向背离墙面的合成方向），再把幅值重定为 `yopoAvoidRepGain × closeness(dMin)`，其中 `closeness` 与上面的 `w` 同式、代入 `dMin`（任意方向最近障碍）。这一步是必要的——加权和本质是"数射线"，窄墙只扫到 2–4 条射线时合力仅 2–5 m/s，顶不住 10–15 m/s 的前压，会让无人机贴着墙面磨蹭、擦翼穿模；改为距离驱动后，窄墙也能拿到满额 34 m/s 推离。最后整体乘 `repHold = clamp(dMin/standoff, yopoRepHoldFloor, 1)`（**地板 `yopoRepHoldFloor = 0.5`，不是 0**）：`dMin` 贴近 standoff 时 rep 至少保留一半（已停住不再后推，但仍守住间距），随距离恢复满力。
 
 - **tan（切向绕行）**：参考方向取"目标方位宽锥内（`dotG > yopoTanConeCos`，约 ±90°）最近障碍"，否则取前向威胁方向；取该方向的两条垂直切向中"朝目标侧投影更大"的一条（贴着障碍滑向目标）。强度 `t = yopoAvoidTanGain·max(0.5, 1 − tanRefD/repRange)`（默认 TanGain 120 m/s，**下限 0.5**：障碍还在 20~30 m 外时切向就有咬合力，不必临到跟前才起绕）。三道防抖：① 方向迟滞记忆 `_avoidLastTan`——与上一帧切向夹角 >120°、上一帧方向仍畅通（`dists[i] > yopoAvoidStop + 2.0`）、仍指向目标侧（`ltToGoal > yopoTanAwayCos`）、**且新切向不比记忆中的更朝向目标**（`newTanToGoal < ltToGoal`）时保留上一帧，防止经过障碍中心时合力翻转导致来回绕；② 切向偏离目标方位 >90°（`fToGoal < 0`）时乘 `yopoTanAwayScale=0.95` 衰减，让目标吸引项夺回主导；③ 记忆会在"走廊连续 4 帧畅通（`goalClearStable`）"或触发释放时清空，避免把上一个障碍的绕行方向带进下一个。tan 经 `tanHold = max(repHold, 0.85)` 调制——**保底 85%，不随 `repHold` 同步衰减**：`repHold` 贴近障碍时压低力场对 rep（"停住后不再推离"）是对的，对 tan 是反的，越近越需要绕行力度。
 
@@ -551,7 +551,7 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 | 参数 | 默认值 | 含义 |
 |------|--------|------|
 | `yopoAvoidEnabled` | `true` | 几何层总开关 |
-| `yopoAvoidRayCount` | 24 | 360° 射线数（15° 间隔）。**由 12 上调**：30° 间隔时相邻射线的横向间隙 ≈ `2·d·sin15° ≈ 0.52·d`（20 m 处约 10 m、30 m 处约 15 m），一栋宽 10~15 m 的楼会整栋落在两条射线之间，走廊判定完全看不到它 → 误判畅通、全速直撞；15° 间隔把 20 m 处间隙收窄到约 5 m。射线数增大只增加 GPU pick 次数（相对 200 ms~1 s 的网络推理可忽略），若帧率不足可降到 16 |
+| `yopoAvoidRayCount` | 24 | 360° 射线数（15° 间隔）。**由 12 上调**：30° 间隔时相邻射线的横向间隙 ≈ `2·d·sin15° ≈ 0.52·d`（20 m 处约 10 m、30 m 处约 15 m），一栋宽 10–15 m 的楼会整栋落在两条射线之间，走廊判定完全看不到它 → 误判畅通、全速直撞；15° 间隔把 20 m 处间隙收窄到约 5 m。射线数增大只增加 GPU pick 次数（相对 200 ms–1 s 的网络推理可忽略），若帧率不足可降到 16 |
 | `yopoAvoidFastSpeed` | 6.0 | 高速档起始速度 (m/s)：高于此进入高速自适应（排斥/切向/刹车作用距离加大、探测节流加密） |
 | `yopoAvoidRefSpeed` | 15.0 | 高速档完全生效速度 (m/s)：排斥/切向/刹车的作用距离按此线性插值到上限（射线本身**不**随速度降采样） |
 | `yopoAvoidStrideHi` | 2 | **已停用**（射线分级已移除）：原高速跨步采样，现 24 条方向每周期全探测 |
