@@ -123,7 +123,7 @@ flowchart TD
         Synth --> Near{⑮ Within 12 m of goal?}
         Near -->|yes| Converge["⑯ Disable directional detour (rep/tan/vGo); keep only safety brake and vertical backstop; converge onto the goal"]
         Converge --> Arrive
-        Near -->|no| Arrive
+        Near -->|no| YIN
     end
     class Probe,Field,Zero,Synth,Near,Converge ray;
 

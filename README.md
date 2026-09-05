@@ -102,7 +102,7 @@ flowchart TD
         Synth --> Near{⑮ 距目标 < 12 m？}
         Near -->|是| Converge["⑯ 关闭方向性绕行（rep/tan/vGo），仅留安全刹车与垂直兜底，收敛到目标点"]
         Converge --> Arrive
-        Near -->|否| Arrive
+        Near -->|否| YIN
     end
     class Probe,Field,Zero,Synth,Near,Converge ray;
 
