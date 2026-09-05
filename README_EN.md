@@ -89,46 +89,46 @@ responsible for, and how they cooperate:
 
 ```mermaid
 flowchart TD
-    classDef yopo fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a;
-    classDef ray fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d;
-    classDef dec fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12;
+    classDef yopo fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#1e3a8a;
+    classDef ray fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d;
+    classDef dec fill:#fef9c3,stroke:#ca8a04,stroke-width:1.5px,color:#713f12;
     classDef term fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95;
+    linkStyle default stroke:#94a3b8,stroke-width:1.2px;
 
     Start([① User sets the goal]) --> Depth[② DA360 panoramic depth estimation]
-    Depth --> Calib[③ Sparse-ray metric calibration → 384×192 ERP depth map]
+    Depth --> Calib[③ Sparse-ray metric calibration<br/>384×192 ERP depth map]
     Calib --> YIN
 
-    subgraph YOPO["YOPO · server-side · learning-based planning (replans ~every 250 ms by default, tunable via ?yopoReplanMs=)"]
+    subgraph YOPO["YOPO · server-side learning-based planning (~250 ms replan by default, ?yopoReplanMs=)"]
         direction LR
-        YIN[④ Receives ERP depth + odometry + goal]
-        YIN --> Dist{"⑤ Within 12 m (3D) of goal?"}
-        Dist -->|no| Cands[⑥ Network inference: 72 candidate trajectories + score]
-        Cands --> Argmin[⑦ argmin score selects best trajectory · learning-based avoidance]
-        Dist -->|yes| Poly["⑧ Geometric polynomial straight to goal<br/>(skip network inference, _plan_final_approach)"]
-        Argmin --> Cmd["⑨ Outputs trajectory command cmdPos/Vel/Acc (desired state, not final velocity)"]
+        YIN[④ Receives ERP depth<br/>+ odometry + goal] --> Dist{"⑤ Within 12 m (3D)<br/>of goal ?"}
+        Dist -->|no| Cands[⑥ Network inference<br/>72 candidate trajectories + score]
+        Cands --> Argmin[⑦ argmin score picks best<br/>learning-based avoidance]
+        Dist -->|yes| Poly["⑧ Geometric polynomial<br/>straight to goal<br/>skips network inference<br/>_plan_final_approach"]
+        Argmin --> Cmd["⑨ Outputs trajectory command<br/>cmdPos/Vel/Acc<br/>desired state · not final velocity"]
         Poly --> Cmd
-        Cmd -->|"replan every ~250 ms (default)"| YIN
+        Cmd -->|"replan every ~250 ms"| YIN
     end
     class YIN,Dist,Cands,Argmin,Poly,Cmd yopo;
 
-    Cmd --> Track["⑩ Client cascaded PID tracking: position-loop Kp·error + vel/acc feed-forward → base velocity command velTarget"]
+    Cmd --> Track["⑩ Client cascaded PID tracking<br/>position-loop Kp·error<br/>+ vel/acc feed-forward<br/>→ base velocity command velTarget"]
 
-    subgraph RAY["Ray-based avoidance · client-side · geometric reactive backstop (runs every 60 Hz control tick)"]
+    subgraph RAY["Ray-based avoidance · client-side reactive backstop (60 Hz per control tick)"]
         direction LR
-        Track --> Probe{"⑪ Cesium ray-ring detects a near obstacle?<br/>horizontal 360° + ground/roof clearance + three altitude layers"}
-        Probe -->|yes| Near{⑫ Within 12 m horizontally of the goal AND the horizontal corridor is clear?}
-        Near -->|yes| Converge["⑬ Convergence mode: directional detour zeroed (rep/tan/vGo)<br/>brake fully open (no speed limit), only vertical safety vSafe + collision backstop remain<br/>the tracked command converges straight onto the goal"]
-        Near -->|no| Field["⑭ Geometric reactive correction (overrides YOPO feed-forward)<br/>rep push-away · tan detour · vGo footprint detour<br/>vRep clearing · upPush lift · vertical safety floor vSafe<br/>brake + close-gate speed limit"]
-        Probe -->|no| Zero["⑮ Correction zeroed (rep/tan/brake output nothing); uses the YOPO-tracked velTarget<br/>but the clear branch is NOT a pure pass-through — two goalward shapers remain:<br/>cruise speed floor — goalward component topped up to ≥ 12 m/s (yopoCruiseMinSpd, > 5 m from goal, not arrived)<br/>final-approach governor — √(2·decel·(d−6)) converges with distance, preventing overshoot"]
-        Converge --> Synth[⑯ Compose corrected command = velTarget + ray correction]
+        Track --> Probe{"⑪ Ray ring detects<br/>a near obstacle ?<br/>horizontal 360°<br/>+ ground/roof clearance<br/>+ three altitude layers"}
+        Probe -->|yes| Near{"⑫ Within 12 m of goal<br/>AND corridor clear ?"}
+        Probe -->|no| Zero["⑮ Correction zeroed · keep velTarget<br/>cruise floor tops up ≥ 12 m/s<br/>(> 5 m from goal, not arrived)<br/>approach governor √(2·a·(d−6))"]
+        Near -->|yes| Converge["⑬ Convergence mode<br/>directional detour zeroed (rep/tan/vGo)<br/>brake fully open · vSafe + collision only<br/>converge straight onto the goal"]
+        Near -->|no| Field["⑭ Geometric reactive correction (overrides YOPO ff)<br/>rep push-away · tan detour · vGo footprint<br/>vRep clearing · upPush lift<br/>vSafe floor · brake + close-gate"]
+        Converge --> Synth["⑯ Compose final velocity command<br/>= velTarget + ray correction"]
         Field --> Synth
         Zero --> Synth
     end
     class Probe,Near,Converge,Field,Zero,Synth ray;
 
-    Synth --> Arrive{"⑰ Arrival latched (yopoArrived)? (the server's 2 m verdict cmd.arrived is latched in main.js, released only when > 6 m from the goal; the client additionally pre-locks at < 6 m distance-only — either one latches)"}
+    Synth --> Arrive{"⑰ Arrival latched (yopoArrived) ?<br/>server 2 m verdict (latched in main.js)<br/>OR client < 6 m distance pre-lock<br/>released only when > 6 m from goal"}
     Arrive -->|no| YIN
-    Arrive -->|yes| End(["⑱ Hold at the goal: client-side position-hold PD, YOPO replanning stops, the ray layer keeps backstopping (directional push zeroed, passive brake + vSafe still active)"])
+    Arrive -->|yes| End(["⑱ Hold at the goal<br/>position-hold PD · replanning stops<br/>ray layer still backstops<br/>(push zeroed · brake + vSafe active)"])
     class Arrive dec;
     class Start,End term;
 ```

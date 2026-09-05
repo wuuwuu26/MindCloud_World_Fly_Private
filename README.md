@@ -68,46 +68,46 @@
 
 ```mermaid
 flowchart TD
-    classDef yopo fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a;
-    classDef ray fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d;
-    classDef dec fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12;
+    classDef yopo fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#1e3a8a;
+    classDef ray fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d;
+    classDef dec fill:#fef9c3,stroke:#ca8a04,stroke-width:1.5px,color:#713f12;
     classDef term fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95;
+    linkStyle default stroke:#94a3b8,stroke-width:1.2px;
 
     Start([① 用户设定目标点]) --> Depth[② DA360 全景深度估计]
-    Depth --> Calib[③ 稀疏射线米制标定 → 384×192 ERP 深度图]
+    Depth --> Calib[③ 稀疏射线米制标定<br/>384×192 ERP 深度图]
     Calib --> YIN
 
-    subgraph YOPO["YOPO · 服务端 · 学习型路径规划（默认约 250 ms 重规划一次，?yopoReplanMs= 可调）"]
+    subgraph YOPO["YOPO · 服务端学习型规划（默认 ~250 ms 重规划，?yopoReplanMs= 可调）"]
         direction LR
-        YIN[④ 接收 ERP 深度 + 里程计 + 目标点]
-        YIN --> Dist{⑤ 距目标（3D）< 12 m？}
-        Dist -->|否| Cands[⑥ 网络推理：72 条候选轨迹 + score]
-        Cands --> Argmin[⑦ argmin score 选最优轨迹 · 学习式避障]
-        Dist -->|是| Poly[⑧ 几何多项式直连目标<br/>（跳过网络推理，_plan_final_approach）]
-        Argmin --> Cmd[⑨ 输出轨迹指令 cmdPos/Vel/Acc（期望状态，非最终速度）]
+        YIN[④ 接收 ERP 深度<br/>+ 里程计 + 目标点] --> Dist{"⑤ 距目标（3D）< 12 m ?"}
+        Dist -->|否| Cands[⑥ 网络推理<br/>72 条候选轨迹 + score]
+        Cands --> Argmin[⑦ argmin score 选最优<br/>学习式避障]
+        Dist -->|是| Poly["⑧ 几何多项式直连目标<br/>跳过网络推理<br/>_plan_final_approach"]
+        Argmin --> Cmd["⑨ 输出轨迹指令<br/>cmdPos/Vel/Acc<br/>期望状态 · 非最终速度"]
         Poly --> Cmd
-        Cmd -->|每 ~250 ms 重规划（默认）| YIN
+        Cmd -->|每 ~250 ms 重规划| YIN
     end
     class YIN,Dist,Cands,Argmin,Poly,Cmd yopo;
 
-    Cmd --> Track[⑩ 客户端级联 PID 跟踪：位置环 Kp·误差 + 速度/加速度前馈 → 基础速度指令 velTarget]
+    Cmd --> Track["⑩ 客户端级联 PID 跟踪<br/>位置环 Kp·误差<br/>+ 速度 / 加速度前馈<br/>→ 基础速度指令 velTarget"]
 
-    subgraph RAY["射线避障 · 客户端 · 几何反应式兜底（每控制周期 60 Hz 持续运行）"]
+    subgraph RAY["射线避障 · 客户端几何反应式兜底（每控制周期 60 Hz）"]
         direction LR
-        Track --> Probe{"⑪ Cesium 射线环探测近障？<br/>水平 360° + 地面/顶面 clearance + 三层高度"}
-        Probe -->|是| Near{⑫ 距目标水平距离 < 12 m 且水平通道畅通？}
-        Near -->|是| Converge["⑬ 收敛模式：方向性绕行归零（rep/tan/vGo）<br/>刹车全开、不再限速，仅留垂直安全 vSafe + 碰撞兜底<br/>由跟踪指令直接向目标收敛"]
-        Near -->|否| Field["⑭ 几何反应式修正（优先于 YOPO 前馈）<br/>rep 推离 · tan 绕行 · vGo 足迹绕行<br/>vRep 越障 · upPush 抬升 · 垂直安全底线 vSafe<br/>刹车 brake + close-gate 限速"]
-        Probe -->|否| Zero["⑮ 修正归零（rep/tan/brake 不输出），沿用 YOPO 跟踪后的 velTarget<br/>但畅通分支并非纯直通，仍保留两组目标向整形：<br/>巡航速度地板——朝目标分量补足至 ≥ 12 m/s（yopoCruiseMinSpd，距目标 > 5 m 且未到达）<br/>末段进近限速——√(2·decel·(d−6)) 随距离收敛，防冲过目标"]
-        Converge --> Synth[⑯ 合成修正后的速度指令 = velTarget + 射线修正]
+        Track --> Probe{"⑪ 射线环探测近障 ?<br/>水平 360°<br/>+ 地面/顶面净空<br/>+ 三层高度"}
+        Probe -->|是| Near{"⑫ 距目标水平 < 12 m<br/>且通道畅通 ?"}
+        Probe -->|否| Zero["⑮ 修正归零 · 沿用 velTarget<br/>巡航地板补速 ≥ 12 m/s<br/>（距目标 > 5 m 且未到达）<br/>进近限速 √(2·a·(d−6)) 防冲过"]
+        Near -->|是| Converge["⑬ 收敛模式<br/>方向性绕行归零（rep/tan/vGo）<br/>刹车全开 · 仅留 vSafe + 碰撞兜底<br/>直接向目标收敛"]
+        Near -->|否| Field["⑭ 几何反应式修正（优先于 YOPO 前馈）<br/>rep 推离 · tan 绕行 · vGo 足迹绕行<br/>vRep 越障 · upPush 抬升<br/>vSafe 垂直底线 · 刹车 + close-gate 限速"]
+        Converge --> Synth["⑯ 合成最终速度指令<br/>= velTarget + 射线修正"]
         Field --> Synth
         Zero --> Synth
     end
     class Probe,Near,Converge,Field,Zero,Synth ray;
 
-    Synth --> Arrive{"⑰ 到达锁存 yopoArrived？（服务端 2 m 判定 cmd.arrived 在 main.js 锁存，离目标 > 6 m 才释放；客户端另有 < 6 m 距离预锁兜底——任一触发即锁存）"}
+    Synth --> Arrive{"⑰ 到达锁存 yopoArrived ?<br/>服务端 2 m 判定（main.js 锁存）<br/>或 客户端 < 6 m 距离预锁<br/>离目标 > 6 m 才释放"}
     Arrive -->|否| YIN
-    Arrive -->|是| End([⑱ 目标点悬停：客户端位置保持 PD，YOPO 重规划停止，射线层仍兜底（方向性推力归零，被动刹车 + vSafe 生效）])
+    Arrive -->|是| End(["⑱ 目标点悬停<br/>位置保持 PD · 重规划停止<br/>射线层仍兜底<br/>（推力归零 · 刹车 + vSafe 生效）"])
     class Arrive dec;
     class Start,End term;
 ```
