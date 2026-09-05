@@ -77,16 +77,16 @@ flowchart TD
     Depth --> Calib[③ 稀疏射线米制标定 → 384×192 ERP 深度图]
     Calib --> YIN
 
-    subgraph YOPO["YOPO · 服务端 · 学习型路径规划（约 70 ms 重规划一次）"]
+    subgraph YOPO["YOPO · 服务端 · 学习型路径规划（默认约 250 ms 重规划一次，?yopoReplanMs= 可调）"]
         direction LR
         YIN[④ 接收 ERP 深度 + 里程计 + 目标点]
-        YIN --> Dist{⑤ 距目标 < 12 m？}
+        YIN --> Dist{⑤ 距目标（3D）< 12 m？}
         Dist -->|否| Cands[⑥ 网络推理：72 条候选轨迹 + score]
         Cands --> Argmin[⑦ argmin score 选最优轨迹 · 学习式避障]
         Dist -->|是| Poly[⑧ 几何多项式直连目标<br/>（跳过网络推理，_plan_final_approach）]
         Argmin --> Cmd[⑨ 输出轨迹指令 cmdPos/Vel/Acc（期望状态，非最终速度）]
         Poly --> Cmd
-        Cmd -->|每 ~70 ms 重规划| YIN
+        Cmd -->|每 ~250 ms 重规划（默认）| YIN
     end
     class YIN,Dist,Cands,Argmin,Poly,Cmd yopo;
 
@@ -95,7 +95,7 @@ flowchart TD
     subgraph RAY["射线避障 · 客户端 · 几何反应式兜底（每控制周期 60 Hz 持续运行）"]
         direction LR
         Track --> Probe{"⑪ Cesium 射线环探测近障？<br/>水平 360° + 地面/顶面 clearance + 三层高度"}
-        Probe -->|是| Near{⑫ 距目标 < 12 m 且水平通道畅通？}
+        Probe -->|是| Near{⑫ 距目标水平距离 < 12 m 且水平通道畅通？}
         Near -->|是| Converge["⑬ 收敛模式：方向性绕行归零（rep/tan/vGo）<br/>刹车全开、不再限速，仅留垂直安全 vSafe + 碰撞兜底<br/>由跟踪指令直接向目标收敛"]
         Near -->|否| Field["⑭ 几何反应式修正（优先于 YOPO 前馈）<br/>rep 推离 · tan 绕行 · vGo 足迹绕行<br/>vRep 越障 · upPush 抬升 · 垂直安全底线 vSafe<br/>刹车 brake + close-gate 限速"]
         Probe -->|否| Zero["⑮ 修正归零（rep/tan/brake 不输出），沿用 YOPO 跟踪后的 velTarget<br/>但畅通分支并非纯直通，仍保留两组目标向整形：<br/>巡航速度地板——朝目标分量补足至 ≥ 12 m/s（yopoCruiseMinSpd，距目标 > 5 m 且未到达）<br/>末段进近限速——√(2·decel·(d−6)) 随距离收敛，防冲过目标"]
@@ -522,7 +522,7 @@ DA360 输出的是 **relative_to_nearest** 相对深度（最近场景点 = 1.0�
 - **网络输入**：`depth (1,2,192,384)`（通道 0 = 归一化深度，通道 1 = 有效 mask）+ 9 维观测（相机系速度/加速度/目标方向），经 `prepare_input` 展开为 `(1,9,6,12)`。
 - **轨迹选择（服务端：纯 YOPO argmin）**：网络输出 72 条候选轨迹（12 水平 × 6 垂直锚点）的终端状态（PVA）+ score。**服务端严格遵循 YOPO 原版 `test_yopo_ros.py` 部署实现，直接 `argmin(score)` 选最优轨迹**，不叠加任何几何碰撞代价。避障的第一层完全由网络在训练期 `safety_loss` 中学到的 score 提供（**学习式避障**），与官方部署实现完全一致。
   - **例外：最终进近接管**。距目标 3D 距离 < `FINAL_APPROACH_DIST = 12.0` m（`scripts/yopo_server.py` 的服务端常量）时**完全跳过网络推理**，改由 `_plan_final_approach()` 生成一条直连目标的五次多项式。也就是说最后 12 m 的轨迹由服务端几何规划给出，而非网络 `argmin`。注意这与客户端已删除的 `yopoFinalApproachDist` 是两件事——删除的是**前端**接管参数，**服务端**这段接管仍然保留。
-- **客户端反应式安全层（几何势场）**：在服务端轨迹之上，前端 `src/drone.js` 额外叠加一层基于 Cesium 射线环的几何反应式避障，用于兜住深度重规划（约 70 ms/次）间隙内的突发近障。路径畅通时该层自动完全归零、不干扰网络规划，详见「避障架构与调参」。
+- **客户端反应式安全层（几何势场）**：在服务端轨迹之上，前端 `src/drone.js` 额外叠加一层基于 Cesium 射线环的几何反应式避障，用于兜住深度重规划（约 250 ms/次）间隙内的突发近障。路径畅通时该层自动完全归零、不干扰网络规划，详见「避障架构与调参」。
 - **目标引导**：score 内已含目标方向代价（训练时 `wg=0.15`），网络原生指向目标。
 - **3D 导航**：不做水平面投影，垂直避障由网络预测的 z 终端状态决定。
 - **轨迹生成**：三轴五阶多项式（Poly5Solver）。轨迹起点取自**真实里程计外推到当前时刻**的状态（C0 位置 / C1 速度连续），C2 加速度取上次指令加速度——推理较慢时 `desire_*` 会冻结在旧轨迹末端，若从它出发会在衔接处产生跳变，故刻意不用它；`PLAN_FROM_REFERENCE` 常量仍保留但已不参与计算（仅在启动日志中打印）。轨迹连续、无往复。

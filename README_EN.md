@@ -98,16 +98,16 @@ flowchart TD
     Depth --> Calib[③ Sparse-ray metric calibration → 384×192 ERP depth map]
     Calib --> YIN
 
-    subgraph YOPO["YOPO · server-side · learning-based planning (replans ~every 70 ms)"]
+    subgraph YOPO["YOPO · server-side · learning-based planning (replans ~every 250 ms by default, tunable via ?yopoReplanMs=)"]
         direction LR
         YIN[④ Receives ERP depth + odometry + goal]
-        YIN --> Dist{⑤ Within 12 m of goal?}
+        YIN --> Dist{⑤ Within 12 m (3D) of goal?}
         Dist -->|no| Cands[⑥ Network inference: 72 candidate trajectories + score]
         Cands --> Argmin[⑦ argmin score selects best trajectory · learning-based avoidance]
         Dist -->|yes| Poly[⑧ Geometric polynomial straight to goal<br/>(skip network inference, _plan_final_approach)]
         Argmin --> Cmd[⑨ Outputs trajectory command cmdPos/Vel/Acc (desired state, not final velocity)]
         Poly --> Cmd
-        Cmd -->|replan every ~70 ms| YIN
+        Cmd -->|replan every ~250 ms (default)| YIN
     end
     class YIN,Dist,Cands,Argmin,Poly,Cmd yopo;
 
@@ -116,7 +116,7 @@ flowchart TD
     subgraph RAY["Ray-based avoidance · client-side · geometric reactive backstop (runs every 60 Hz control tick)"]
         direction LR
         Track --> Probe{"⑪ Cesium ray-ring detects a near obstacle?<br/>horizontal 360° + ground/roof clearance + three altitude layers"}
-        Probe -->|yes| Near{⑫ Within 12 m of goal AND the horizontal corridor is clear?}
+        Probe -->|yes| Near{⑫ Within 12 m horizontally of the goal AND the horizontal corridor is clear?}
         Near -->|yes| Converge["⑬ Convergence mode: directional detour zeroed (rep/tan/vGo)<br/>brake fully open (no speed limit), only vertical safety vSafe + collision backstop remain<br/>the tracked command converges straight onto the goal"]
         Near -->|no| Field["⑭ Geometric reactive correction (overrides YOPO feed-forward)<br/>rep push-away · tan detour · vGo footprint detour<br/>vRep clearing · upPush lift · vertical safety floor vSafe<br/>brake + close-gate speed limit"]
         Probe -->|no| Zero["⑮ Correction zeroed (rep/tan/brake output nothing); uses the YOPO-tracked velTarget<br/>but the clear branch is NOT a pure pass-through — two goalward shapers remain:<br/>cruise speed floor — goalward component topped up to ≥ 12 m/s (yopoCruiseMinSpd, > 5 m from goal, not arrived)<br/>final-approach governor — √(2·decel·(d−6)) converges with distance, preventing overshoot"]
@@ -736,7 +736,7 @@ acceleration/yaw commands, and drives the drone through the SimpleFlight cascade
     was removed — that was a frontend takeover parameter; this server-side one is still live.
 - **Client-side reactive safety layer (geometric potential field)**: on top of the server
   trajectory, the frontend `src/drone.js` adds a geometric reactive avoidance layer based on a Cesium
-  ray ring, to cover sudden near obstacles during the depth replanning gap (~70 ms per replan).
+  ray ring, to cover sudden near obstacles during the depth replanning gap (~250 ms per replan).
   When the path is clear this layer automatically goes to zero and never interferes with the
   network's planning — see "Avoidance Architecture and Tuning".
 - **Goal guidance**: the score already contains the goal-direction cost (trained with `wg=0.15`), so
