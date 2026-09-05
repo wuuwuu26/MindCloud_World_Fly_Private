@@ -10,7 +10,7 @@
 
 > **YOPO 导航界面展示**：右下角为机头 360° ERP 全景 RGB 与 DA360 深度图，左下角为 Target Map 俯视小地图（无人机与目标点的相对位置），右侧面板用于选取目标点、开始/停止导航，并显示导航状态、到目标距离与推理计数。
 
-[🎬 点击观看功能演示（连续避障 140MB + 脱困逃逸 60MB + 长距离飞行·洛杉矶 560MB + 长距离飞行·纽约 380MB + 长距离飞行·悉尼 315MB + 长距离飞行·伦敦 456MB 高清）](https://wuuwuu26.github.io/MindCloud_World_Fly_Private/video.html)
+[🎬 点击观看功能演示（连续避障 140MB + 脱困逃逸 60MB + 长距离飞行·洛杉矶 560MB + 长距离飞行·纽约 380MB + 长距离飞行·悉尼 315MB + 长距离飞行·伦敦 456MB 高清）](https://wuuwuu26.github.io/MindCloud_World_Fly_with_YOPO/video.html)
 
 浏览器中的 Google Photorealistic 3D Tiles 穿越机驾驶器，集成 YOPO 端到端神经网络自主导航（3D 避障）。进入页面后选择城市、放置出生点，然后用键盘、手柄或 RC 遥控器飞行，或设置目标点让 YOPO 自主导航。右下角可显示机头 360 ERP 全景 RGB 和 DA360 深度。
 
@@ -150,8 +150,8 @@ docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi
 ### 第 1 步：拉取代码
 
 ```bash
-git clone https://github.com/wuuwuu26/MindCloud_World_Fly_Private.git
-cd MindCloud_World_Fly_Private
+git clone https://github.com/wuuwuu26/MindCloud_World_Fly_with_YOPO.git
+cd MindCloud_World_Fly_with_YOPO
 ```
 
 > 注意：DA360 的**源码**已随仓库纳入版本管理（对 DA360 而言 `.gitignore` 忽略权重目录 `third_party/DA360/checkpoints/` 及 `third_party/DA360/data/images/Thumbs.db`，完整忽略清单见仓库根目录 `.gitignore`），克隆后即可获得源码；但**权重**（`DA360_large.pth`，约 1.3GB，超 GitHub 100MB 限制）未入库，需在第 2 步下载。

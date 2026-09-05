@@ -13,7 +13,7 @@
 > drone's position relative to the goal), and the panel on the right picks the goal, starts/stops
 > navigation, and displays navigation status, distance to the goal and the inference count.
 
-[🎬 Watch the demos (continuous avoidance 140MB + escape 60MB + long flight LA 560MB + long flight NY 380MB + long flight Sydney 315MB + long flight London 456MB HD)](https://wuuwuu26.github.io/MindCloud_World_Fly_Private/video_en.html)
+[🎬 Watch the demos (continuous avoidance 140MB + escape 60MB + long flight LA 560MB + long flight NY 380MB + long flight Sydney 315MB + long flight London 456MB HD)](https://wuuwuu26.github.io/MindCloud_World_Fly_with_YOPO/video_en.html)
 
 A browser-based FPV drone flying through Google Photorealistic 3D Tiles, with YOPO end-to-end
 neural-network autonomous navigation (3D obstacle avoidance). Pick a city, place a spawn point,
@@ -175,8 +175,8 @@ Other requirements:
 ### Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/wuuwuu26/MindCloud_World_Fly_Private.git
-cd MindCloud_World_Fly_Private
+git clone https://github.com/wuuwuu26/MindCloud_World_Fly_with_YOPO.git
+cd MindCloud_World_Fly_with_YOPO
 ```
 
 > Note: the DA360 **source code** is version-controlled with this repository (as far as DA360 is
