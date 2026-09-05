@@ -132,8 +132,6 @@ flowchart TD
     Arrive -->|yes| End([⑱ Hold at the goal (client-side position-hold PD)])
     class Arrive dec;
     class Start,End term;
-
-    Note["Cooperation: YOPO (server-side) branches by distance to produce the main-route trajectory command — >12 m uses network argmin (learning-based avoidance), <12 m uses a geometric polynomial straight to the goal; the client cascaded PID tracks it into velTarget, and the ray layer modifies that tracked velTarget every tick — zeroed when clear (no interference), overriding with brake/detour/clearing when a sudden obstacle appears. The ray layer backstops the ~70 ms replanning gap; within 12 m the directional detour is disabled so the drone is not shoved off the goal."]
 ```
 
 ## Quick Start (First-Time Deployment)
