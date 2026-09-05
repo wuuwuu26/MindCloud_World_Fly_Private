@@ -77,34 +77,41 @@ flowchart TD
     Depth --> Calib[③ 稀疏射线米制标定 → 384×192 ERP 深度图]
     Calib --> YIN
 
-    subgraph YOPO["YOPO · 服务端 · 学习型路径规划"]
+    subgraph YOPO["YOPO · 服务端 · 学习型路径规划（约 70 ms 重规划一次）"]
         direction LR
         YIN[④ 接收 ERP 深度 + 里程计 + 目标点]
-        YIN --> Cands[⑤ 网络推理：72 条候选轨迹 + score]
-        Cands --> Argmin[⑥ argmin score 选最优轨迹 · 学习式避障]
-        Argmin --> Final[⑦ 距目标 12 m 内由服务端几何多项式接管进近]
+        YIN --> Dist{⑤ 距目标 < 12 m？}
+        Dist -->|否| Cands[⑥ 网络推理：72 条候选轨迹 + score]
+        Cands --> Argmin[⑦ argmin score 选最优轨迹 · 学习式避障]
+        Dist -->|是| Poly[⑧ 几何多项式直连目标<br/>（跳过网络推理，_plan_final_approach）]
+        Argmin --> Cmd[⑨ 输出轨迹指令 cmdPos/Vel/Acc（期望状态，非最终速度）]
+        Poly --> Cmd
     end
-    class YIN,Cands,Argmin,Final yopo;
+    class YIN,Dist,Cands,Argmin,Poly,Cmd yopo;
 
-    Final --> Exec[⑧ 客户端级联 PID 跟踪轨迹指令]
+    Cmd --> Track[⑩ 客户端级联 PID 跟踪：位置环 Kp·误差 + 速度/加速度前馈 → 基础速度指令 velTarget]
 
-    subgraph RAY["射线避障 · 客户端 · 几何反应式兜底"]
+    subgraph RAY["射线避障 · 客户端 · 几何反应式兜底（每控制周期 60 Hz 持续运行）"]
         direction LR
-        Exec --> Probe{"⑨ Cesium 射线环探测到近障？"}
-        Probe -->|是| Field["⑩ 几何反应式势场<br/>rep 推离 · tan 绕行 · brake 刹车<br/>vRep 越障 · vGo 足迹绕行 · 垂直安全底线"]
-        Probe -->|否| Straight["⑪ 该层完全归零，沿 YOPO 指令直飞"]
-        Field --> Resume[⑫ 合成修正后的速度指令]
-        Straight --> Resume
+        Track --> Probe{"⑪ Cesium 射线环探测近障？<br/>水平 360° + 地面/顶面 clearance + 三层高度"}
+        Probe -->|是| Field["⑫ 几何反应式修正（优先于 YOPO 前馈）<br/>rep 推离 · tan 绕行 · vGo 足迹绕行<br/>vRep 越障 · upPush 抬升 · 垂直安全底线 vSafe<br/>刹车 brake + close-gate 限速"]
+        Probe -->|否| Zero["⑬ 该层输出归零，沿用 YOPO 跟踪后的 velTarget（不打扰主航线）"]
+        Field --> Synth[⑭ 合成修正后的速度指令 = velTarget + 射线修正]
+        Zero --> Synth
+        Synth --> Near{⑮ 距目标 < 12 m？}
+        Near -->|是| Converge["⑯ 关闭方向性绕行（rep/tan/vGo），仅留安全刹车与垂直兜底，收敛到目标点"]
+        Converge --> Arrive
+        Near -->|否| Arrive
     end
-    class Exec,Probe,Field,Straight,Resume ray;
+    class Probe,Field,Zero,Synth,Near,Converge ray;
 
-    Resume --> Arrive{"⑬ 到达目标 2 m 内？"}
+    Arrive{"⑰ 到达目标 2 m 内？（客户端 6 m 预锁 → 服务端判定 arrived）"}
     Arrive -->|否| YIN
-    Arrive -->|是| End([⑭ 目标点悬停])
+    Arrive -->|是| End([⑱ 目标点悬停（客户端位置保持 PD）])
     class Arrive dec;
     class Start,End term;
 
-    Note["协同：YOPO 负责主航线规划与学习式避障；射线层在深度重规划间隙（约 70 ms）兜底突发近障，路径畅通时自动关闭"]
+    Note["协同：YOPO（服务端）按距离分两路产出主航线轨迹指令——>12 m 走网络 argmin（学习式避障），<12 m 改由几何多项式直连目标；客户端级联 PID 跟踪该指令得到 velTarget，射线层在每个控制周期对「已跟踪的 velTarget」做几何反应式修正——畅通时归零、不干扰，遇突发近障时以刹车/绕行/越障优先覆盖 YOPO 前馈。重规划间隙（约 70 ms）由射线层兜底；距目标 12 m 内关闭方向性绕行，避免被推离目标点。"]
 ```
 
 ## 从零开始（首次部署）

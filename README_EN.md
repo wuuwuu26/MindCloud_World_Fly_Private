@@ -98,34 +98,41 @@ flowchart TD
     Depth --> Calib[③ Sparse-ray metric calibration → 384×192 ERP depth map]
     Calib --> YIN
 
-    subgraph YOPO["YOPO · server-side · learning-based path planning"]
+    subgraph YOPO["YOPO · server-side · learning-based planning (replans ~every 70 ms)"]
         direction LR
         YIN[④ Receives ERP depth + odometry + goal]
-        YIN --> Cands[⑤ Network inference: 72 candidate trajectories + score]
-        Cands --> Argmin[⑥ argmin score selects best trajectory · learning-based avoidance]
-        Argmin --> Final[⑦ Within 12 m of goal, server-side geometric polynomial takes over]
+        YIN --> Dist{⑤ Within 12 m of goal?}
+        Dist -->|no| Cands[⑥ Network inference: 72 candidate trajectories + score]
+        Cands --> Argmin[⑦ argmin score selects best trajectory · learning-based avoidance]
+        Dist -->|yes| Poly[⑧ Geometric polynomial straight to goal<br/>(skip network inference, _plan_final_approach)]
+        Argmin --> Cmd[⑨ Outputs trajectory command cmdPos/Vel/Acc (desired state, not final velocity)]
+        Poly --> Cmd
     end
-    class YIN,Cands,Argmin,Final yopo;
+    class YIN,Dist,Cands,Argmin,Poly,Cmd yopo;
 
-    Final --> Exec[⑧ Client-side cascaded PID tracks the command]
+    Cmd --> Track[⑩ Client cascaded PID tracking: position-loop Kp·error + vel/acc feed-forward → base velocity command velTarget]
 
-    subgraph RAY["Ray-based avoidance · client-side · geometric reactive backstop"]
+    subgraph RAY["Ray-based avoidance · client-side · geometric reactive backstop (runs every 60 Hz control tick)"]
         direction LR
-        Exec --> Probe{"⑨ Cesium ray-ring detects a near obstacle?"}
-        Probe -->|yes| Field["⑩ Geometric reactive field<br/>rep push-away · tan detour · brake<br/>vRep clearing · vGo footprint detour · vertical safety floor"]
-        Probe -->|no| Straight["⑪ Layer fully zeroed, flies straight per YOPO command"]
-        Field --> Resume[⑫ Compose the corrected velocity command]
-        Straight --> Resume
+        Track --> Probe{"⑪ Cesium ray-ring detects a near obstacle?<br/>horizontal 360° + ground/roof clearance + three altitude layers"}
+        Probe -->|yes| Field["⑫ Geometric reactive correction (overrides YOPO feed-forward)<br/>rep push-away · tan detour · vGo footprint detour<br/>vRep clearing · upPush lift · vertical safety floor vSafe<br/>brake + close-gate speed limit"]
+        Probe -->|no| Zero["⑬ Layer outputs zero; uses the YOPO-tracked velTarget (no interference)"]
+        Field --> Synth[⑭ Compose corrected command = velTarget + ray correction]
+        Zero --> Synth
+        Synth --> Near{⑮ Within 12 m of goal?}
+        Near -->|yes| Converge["⑯ Disable directional detour (rep/tan/vGo); keep only safety brake and vertical backstop; converge onto the goal"]
+        Converge --> Arrive
+        Near -->|no| Arrive
     end
-    class Exec,Probe,Field,Straight,Resume ray;
+    class Probe,Field,Zero,Synth,Near,Converge ray;
 
-    Resume --> Arrive{"⑬ Within 2 m of the goal?"}
+    Arrive{"⑰ Within 2 m of goal? (client 6 m pre-lock → server declares arrived)"}
     Arrive -->|no| YIN
-    Arrive -->|yes| End([⑭ Hold at the goal])
+    Arrive -->|yes| End([⑱ Hold at the goal (client-side position-hold PD)])
     class Arrive dec;
     class Start,End term;
 
-    Note["Cooperation: YOPO owns the main route and learning-based avoidance; the ray layer backstops sudden obstacles during the ~70 ms depth-replanning gap and auto-disables when the corridor is clear"]
+    Note["Cooperation: YOPO (server-side) branches by distance to produce the main-route trajectory command — >12 m uses network argmin (learning-based avoidance), <12 m uses a geometric polynomial straight to the goal; the client cascaded PID tracks it into velTarget, and the ray layer modifies that tracked velTarget every tick — zeroed when clear (no interference), overriding with brake/detour/clearing when a sudden obstacle appears. The ray layer backstops the ~70 ms replanning gap; within 12 m the directional detour is disabled so the drone is not shoved off the goal."]
 ```
 
 ## Quick Start (First-Time Deployment)
