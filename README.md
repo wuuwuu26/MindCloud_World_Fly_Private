@@ -100,7 +100,7 @@ flowchart TD
 
     Resume --> Arrive{"⑬ 到达目标 2 m 内？"}
     Arrive -->|否| YIN
-    Arrive -->|是| End([⑭ 目标点悬停，按 X 结束])
+    Arrive -->|是| End([⑭ 目标点悬停])
     class Arrive dec;
     class Start,End term;
 

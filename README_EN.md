@@ -121,7 +121,7 @@ flowchart TD
 
     Resume --> Arrive{"⑬ Within 2 m of the goal?"}
     Arrive -->|no| YIN
-    Arrive -->|yes| End([⑭ Hold at the goal, press X to end])
+    Arrive -->|yes| End([⑭ Hold at the goal])
     class Arrive dec;
     class Start,End term;
 
