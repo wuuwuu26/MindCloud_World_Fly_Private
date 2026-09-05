@@ -60,6 +60,8 @@
       box-shadow: 0 14px 34px rgba(0,0,0,.38);
     }
     video { width: 100%; display: block; border-radius: 8px; background: #000; }
+    .video-card .vtitle { margin: 4px 6px 6px; font-size: 18px; font-weight: 600; }
+    .video-card .vdesc { margin: 0 6px 12px; font-size: 14px; color: var(--muted); }
 
     .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
     .tag {
@@ -106,8 +108,8 @@
       </div>
       <h1>YOPO 自主导航演示</h1>
       <p class="sub">
-        两段自主飞行录屏：在 Google Photorealistic 3D Tiles 真实城市场景中，YOPO 端到端神经网络
-        持续完成三维避障，穿梭于楼宇之间；并在被围困时自主脱困逃逸。
+        五段 YOPO 自主飞行录屏，覆盖香港、洛杉矶、纽约、悉尼等真实城市：持续三维避障、楼宇穿梭、
+        被围困时自主脱困逃逸，以及长距离自主导航飞行。
       </p>
     </div>
   </header>
@@ -115,63 +117,53 @@
   <main>
     <div class="wrap">
       <div class="video-card">
+        <h3 class="vtitle">连续避障（中国香港）</h3>
+        <p class="vdesc">在 Google Photorealistic 3D Tiles 真实城市楼宇间，YOPO 端到端网络持续完成三维避障、稳定穿梭。</p>
         <video controls preload="metadata"
                src="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/continuous_avoidance_v3.mp4">
           你的浏览器不支持 HTML5 视频播放，请
           <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/continuous_avoidance_v3.mp4">直接下载观看</a>。
         </video>
-        <div class="meta">
-          <span class="tag">连续避障</span>
-          <span class="tag">MP4</span>
-          <span class="tag">2560×1440</span>
-          <span class="tag">4 分 10 秒</span>
-          <span class="tag">约 140 MB</span>
-        </div>
       </div>
 
       <div class="video-card" style="margin-top:20px;">
+        <h3 class="vtitle">脱困逃逸（中国香港）</h3>
+        <p class="vdesc">被密集障碍物围困时，YOPO 自主寻找安全路径并平稳脱困逃逸。</p>
         <video controls preload="metadata"
                src="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/escape_v3.mp4">
           你的浏览器不支持 HTML5 视频播放，请
           <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/escape_v3.mp4">直接下载观看</a>。
         </video>
-        <div class="meta">
-          <span class="tag">脱困逃逸</span>
-          <span class="tag">MP4</span>
-          <span class="tag">2560×1440</span>
-          <span class="tag">2 分 15 秒</span>
-          <span class="tag">约 60 MB</span>
-        </div>
       </div>
 
       <div class="video-card" style="margin-top:20px;">
+        <h3 class="vtitle">长距离飞行（洛杉矶）</h3>
+        <p class="vdesc">YOPO 自主导航下的长距离城市飞行，展示持续避障与航迹跟踪能力。</p>
         <video controls preload="metadata"
                src="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/long_flight_la_v1.mp4">
           你的浏览器不支持 HTML5 视频播放，请
           <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/long_flight_la_v1.mp4">直接下载观看</a>。
         </video>
-        <div class="meta">
-          <span class="tag">长距离飞行（洛杉矶）</span>
-          <span class="tag">MP4</span>
-          <span class="tag">2560×1440</span>
-          <span class="tag">17 分 12 秒</span>
-          <span class="tag">约 560 MB</span>
-        </div>
       </div>
 
       <div class="video-card" style="margin-top:20px;">
+        <h3 class="vtitle">长距离飞行（纽约）</h3>
+        <p class="vdesc">纽约城区的长距离自主飞行演示，延续同样的自主导航与避障表现。</p>
         <video controls preload="metadata"
                src="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/long_flight_new_york_v1.mp4">
           你的浏览器不支持 HTML5 视频播放，请
           <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/long_flight_new_york_v1.mp4">直接下载观看</a>。
         </video>
-        <div class="meta">
-          <span class="tag">长距离飞行（纽约）</span>
-          <span class="tag">MP4</span>
-          <span class="tag">2560×1440</span>
-          <span class="tag">13 分 26 秒</span>
-          <span class="tag">约 380 MB</span>
-        </div>
+      </div>
+
+      <div class="video-card" style="margin-top:20px;">
+        <h3 class="vtitle">长距离飞行（悉尼）</h3>
+        <p class="vdesc">悉尼城区的长距离自主飞行演示，验证跨城市场景的泛化能力。</p>
+        <video controls preload="metadata"
+               src="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/long_flight_sydney_v1.mp4">
+          你的浏览器不支持 HTML5 视频播放，请
+          <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/long_flight_sydney_v1.mp4">直接下载观看</a>。
+        </video>
       </div>
 
       <div class="grid">
@@ -199,6 +191,7 @@
         <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/escape_v3.mp4">下载脱困视频（约 60 MB）</a>
         <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/long_flight_la_v1.mp4">下载长距离飞行视频（约 560 MB）</a>
         <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/long_flight_new_york_v1.mp4">下载长距离飞行视频·纽约（约 380 MB）</a>
+        <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/download/v1.0/long_flight_sydney_v1.mp4">下载长距离飞行视频·悉尼（约 315 MB）</a>
         <a href="https://github.com/wuuwuu26/MindCloud_World_Fly_Private/releases/tag/v1.0">Release v1.0</a>
       </div>
     </div>
