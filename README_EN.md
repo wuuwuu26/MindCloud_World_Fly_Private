@@ -664,6 +664,46 @@ Powered by the YOPO end-to-end navigation network, the drone can fly autonomousl
 YOPO takes the ERP panoramic depth map, odometry and the goal, outputs position/velocity/
 acceleration/yaw commands, and drives the drone through the SimpleFlight cascaded PID controller.
 
+The whole flow at a glance (the sections below expand it stage by stage):
+
+```mermaid
+mindmap
+  root((YOPO Autonomous Navigation))
+    Set the goal
+      Press T for goal mode
+      Left-click to place
+      Numpad fine-tuning
+      Numpad 5 confirms and starts
+      Numpad 0 or Esc cancels
+    Depth input
+      DA360 panoramic depth
+      Inference size follows upload
+      Sparse-ray metric calibration
+      384x192 ERP output
+    Server-side decision
+      72 candidate trajectories
+      argmin score selection
+      Learning-based avoidance
+      Final 12 m geometric takeover
+      Quintic polynomial at 50 Hz
+    Client-side execution
+      Cascaded PID tracking
+      Geometric reactive field
+        rep radial push-away
+        tan tangential detour
+        brake near-obstacle braking
+        vRep vertical clearing
+        vGo footprint detour
+        Vertical safety floor
+      Zeroed when corridor is clear
+      12 m wing-envelope guard
+    Arrival and exit
+      Server 2 m arrival
+      Client 6 m backstop
+      Hold at the goal
+      Press X to end
+```
+
 ### Navigation Architecture (Aligned with Upstream YOPO)
 
 - **Network input**: `depth (1,2,192,384)` (channel 0 = normalized depth, channel 1 = validity mask)
