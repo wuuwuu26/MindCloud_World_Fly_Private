@@ -116,20 +116,19 @@ flowchart TD
     subgraph RAY["Ray-based avoidance · client-side · geometric reactive backstop (runs every 60 Hz control tick)"]
         direction LR
         Track --> Probe{"⑪ Cesium ray-ring detects a near obstacle?<br/>horizontal 360° + ground/roof clearance + three altitude layers"}
-        Probe -->|yes| Field["⑫ Geometric reactive correction (overrides YOPO feed-forward)<br/>rep push-away · tan detour · vGo footprint detour<br/>vRep clearing · upPush lift · vertical safety floor vSafe<br/>brake + close-gate speed limit"]
-        Probe -->|no| Zero["⑬ Layer outputs zero; uses the YOPO-tracked velTarget (no interference)"]
-        Field --> Synth[⑭ Compose corrected command = velTarget + ray correction]
+        Probe -->|yes| Near{⑫ Within 12 m of goal AND the horizontal corridor is clear?}
+        Near -->|yes| Converge["⑬ Convergence mode: directional detour zeroed (rep/tan/vGo)<br/>brake fully open (no speed limit), only vertical safety vSafe + collision backstop remain<br/>the tracked command converges straight onto the goal"]
+        Near -->|no| Field["⑭ Geometric reactive correction (overrides YOPO feed-forward)<br/>rep push-away · tan detour · vGo footprint detour<br/>vRep clearing · upPush lift · vertical safety floor vSafe<br/>brake + close-gate speed limit"]
+        Probe -->|no| Zero["⑮ Layer outputs zero; uses the YOPO-tracked velTarget (no interference)"]
+        Converge --> Synth[⑯ Compose corrected command = velTarget + ray correction]
+        Field --> Synth
         Zero --> Synth
-        Synth --> Near{⑮ Within 12 m of goal?}
-        Near -->|yes| Converge["⑯ Disable directional detour (rep/tan/vGo); keep only safety brake and vertical backstop; converge onto the goal"]
-        Converge --> Arrive
-        Near -->|no| YIN
     end
-    class Probe,Field,Zero,Synth,Near,Converge ray;
+    class Probe,Near,Converge,Field,Zero,Synth ray;
 
-    Arrive{"⑰ Within 2 m of goal? (client 6 m pre-lock → server declares arrived)"}
+    Synth --> Arrive{"⑰ Arrival latched? (client-side distance-only pre-lock at < 6 m, no speed gate — the only arrival verdict; the server's 2 m flag is internal only and never sent back to the client)"}
     Arrive -->|no| YIN
-    Arrive -->|yes| End([⑱ Hold at the goal (client-side position-hold PD)])
+    Arrive -->|yes| End([⑱ Hold at the goal: client-side position-hold PD; the ray layer keeps backstopping (directional push zeroed, passive brake + vSafe still active)])
     class Arrive dec;
     class Start,End term;
 ```

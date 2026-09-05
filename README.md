@@ -95,20 +95,19 @@ flowchart TD
     subgraph RAY["射线避障 · 客户端 · 几何反应式兜底（每控制周期 60 Hz 持续运行）"]
         direction LR
         Track --> Probe{"⑪ Cesium 射线环探测近障？<br/>水平 360° + 地面/顶面 clearance + 三层高度"}
-        Probe -->|是| Field["⑫ 几何反应式修正（优先于 YOPO 前馈）<br/>rep 推离 · tan 绕行 · vGo 足迹绕行<br/>vRep 越障 · upPush 抬升 · 垂直安全底线 vSafe<br/>刹车 brake + close-gate 限速"]
-        Probe -->|否| Zero["⑬ 该层输出归零，沿用 YOPO 跟踪后的 velTarget（不打扰主航线）"]
-        Field --> Synth[⑭ 合成修正后的速度指令 = velTarget + 射线修正]
+        Probe -->|是| Near{⑫ 距目标 < 12 m 且水平通道畅通？}
+        Near -->|是| Converge["⑬ 收敛模式：方向性绕行归零（rep/tan/vGo）<br/>刹车全开、不再限速，仅留垂直安全 vSafe + 碰撞兜底<br/>由跟踪指令直接向目标收敛"]
+        Near -->|否| Field["⑭ 几何反应式修正（优先于 YOPO 前馈）<br/>rep 推离 · tan 绕行 · vGo 足迹绕行<br/>vRep 越障 · upPush 抬升 · 垂直安全底线 vSafe<br/>刹车 brake + close-gate 限速"]
+        Probe -->|否| Zero["⑮ 该层输出归零，沿用 YOPO 跟踪后的 velTarget（不打扰主航线）"]
+        Converge --> Synth[⑯ 合成修正后的速度指令 = velTarget + 射线修正]
+        Field --> Synth
         Zero --> Synth
-        Synth --> Near{⑮ 距目标 < 12 m？}
-        Near -->|是| Converge["⑯ 关闭方向性绕行（rep/tan/vGo），仅留安全刹车与垂直兜底，收敛到目标点"]
-        Converge --> Arrive
-        Near -->|否| YIN
     end
-    class Probe,Field,Zero,Synth,Near,Converge ray;
+    class Probe,Near,Converge,Field,Zero,Synth ray;
 
-    Arrive{"⑰ 到达目标 2 m 内？（客户端 6 m 预锁 → 服务端判定 arrived）"}
+    Synth --> Arrive{"⑰ 到达锁定？（客户端距目标 < 6 m 距离预锁，无速度门——唯一的到达判定；服务端 2 m 判定仅内部标记，不回传客户端）"}
     Arrive -->|否| YIN
-    Arrive -->|是| End([⑱ 目标点悬停（客户端位置保持 PD）])
+    Arrive -->|是| End([⑱ 目标点悬停：客户端位置保持 PD，射线层仍兜底（方向性推力归零，被动刹车 + vSafe 生效）])
     class Arrive dec;
     class Start,End term;
 ```
